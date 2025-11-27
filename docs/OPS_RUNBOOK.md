@@ -48,10 +48,26 @@ Escalation steps follow `GOVERNANCE.md` matrix; severe incidents require manual 
 
 ## Tooling & Automation
 - APScheduler for cron-like orchestration (`run_daily_trade`, `midday_check`, `eod_closure` jobs).
-- Observability stack (Prometheus + Grafana or Streamlit) for live monitoring.
+- Runtime CLI (`poetry run python -m cli.runtime <cmd>`) for tick execution and health snapshots.
+- Observability stack (Prometheus + Grafana or Streamlit) for live monitoring; Prom metrics exposed via `infra.metrics`.
+- Streamlit telemetry dashboard: `poetry run streamlit run src/observability/dashboard.py` (shows runtime health, portfolio, provider status, Prometheus tick stats).
+- Alert notifier fan-out configured via `ALERT_*` env vars (webhook URL, min severity, per-action overrides); risk/compliance agents emit alerts on `risk_alert`, `risk_reject`, and `compliance_reject`.
 - Slack/email/webhook notifications for alerts.
+
+### Bootstrap Procedure
+1. `poetry install && poetry shell`
+2. Populate `.env` with API keys + runtime config (tick interval, enabled agents).
+3. Validate data providers: `poetry run python -m cli.runtime health`
+4. Execute shakedown tick: `poetry run python -m cli.runtime run-once`
+5. Start scheduler/daemon (systemd, Supervisor, or container entrypoint) calling `run-loop`.
+
+### Health Check Script
+- `poetry run python -m cli.runtime health --raw` returns JSON (agents, providers, portfolio snapshot).
+- Integrate command into APScheduler job; non-zero exit triggers pager escalation.
+- Prometheus scrapes `runtime_bus_depth`, `agent_tick_duration_seconds`, and other counters.
 
 ## Documentation & Reporting
 - Update `CHANGELOG.md` for material process changes.
 - Store runbooks/playbooks version in `AUDIT_TRAIL`.
 - Ensure on-call roster and contact info remain current.
+- Archive `storage/audit/runtime_events.jsonl` nightly to long-term storage; rotate weekly.

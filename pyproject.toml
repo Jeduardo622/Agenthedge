@@ -1,3 +1,46 @@
+[tool.poetry]
+name = "agenthedge"
+version = "0.1.0"
+description = "Autonomous multi-agent hedge fund simulator"
+authors = ["Agent Hedge <dev@agenthedge.local>"]
+readme = "README.md"
+packages = [
+  { include = "agents", from = "src" },
+  { include = "audit", from = "src" },
+  { include = "cli", from = "src" },
+  { include = "data", from = "src" },
+  { include = "infra", from = "src" },
+  { include = "portfolio", from = "src" },
+]
+
+[tool.poetry.dependencies]
+python = "^3.12"
+openai = ">=1.52.0"
+python-dotenv = ">=1.0.1"
+pypdf = ">=4.3.1"
+requests = ">=2.32.3"
+pandas = ">=2.2.3"
+numpy = ">=2.1.2"
+yfinance = ">=0.2.48"
+alpha-vantage = ">=2.3.1"
+finnhub-python = ">=2.4.18"
+newsapi-python = ">=0.2.7"
+fredapi = ">=0.5.2"
+ta = ">=0.11.0"
+fmp-python = "==0.1.5"
+apscheduler = ">=3.10.4"
+prometheus-client = ">=0.20.0"
+streamlit = ">=1.39.0"
+typer = ">=0.12.5"
+
+[tool.poetry.group.dev.dependencies]
+pytest = ">=8.3.2"
+pytest-cov = ">=5.0.0"
+pre-commit = ">=3.8.0"
+black = ">=24.10.0"
+flake8 = ">=7.1.1"
+mypy = ">=1.11.2"
+
 [tool.black]
 line-length = 100
 target-version = ["py312"]
@@ -43,7 +86,12 @@ exclude = [
   "\\.venv",
   "build",
   "dist",
+  "tests",
 ]
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+ignore_errors = true
 
 [tool.pytest.ini_options]
 addopts = "-ra -q --color=yes"

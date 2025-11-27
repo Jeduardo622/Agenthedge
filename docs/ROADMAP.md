@@ -8,15 +8,16 @@ Derived from `Designing an Autonomous Multi-Agent Financial Trading System.pdf` 
 - Implement data pipeline skeleton with caching + rate limiting wrappers (yfinance, Alpha Vantage, FRED, NewsAPI).
 
 ## Phase 1 — Core Multi-Agent Loop (Week 2-4)
-- Build Director + Quant + Risk + Compliance + Execution agents using OpenAI Agents SDK (agents-as-tools pattern).
-- Implement orchestrator run-loop (ingest ➝ analysis ➝ decision ➝ approvals ➝ execution).
-- Add paper-trading engine and portfolio state store.
-- Deliver MVP dashboard/logging (text-based) plus `AUDIT_TRAIL` storage.
+- ✅ Director, Quant, Risk, Compliance, and Execution agents wired through the in-process message bus.
+- ✅ `AgentRuntime` sequencing enforces ingest ➝ proposal ➝ approvals ➝ execution, sharing a paper portfolio ledger.
+- ✅ JSON-backed paper-trading store persists to `storage/strategy_state/portfolio.json`.
+- ✅ CLI health/run-loop commands (`poetry run python -m cli.runtime …`) plus JSONL audit sink in `storage/audit/runtime_events.jsonl`.
+- ✅ Streamlit observability dashboard (`src/observability/dashboard.py`) surfaces runtime health, metrics, and provider status.
 
 ## Phase 2 — Risk & Compliance Hardening (Week 5-6)
 - Encode risk policies (exposure, VaR, stop-loss, drawdown) and compliance rules (restricted lists, prohibited tactics).
 - Add automated stress tests, scenario analysis, and kill-switch automation.
-- Integrate alerting hooks (email/webhook) for escalations.
+- ✅ Integrate alerting hooks (webhook/stdout notifier + runtime/agent wiring for risk & compliance breaches).
 
 ## Phase 3 — Observability & Ops (Week 7-8)
 - Expand logging to structured format + rotating storage.
@@ -43,3 +44,4 @@ Derived from `Designing an Autonomous Multi-Agent Financial Trading System.pdf` 
 - LLM cost/latency → consider batching prompts or lightweight models for frequent tasks.
 - Data quality issues → implement validation and data quarantine per `DATA_GOVERNANCE.md`.
 - Regulatory changes → maintain watchlist via Compliance agent feed.
+- Runtime relies on local JSON stores; ensure shared storage (S3/Azure Files) before multi-node deployment.

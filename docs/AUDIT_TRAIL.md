@@ -20,7 +20,7 @@ Inspired by `ExecSpec.md` (auditability) and `Designing an Autonomous Multi-Agen
 | `approvals` | Sign-offs (risk/compliance) with status + rationale. |
 | `hash` | Cryptographic hash for tamper detection. |
 
-Store records in append-only log (e.g. JSONL) plus replicated datastore (S3, database). Apply daily hashing chain (Merkle tree or sequential hash) for integrity.
+Store records in append-only log (JSONL) plus replicated datastore (S3, database). Apply daily hashing chain (Merkle tree or sequential hash) for integrity.
 
 ## Retention & Access
 - **Retention:** 7 years default (configurable per jurisdiction). Hot storage 90 days, warm storage 1 year, cold archive remainder.
@@ -43,3 +43,16 @@ Store records in append-only log (e.g. JSONL) plus replicated datastore (S3, dat
 ## Compliance Alignment
 - Meets MiFID II and SEC Rule 613 expectations for algorithmic trading records (orders, quotes, decisions, timestamps).
 - Supports SOC2 evidence gathering by proving change management + incident response actions were executed.
+
+## Implementation Notes (Phase 1)
+- Default sink: `storage/audit/runtime_events.jsonl` via `audit.JsonlAuditSink`.
+- Serialization schema:
+  ```json
+  {
+    "timestamp": "2025-01-01T12:00:00Z",
+    "action": "execution_fill",
+    "payload": { "... agent-defined fields ..." }
+  }
+  ```
+- Agents call `BaseAgent.audit(action, payload)` and the runtime injects the sink through `AgentContext`.
+- Files rotate via ops process (weekly by default); include in backup cadence.

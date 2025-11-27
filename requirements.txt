@@ -19,6 +19,7 @@ fmp-python==0.1.5
 apscheduler>=3.10.4
 prometheus-client>=0.20.0
 streamlit>=1.39.0
+typer>=0.12.5
 
 # Testing & dev experience
 pytest>=8.3.2
