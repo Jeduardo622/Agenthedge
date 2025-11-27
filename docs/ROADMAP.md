@@ -15,8 +15,8 @@ Derived from `Designing an Autonomous Multi-Agent Financial Trading System.pdf` 
 - ✅ Streamlit observability dashboard (`src/observability/dashboard.py`) surfaces runtime health, metrics, and provider status.
 
 ## Phase 2 — Risk & Compliance Hardening (Week 5-6)
-- Encode risk policies (exposure, VaR, stop-loss, drawdown) and compliance rules (restricted lists, prohibited tactics).
-- Add automated stress tests, scenario analysis, and kill-switch automation.
+- 🚧 Encode risk policies (exposure, VaR, stop-loss, drawdown) and compliance rules (restricted lists, prohibited tactics). *Current state:* Risk agent enforces simple notional limits and volatility alerts; VaR/drawdown math and prohibited-behavior screens still pending.
+- 🚧 Add automated stress tests, scenario analysis, and kill-switch automation. *Current state:* No stress-test harness or kill-switch wiring implemented yet.
 - ✅ Integrate alerting hooks (webhook/stdout notifier + runtime/agent wiring for risk & compliance breaches).
 
 ## Phase 3 — Observability & Ops (Week 7-8)
