@@ -6,6 +6,7 @@ import math
 import os
 import statistics
 from collections import deque
+from datetime import datetime, timezone
 from typing import Any, Deque, Dict, List, Mapping, Sequence
 
 from observability.state import ObservabilityState
@@ -140,9 +141,13 @@ class RiskAgent(BaseAgent):
                 notional,
                 limit,
             )
-            payload = {"proposal_id": proposal_id, "symbol": symbol, "reason": "notional_limit"}
-            self.audit("risk_reject", payload)
-            self.alert("risk_reject", payload, severity="error")
+            self._reject_with_reason(
+                proposal_id,
+                symbol,
+                reason="notional_limit",
+                extra={"notional": round(notional, 2), "limit": round(limit, 2)},
+                strategies=payload.get("strategies"),
+            )
             return
         if leverage > self.max_leverage:
             self._reject_with_reason(
@@ -185,6 +190,10 @@ class RiskAgent(BaseAgent):
                 },
             },
         }
+        if "strategies" in payload:
+            approval["strategies"] = payload.get("strategies")
+        if "confidence" in payload:
+            approval["confidence"] = payload.get("confidence")
         self._update_observability(
             nav=nav,
             gross=gross,
@@ -243,6 +252,7 @@ class RiskAgent(BaseAgent):
         *,
         reason: str,
         extra: Mapping[str, float | int | str] | None = None,
+        strategies: Sequence[Mapping[str, Any]] | None = None,
     ) -> None:
         payload: Dict[str, Any] = {
             "proposal_id": proposal_id,
@@ -253,6 +263,8 @@ class RiskAgent(BaseAgent):
             payload.update(extra)
         self.audit("risk_reject", payload)
         self.alert("risk_reject", payload, severity="error")
+        if strategies:
+            self._emit_strategy_feedback(strategies, reason=f"risk_{reason}", delta=-0.2)
 
     def _build_exposure_table(self, snapshot: PortfolioSnapshot) -> Dict[str, float]:
         exposures: Dict[str, float] = {}
@@ -340,6 +352,9 @@ class RiskAgent(BaseAgent):
         self.bus.publish("risk.kill_switch", payload=payload)
         self.alert("risk_kill_switch", payload, severity="critical")
         self.audit("risk_kill_switch", payload)
+        strategies = details.get("strategies")
+        if isinstance(strategies, list):
+            self._emit_strategy_feedback(strategies, reason=reason, delta=-0.5)
 
     def _check_stop_loss(
         self,
@@ -407,3 +422,23 @@ class RiskAgent(BaseAgent):
             payload["last_stress_run"] = stress
         if payload:
             self._observability_state.update_risk(payload)
+
+    def _emit_strategy_feedback(
+        self,
+        strategies: Sequence[Mapping[str, Any]],
+        *,
+        reason: str,
+        delta: float,
+    ) -> None:
+        for entry in strategies:
+            name = entry.get("strategy")
+            if not isinstance(name, str) or not name:
+                continue
+            payload = {
+                "strategy": name,
+                "delta": delta,
+                "reason": reason,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+            self.bus.publish("strategy.feedback", payload=payload)
+            self.audit("strategy_feedback", payload)

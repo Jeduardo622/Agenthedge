@@ -103,6 +103,7 @@ compliance_obs = observability.get("compliance", {})
 alerts_obs = observability.get("alerts", {})
 schedulers_obs = observability.get("scheduler", {})
 audit_obs = observability.get("audit", {})
+strategy_obs = observability.get("strategies", {})
 prometheus_rows: List[Dict[str, Any]] = []
 prom_bus_depth: float | None = None
 prometheus_url = _prometheus_url()
@@ -163,6 +164,26 @@ compliance_df = pd.DataFrame(
     ]
 )
 st.dataframe(compliance_df, hide_index=True)
+
+st.subheader("Strategy Council Weights")
+if strategy_obs:
+    strategy_rows = []
+    for name, stats in strategy_obs.items():
+        entry = {
+            "strategy": name,
+            "weight": round(float(stats.get("weight", 1.0) or 1.0), 3),
+            "trades": int(stats.get("trades") or 0),
+            "wins": int(stats.get("wins") or 0),
+            "losses": int(stats.get("losses") or 0),
+            "avg_confidence": round(float(stats.get("avg_confidence") or 0.0), 3),
+            "penalties": int(stats.get("penalties") or 0),
+            "realized_pnl": round(float(stats.get("realized_pnl") or 0.0), 2),
+        }
+        strategy_rows.append(entry)
+    strategy_df = pd.DataFrame(strategy_rows)
+    st.dataframe(strategy_df, use_container_width=True, hide_index=True)
+else:
+    st.info("No strategy telemetry available yet.")
 
 st.divider()
 

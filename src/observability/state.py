@@ -22,6 +22,7 @@ class ObservabilityState:
         }
         self._scheduler: Dict[str, Any] = {}
         self._audit: Dict[str, Any] = {}
+        self._strategies: Dict[str, Any] = {}
         self._last_updated: str | None = None
 
     def update_risk(self, payload: Mapping[str, Any]) -> None:
@@ -69,6 +70,11 @@ class ObservabilityState:
             self._audit = dict(payload)
             self._touch()
 
+    def update_strategies(self, payload: Mapping[str, Any]) -> None:
+        with self._lock:
+            self._strategies = dict(payload)
+            self._touch()
+
     def snapshot(self) -> MutableMapping[str, Any]:
         with self._lock:
             recent_alerts = list(self._recent_alerts)
@@ -81,6 +87,7 @@ class ObservabilityState:
                 },
                 "scheduler": dict(self._scheduler),
                 "audit": dict(self._audit),
+                "strategies": dict(self._strategies),
                 "last_updated": self._last_updated,
             }
 

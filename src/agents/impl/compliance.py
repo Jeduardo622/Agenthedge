@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import os
-from typing import Any, Dict, Iterable, List, Mapping
+from datetime import datetime, timezone
+from typing import Any, Dict, Iterable, List, Mapping, Sequence
 
 from observability.state import ObservabilityState
 from portfolio.store import PortfolioStore
@@ -74,6 +75,9 @@ class ComplianceAgent(BaseAgent):
         price = _as_float(payload.get("price"))
         quantity = _as_float(payload.get("quantity"))
         proposal_id = payload.get("proposal_id")
+        strategies = (
+            payload.get("strategies") if isinstance(payload.get("strategies"), list) else None
+        )
         if not symbol or price is None or quantity is None or not proposal_id:
             return
         if symbol in self.restricted:
@@ -81,6 +85,8 @@ class ComplianceAgent(BaseAgent):
             self.audit("compliance_reject", payload)
             self.alert("compliance_reject", payload, severity="error")
             self._record_compliance(approved=False)
+            if strategies:
+                self._emit_strategy_feedback(strategies, reason="restricted_symbol")
             return
         prohibited_reason = self._detect_prohibited_behavior(payload)
         if prohibited_reason:
@@ -93,6 +99,8 @@ class ComplianceAgent(BaseAgent):
             self.audit("compliance_reject", payload)
             self.alert("compliance_reject", payload, severity="critical")
             self._record_compliance(approved=False)
+            if strategies:
+                self._emit_strategy_feedback(strategies, reason=prohibited_reason, delta=-0.3)
             return
         snapshot = self.portfolio_store.snapshot()
         current_qty = (
@@ -114,6 +122,8 @@ class ComplianceAgent(BaseAgent):
             self.audit("compliance_reject", payload)
             self.alert("compliance_reject", payload, severity="error")
             self._record_compliance(approved=False)
+            if strategies:
+                self._emit_strategy_feedback(strategies, reason="concentration_limit")
             return
         approval = {
             **payload,
@@ -161,3 +171,23 @@ class ComplianceAgent(BaseAgent):
     def _record_compliance(self, *, approved: bool) -> None:
         if self._observability_state:
             self._observability_state.increment_compliance(approved=approved)
+
+    def _emit_strategy_feedback(
+        self,
+        strategies: Sequence[Mapping[str, Any]],
+        *,
+        reason: str,
+        delta: float = -0.2,
+    ) -> None:
+        for entry in strategies:
+            name = entry.get("strategy")
+            if not isinstance(name, str) or not name:
+                continue
+            payload = {
+                "strategy": name,
+                "delta": delta,
+                "reason": f"compliance_{reason}",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+            self.bus.publish("strategy.feedback", payload=payload)
+            self.audit("strategy_feedback", payload)

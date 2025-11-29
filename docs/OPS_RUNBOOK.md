@@ -60,6 +60,7 @@ Escalation steps follow `GOVERNANCE.md` matrix; severe incidents require manual 
 - Alert notifier fan-out configured via `ALERT_*` env vars (webhook URL, min severity, per-action overrides); risk/compliance agents emit alerts on `risk_alert`, `risk_reject`, `risk_stop_loss`, `risk_stress_breach`, and `compliance_reject`.
 - Kill-switch topics: `risk.kill_switch`, `compliance.kill_switch`, `runtime.kill_switch` — all funnel into runtime halt handling.
 - Slack/email/webhook notifications for alerts.
+- Backtest CLI: `poetry run python scripts/backtest_strategy.py --symbol SPY --symbol QQQ --start 2024-01-02 --end 2024-01-31 --capital 1000000` writes artifacts to `storage/backtests/<run_id>/` (portfolio snapshot, audit log, result.json).
 
 ## Logging
 - `infra.logging.configure_logging` wires console + JSON file handlers (rotating daily, 7-day retention). Files under `storage/logs/agenthedge.log*`.
@@ -77,6 +78,13 @@ Escalation steps follow `GOVERNANCE.md` matrix; severe incidents require manual 
 - `poetry run python -m cli.runtime health --raw` returns JSON (agents, providers, portfolio snapshot).
 - Integrate command into APScheduler job; non-zero exit triggers pager escalation.
 - Prometheus scrapes `runtime_bus_depth`, `agent_tick_duration_seconds`, and other counters.
+
+## Backtesting & Promotion
+1. **Prepare Scenario:** Choose symbols, start/end dates, and capital assumptions. Ensure the Strategy Council configuration (enabled plug-ins) matches the intended deployment set.
+2. **Run CLI:** `poetry run python scripts/backtest_strategy.py --symbol <ticker> ... --start YYYY-MM-DD --end YYYY-MM-DD --capital N`. Store the resulting run directory (`storage/backtests/<run_id>/`) alongside the change request.
+3. **Review Artifacts:** Inspect `result.json` (NAV curve, trades, fills), audit log, and generated performance tracker weights. Reject promotion if trades < expected threshold or return profile violates mandates.
+4. **Update Tracker:** Copy approved weights into the live environment (or allow the runtime tracker to ingest the backtest performance JSON) before re-enabling the strategy.
+5. **Observability:** Confirm the Streamlit dashboard reflects the latest strategy weights and penalties in the “Strategy Council Weights” section prior to go-live.
 
 ## Documentation & Reporting
 - Update `CHANGELOG.md` for material process changes.

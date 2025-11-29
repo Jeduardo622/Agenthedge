@@ -29,6 +29,9 @@ Informed by the Technical Implementation Plan (CI/CD, sanity checks) and the arc
 6. **Observability Tests**
    - Logs include required metadata.
    - Metrics exported under expected labels.
+7. **Backtest Harness**
+   - `tests/backtest/test_engine.py` validates deterministic strategy council runs on synthetic data.
+   - `scripts/backtest_strategy.py` smoke test (short window) must produce artifacts and non-zero trade count before shipping new strategy mixes.
 
 ## Tooling & Automation
 - **pytest** with coverage thresholds ≥80% for core modules.
@@ -45,6 +48,7 @@ Informed by the Technical Implementation Plan (CI/CD, sanity checks) and the arc
 - `scripts/health_check.py` ensures API keys + data sources reachable.
 - `scripts/risk_sanity.py` runs quick VaR/drawdown check before trading.
 - `scripts/backtest_strategy.py` validates strategy before enabling live cycle.
+- `poetry run python scripts/backtest_strategy.py --symbol SPY --start 2024-01-02 --end 2024-01-05 --capital 100000` should complete within CI budget and attach the resulting `storage/backtests/<run_id>/result.json` as an artifact for code review.
 
 ## Reporting
 - Test reports exported as JUnit XML for CI artifacts.

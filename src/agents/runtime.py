@@ -13,6 +13,7 @@ from audit import JsonlAuditSink
 from data.cache import TTLCache
 from data.ingestion import DataIngestionService
 from infra.metrics import PrometheusMetricSink
+from learning.performance import PerformanceTracker
 from observability.alerts import AlertNotifier
 from observability.state import ObservabilityState
 from portfolio.store import PortfolioStore
@@ -25,6 +26,7 @@ from .registry import AgentRegistry
 
 DEFAULT_AUDIT_PATH = Path("storage/audit/runtime_events.jsonl")
 DEFAULT_PORTFOLIO_PATH = Path("storage/strategy_state/portfolio.json")
+DEFAULT_PERFORMANCE_PATH = Path("storage/strategy_state/performance.json")
 
 
 class AgentRuntime:
@@ -57,6 +59,9 @@ class AgentRuntime:
         self._alert_sink = self.alert_notifier.notify if self.alert_notifier else None
         self._audit_report_dir = Path(os.environ.get("AUDIT_REPORT_DIR", "storage/audit/reports"))
         self._observability_state = observability_state
+        self._performance_tracker = PerformanceTracker(
+            Path(os.environ.get("PERFORMANCE_TRACKER_PATH", DEFAULT_PERFORMANCE_PATH))
+        )
         self._agents: List[BaseAgent] = []
         self._agent_names: List[str] = []
         self._thread: threading.Thread | None = None
@@ -87,6 +92,7 @@ class AgentRuntime:
                     "observability_state": self._observability_state,
                     "audit_path": self._audit_path,
                     "audit_report_dir": self._audit_report_dir,
+                    "performance_tracker": self._performance_tracker,
                 },
                 alert_sink=self._alert_sink,
             ).with_message_bus(self.bus)

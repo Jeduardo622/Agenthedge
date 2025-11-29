@@ -26,9 +26,9 @@ Derived from `Designing an Autonomous Multi-Agent Financial Trading System.pdf` 
 - ✅ Add automated audit agent for weekly compliance reviews with JSON report artifacts. *Current state:* Reports emitted under `storage/audit/reports/` and surfaced in dashboard/audit state.
 
 ## Phase 4 — Advanced Strategy & Learning (Week 9-10)
-- Introduce multiple strategy agents (momentum, value, macro) with debate/consensus logic.
-- Add reinforcement or feedback loops to adapt allocations based on performance.
-- Backtest module using historical data to validate strategies pre-deployment.
+- ✅ Strategy Council now federates multiple strategy plug-ins (`src/strategies/*`, `src/agents/impl/quant.py`) with quorum/weighting logic plus dedicated `strategy.proposal.*` topics.
+- ✅ Reinforcement loop implemented via the performance tracker (`src/learning/performance.py`) and `strategy.feedback` penalties emitted by Risk/Compliance to down-rank problematic strategies.
+- ✅ Backtest package + CLI (`src/backtest/engine.py`, `src/cli/backtest.py`, `scripts/backtest_strategy.py`) replays historical data, persists artifacts under `storage/backtests/`, and must pass before promoting new strategy mixes.
 
 ## Milestone Checkpoints
 | Milestone | Exit Criteria |

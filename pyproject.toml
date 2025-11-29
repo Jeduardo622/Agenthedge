@@ -8,10 +8,13 @@ packages = [
   { include = "agents", from = "src" },
   { include = "audit", from = "src" },
   { include = "cli", from = "src" },
+  { include = "backtest", from = "src" },
   { include = "data", from = "src" },
   { include = "infra", from = "src" },
   { include = "portfolio", from = "src" },
   { include = "risk", from = "src" },
+  { include = "learning", from = "src" },
+  { include = "strategies", from = "src" },
 ]
 
 [tool.poetry.dependencies]

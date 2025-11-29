@@ -7,7 +7,7 @@ The hedge fund follows a multi-agent hierarchy modeled after a human investment 
 | Agent | Responsible | Accountable | Consulted | Informed |
 | --- | --- | --- | --- | --- |
 | Director (CEO/PM) | Strategy orchestration, final approvals | Sponsors/Board | Quant, Risk, Compliance, Execution | All agents, human overseers |
-| Quant Research | Idea generation, data-backed trade proposals | Director | Data/Ticker, Execution (for feasibility) | Risk, Compliance |
+| Quant Research / Strategy Council | Multi-strategy council (momentum, value, macro) that debates directives and emits consensus proposals via `strategy.proposal.*` topics | Director | Data/Ticker, Execution (for feasibility) | Risk, Compliance |
 | Risk Management | Scenario analysis, limit enforcement, kill switches | Director | Quant (for adjustments), Compliance | Execution |
 | Compliance | Regulatory checks, policy enforcement, audit logging | Director | Risk, Legal (if available) | All |
 | Execution | Order routing, fill optimization, reconciliation | Director | Risk (for limits), Compliance (for restrictions) | Data, Post-trade analytics |
@@ -15,7 +15,7 @@ The hedge fund follows a multi-agent hierarchy modeled after a human investment 
 
 ## Decision Workflow
 1. **Strategic Directive:** Director sets focus (markets, themes, risk appetite) per daily/weekly cadence.
-2. **Research Cycle:** Quant agents collect data, run models, and produce structured trade proposals (entry/exit, conviction, dependencies).
+2. **Research Cycle:** The Strategy Council instantiates approved plug-ins, evaluates directives, blends signals via quorum/weighting, and produces structured trade proposals (entry/exit, conviction, strategy lineage).
 3. **Parallel Review:** Risk scales or rejects proposals; Compliance screens regulatory aspects simultaneously.
 4. **Final Assembly:** Director reconciles feedback, packages approved trade plan, and sets execution priorities.
 5. **Execution & Monitoring:** Execution agent routes orders, confirms fills, and shares metrics. Risk and Compliance continue post-trade monitoring and escalate breaches if detected.
@@ -47,5 +47,11 @@ The hedge fund follows a multi-agent hierarchy modeled after a human investment 
 - Risk KPIs: VaR utilization, drawdown, limit breaches.
 - Compliance KPIs: Blocked trades count, audit findings, policy refresh cadence.
 - Ops KPIs: Data latency, execution slippage, agent uptime.
+- Strategy KPIs: Real-time council weights, per-strategy win/loss counts, recent `strategy.feedback` penalties, and latest backtest performance snapshots.
+
+## Adaptive Strategy Governance
+- **Performance Tracker:** `src/learning/performance.py` records fills, win/loss ratios, and confidence per strategy. Risk and Compliance can publish `strategy.feedback` penalties to down-rank misbehaving agents in real time.
+- **Promotion Gate:** Every new strategy mix must ship with a backtest artifact (`src/backtest/engine.py`, CLI in `src/cli/backtest.py`) stored under `storage/backtests/<run_id>/` and referenced in approvals before live enablement.
+- **Observability:** Streamlit dashboard now surfaces council weights, penalties, and backtest summaries so governance committees can audit alignment quickly.
 
 These KPIs feed into observability tooling described in the Technical Implementation Plan (logging, metrics, dashboards).

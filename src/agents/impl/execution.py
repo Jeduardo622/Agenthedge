@@ -66,6 +66,7 @@ class ExecutionAgent(BaseAgent):
             "price": price,
             "quantity": quantity,
             "portfolio": fill,
+            "strategies": payload.get("strategies"),
         }
         self.bus.publish("execution.fill", payload=event)
         self.audit("execution_fill", event)
