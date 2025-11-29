@@ -15,15 +15,15 @@ Derived from `Designing an Autonomous Multi-Agent Financial Trading System.pdf` 
 - ✅ Streamlit observability dashboard (`src/observability/dashboard.py`) surfaces runtime health, metrics, and provider status.
 
 ## Phase 2 — Risk & Compliance Hardening (Week 5-6)
-- 🚧 Encode risk policies (exposure, VaR, stop-loss, drawdown) and compliance rules (restricted lists, prohibited tactics). *Current state:* Risk agent enforces simple notional limits and volatility alerts; VaR/drawdown math and prohibited-behavior screens still pending.
-- 🚧 Add automated stress tests, scenario analysis, and kill-switch automation. *Current state:* No stress-test harness or kill-switch wiring implemented yet.
+- ✅ Encode risk policies (exposure, VaR, stop-loss, drawdown) and compliance rules (restricted lists, prohibited tactics). *Current state:* Risk agent now computes VaR/drawdown/stop-loss metrics with exposure tables, and compliance blocks prohibited tactics with kill-switch escalation.
+- ✅ Add automated stress tests, scenario analysis, and kill-switch automation. *Current state:* Deterministic stress harness runs on cadence and routes breaches through runtime kill-switch.
 - ✅ Integrate alerting hooks (webhook/stdout notifier + runtime/agent wiring for risk & compliance breaches).
 
 ## Phase 3 — Observability & Ops (Week 7-8)
-- Expand logging to structured format + rotating storage.
-- Build monitoring dashboard (Streamlit or Grafana) for KPIs and agent health.
-- Implement scheduler (APScheduler) for daily cycles with holiday awareness.
-- Add automated audit agent for weekly compliance reviews.
+- ✅ Expand logging to structured format + rotating storage (`infra.logging`, JSON handlers). *Current state:* log rotation confirmed via sanity checks, and Prometheus scrape endpoints feed both dashboards.
+- ✅ Build monitoring dashboard (Streamlit + Grafana) for KPIs and agent health. *Current state:* Streamlit headless smoke test + running Docker Grafana stack validated; Grafana auto-provisions Prometheus datasource/dashboards.
+- ✅ Implement scheduler (APScheduler) for daily cycles with holiday awareness (Pacific TZ + NYSE calendar). *Current state:* `run_daily_trade` and `eod_closure` dry runs succeed via `cli.scheduler run-once …`, snapshot files created, observability state updated.
+- ✅ Add automated audit agent for weekly compliance reviews with JSON report artifacts. *Current state:* Reports emitted under `storage/audit/reports/` and surfaced in dashboard/audit state.
 
 ## Phase 4 — Advanced Strategy & Learning (Week 9-10)
 - Introduce multiple strategy agents (momentum, value, macro) with debate/consensus logic.

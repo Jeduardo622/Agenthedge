@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time
 from pathlib import Path
@@ -13,12 +14,13 @@ from data.cache import TTLCache
 from data.ingestion import DataIngestionService
 from infra.metrics import PrometheusMetricSink
 from observability.alerts import AlertNotifier
+from observability.state import ObservabilityState
 from portfolio.store import PortfolioStore
 
 from .base import BaseAgent
 from .config import AgentRuntimeConfig
 from .context import AgentContext, AuditSink, MetricSink
-from .messaging import MessageBus
+from .messaging import Envelope, MessageBus, Subscription
 from .registry import AgentRegistry
 
 DEFAULT_AUDIT_PATH = Path("storage/audit/runtime_events.jsonl")
@@ -39,6 +41,7 @@ class AgentRuntime:
         audit_sink: AuditSink | None = None,
         portfolio_store: PortfolioStore | None = None,
         alert_notifier: AlertNotifier | None = None,
+        observability_state: ObservabilityState | None = None,
     ) -> None:
         self.logger = logging.getLogger("agenthedge.runtime")
         self.registry = registry
@@ -48,14 +51,21 @@ class AgentRuntime:
         self.bus = MessageBus()
         self.metric_sink = metric_sink or PrometheusMetricSink()
         self.audit_sink = audit_sink or JsonlAuditSink(DEFAULT_AUDIT_PATH)
+        self._audit_path = getattr(self.audit_sink, "path", DEFAULT_AUDIT_PATH)
         self.portfolio_store = portfolio_store or PortfolioStore(DEFAULT_PORTFOLIO_PATH)
         self.alert_notifier = alert_notifier or AlertNotifier.from_env()
         self._alert_sink = self.alert_notifier.notify if self.alert_notifier else None
+        self._audit_report_dir = Path(os.environ.get("AUDIT_REPORT_DIR", "storage/audit/reports"))
+        self._observability_state = observability_state
         self._agents: List[BaseAgent] = []
         self._agent_names: List[str] = []
         self._thread: threading.Thread | None = None
         self._stop_event = threading.Event()
         self._tick_count = 0
+        self._kill_switch_reason: str | None = None
+        self._kill_switch_trigger: str | None = None
+        self._kill_subscription: Subscription | None = None
+        self._register_kill_switch()
 
     def bootstrap(self) -> None:
         agent_names = self.config.enabled_agents or self.registry.list_agents()
@@ -74,6 +84,9 @@ class AgentRuntime:
                 extras={
                     "portfolio_store": self.portfolio_store,
                     "message_bus": self.bus,
+                    "observability_state": self._observability_state,
+                    "audit_path": self._audit_path,
+                    "audit_report_dir": self._audit_report_dir,
                 },
                 alert_sink=self._alert_sink,
             ).with_message_bus(self.bus)
@@ -97,6 +110,9 @@ class AgentRuntime:
             self._thread.join(timeout=5)
         for agent in self._agents:
             agent.shutdown()
+        if self._kill_subscription:
+            self.bus.unsubscribe(self._kill_subscription.id)
+            self._kill_subscription = None
         self.logger.info("agent runtime stopped")
 
     def run_once(self) -> None:
@@ -114,6 +130,9 @@ class AgentRuntime:
             time.sleep(self.config.tick_interval_seconds)
 
     def _run_iteration(self) -> None:
+        if self._kill_switch_reason:
+            self.logger.warning("kill switch engaged; skipping tick")
+            return
         for agent in self._agents:
             try:
                 agent.run_tick()
@@ -149,7 +168,18 @@ class AgentRuntime:
                 "enabled": self.alert_notifier is not None,
                 "min_severity": self.alert_notifier.min_severity if self.alert_notifier else None,
             },
+            "kill_switch": {
+                "engaged": self._kill_switch_reason is not None,
+                "reason": self._kill_switch_reason,
+                "trigger": self._kill_switch_trigger,
+            },
+            "observability": (
+                self._observability_state.snapshot() if self._observability_state else {}
+            ),
         }
+
+    def set_observability_state(self, state: ObservabilityState) -> None:
+        self._observability_state = state
 
     def _order_agents(self, agent_names: List[str]) -> List[str]:
         pipeline = self.config.pipeline
@@ -164,3 +194,38 @@ class AgentRuntime:
             if name not in ordered:
                 ordered.append(name)
         return ordered
+
+    def _register_kill_switch(self) -> None:
+        topics = ["risk.kill_switch", "compliance.kill_switch", "runtime.kill_switch"]
+        self._kill_subscription = self.bus.subscribe(
+            self._handle_kill_signal,
+            topics=topics,
+            replay_last=0,
+        )
+
+    def _handle_kill_signal(self, envelope: Envelope) -> None:
+        if self._kill_switch_reason:
+            return
+        payload = dict(envelope.message.payload or {})
+        raw_reason = payload.get("reason")
+        if isinstance(raw_reason, str) and raw_reason:
+            self._kill_switch_reason = raw_reason
+        else:
+            self._kill_switch_reason = "unspecified"
+        self._kill_switch_trigger = envelope.message.topic
+        self.logger.error(
+            "kill switch engaged by %s (%s)",
+            self._kill_switch_trigger,
+            self._kill_switch_reason,
+        )
+        if self._alert_sink:
+            self._alert_sink(
+                "runtime_kill_switch",
+                {
+                    "trigger": self._kill_switch_trigger,
+                    "reason": self._kill_switch_reason,
+                    "payload": payload,
+                },
+                severity="critical",
+            )
+        self._stop_event.set()

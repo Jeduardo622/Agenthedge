@@ -1,6 +1,7 @@
 """Built-in agent implementations."""
 
 from ..registry import AgentRegistry
+from .audit import AuditAgent
 from .compliance import ComplianceAgent
 from .director import DirectorAgent
 from .execution import ExecutionAgent
@@ -15,6 +16,7 @@ def register_builtin_agents(registry: AgentRegistry) -> None:
     registry.register("risk", lambda ctx: RiskAgent(ctx))
     registry.register("compliance", lambda ctx: ComplianceAgent(ctx))
     registry.register("execution", lambda ctx: ExecutionAgent(ctx))
+    registry.register("audit", lambda ctx: AuditAgent(ctx))
 
 
 __all__ = [
@@ -23,5 +25,6 @@ __all__ = [
     "RiskAgent",
     "ComplianceAgent",
     "ExecutionAgent",
+    "AuditAgent",
     "register_builtin_agents",
 ]

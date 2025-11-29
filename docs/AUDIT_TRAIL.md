@@ -34,6 +34,7 @@ Store records in append-only log (JSONL) plus replicated datastore (S3, database
   - Compliance alerts and resolutions.
   - Execution anomalies (slippage > tolerance).
 - Weekly digest packaged for oversight board; archived with version tag.
+- `AuditAgent` now produces JSON reports under `storage/audit/reports/weekly_<ISO week>.json` and logs `audit_weekly_report` events. Latest metadata mirrored in `storage/audit/reports/index.json`.
 
 ## Traceability Requirements
 - Each trade must be traceable from idea inception ➝ approvals ➝ execution ➝ performance outcome.

@@ -26,3 +26,7 @@ class JsonlAuditSink:
         line = json.dumps(record, ensure_ascii=True)
         with self._lock, self._path.open("a", encoding="utf-8") as handle:
             handle.write(f"{line}\n")
+
+    @property
+    def path(self) -> Path:
+        return self._path

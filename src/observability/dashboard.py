@@ -97,6 +97,12 @@ def _provider_frame(providers: Mapping[str, Mapping[str, Any]]) -> pd.DataFrame:
 
 
 runtime_health = runtime_health_snapshot()
+observability = runtime_health.get("observability", {})
+risk_obs = observability.get("risk", {})
+compliance_obs = observability.get("compliance", {})
+alerts_obs = observability.get("alerts", {})
+schedulers_obs = observability.get("scheduler", {})
+audit_obs = observability.get("audit", {})
 prometheus_rows: List[Dict[str, Any]] = []
 prom_bus_depth: float | None = None
 prometheus_url = _prometheus_url()
@@ -137,6 +143,27 @@ positions_rows = [{"symbol": symbol, **data} for symbol, data in positions.items
 positions_df = pd.DataFrame(positions_rows)
 st.dataframe(positions_df, use_container_width=True, hide_index=True)
 
+st.subheader("Risk KPIs")
+risk_cols = st.columns(4)
+risk_cols[0].metric("NAV", f"${risk_obs.get('nav', 0):,.2f}")
+risk_cols[1].metric("Gross Exposure", f"${risk_obs.get('gross_exposure', 0):,.2f}")
+risk_cols[2].metric("Leverage", f"{risk_obs.get('leverage', 0):.2f}x")
+risk_cols[3].metric("VaR %", f"{risk_obs.get('var_pct', 0) * 100:.2f}%")
+drawdown = risk_obs.get("drawdown_pct")
+if drawdown is not None:
+    st.metric("Drawdown", f"{drawdown * 100:.2f}%")
+if risk_obs.get("last_stress_run"):
+    st.json({"last_stress_run": risk_obs["last_stress_run"]})
+
+st.subheader("Compliance Activity")
+compliance_df = pd.DataFrame(
+    [
+        {"type": "approvals", "count": compliance_obs.get("approvals", 0)},
+        {"type": "rejections", "count": compliance_obs.get("rejections", 0)},
+    ]
+)
+st.dataframe(compliance_df, hide_index=True)
+
 st.divider()
 
 st.subheader("Agent Tick Metrics (Prometheus)")
@@ -158,3 +185,26 @@ st.subheader("Runtime Topology")
 pipeline = runtime_health.get("pipeline", [])
 st.write(" ➝ ".join(pipeline) if pipeline else "No agents registered.")
 st.json({"bus_subscriptions": runtime_health.get("bus_subscriptions", [])})
+
+st.divider()
+
+st.subheader("Alerts Timeline")
+recent_alerts = alerts_obs.get("recent", [])
+if recent_alerts:
+    alerts_df = pd.DataFrame(recent_alerts)
+    st.dataframe(alerts_df, use_container_width=True, hide_index=True)
+else:
+    st.info("No recent alerts recorded.")
+
+st.subheader("Scheduler Jobs")
+if schedulers_obs:
+    scheduler_df = pd.DataFrame(
+        [{"job": name, **payload} for name, payload in schedulers_obs.items()]
+    )
+    st.dataframe(scheduler_df, use_container_width=True, hide_index=True)
+else:
+    st.info("No scheduler activity recorded yet.")
+
+if audit_obs:
+    st.subheader("Latest Audit Report")
+    st.json(audit_obs)

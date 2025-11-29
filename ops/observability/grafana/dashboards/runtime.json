@@ -1,0 +1,50 @@
+{
+  "title": "Agenthedge Runtime",
+  "uid": "agenthedge-runtime",
+  "timezone": "browser",
+  "schemaVersion": 38,
+  "version": 1,
+  "panels": [
+    {
+      "type": "timeseries",
+      "title": "Agent Tick Duration (ms)",
+      "targets": [
+        {
+          "expr": "1000 * rate(agent_tick_duration_seconds_sum{agent!=\"runtime\"}[5m]) / rate(agent_tick_duration_seconds_count{agent!=\"runtime\"}[5m])",
+          "legendFormat": "{{agent}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Agent Tick Errors",
+      "targets": [
+        {
+          "expr": "increase(agent_tick_errors_total[15m])",
+          "legendFormat": "{{agent}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Runtime Bus Depth",
+      "targets": [
+        {
+          "expr": "agent_runtime_bus_depth",
+          "legendFormat": "bus_depth"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Risk Alerts",
+      "targets": [
+        {
+          "expr": "increase(agent_risk_alerts_total[30m])",
+          "legendFormat": "{{severity}}"
+        }
+      ],
+      "datasource": "Prometheus"
+    }
+  ]
+}

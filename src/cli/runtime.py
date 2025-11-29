@@ -3,34 +3,34 @@
 from __future__ import annotations
 
 import json
+import os
 import time
+from datetime import datetime, timezone
 
 import typer
 from dotenv import load_dotenv
 
-from agents.config import AgentRuntimeConfig
-from agents.impl import register_builtin_agents
-from agents.registry import AgentRegistry
-from agents.runtime import AgentRuntime
-from data.ingestion import DataIngestionService
+from agents.runtime_builder import build_runtime_from_env
+from infra.logging import configure_logging
 
 app = typer.Typer(help="Agenthedge runtime controls")
 
 
-def _build_runtime() -> AgentRuntime:
+def _configure_environment() -> None:
     load_dotenv()
-    registry = AgentRegistry()
-    register_builtin_agents(registry)
-    ingestion = DataIngestionService()
-    config = AgentRuntimeConfig.from_env()
-    return AgentRuntime(registry=registry, ingestion=ingestion, config=config)
+    run_id = os.environ.get("RUN_ID")
+    if not run_id:
+        run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        os.environ["RUN_ID"] = run_id
+    configure_logging(run_id=run_id, environment=os.environ.get("ENVIRONMENT"))
 
 
 @app.command()
 def run_once() -> None:
     """Execute a single orchestrator tick."""
 
-    runtime = _build_runtime()
+    _configure_environment()
+    runtime = build_runtime_from_env(load_env=False)
     runtime.run_once()
     typer.echo("Tick executed")
 
@@ -39,7 +39,8 @@ def run_once() -> None:
 def run_loop() -> None:
     """Start the runtime loop until interrupted."""
 
-    runtime = _build_runtime()
+    _configure_environment()
+    runtime = build_runtime_from_env(load_env=False)
     runtime.start()
     typer.echo("Runtime started (Ctrl+C to stop)")
     try:
@@ -54,7 +55,8 @@ def run_loop() -> None:
 def health(pretty: bool = typer.Option(True, "--pretty/--raw", help="Pretty-print JSON")) -> None:
     """Show runtime + provider health without running a tick."""
 
-    runtime = _build_runtime()
+    _configure_environment()
+    runtime = build_runtime_from_env(load_env=False)
     runtime.bootstrap()
     typer.echo(json.dumps(runtime.health(), indent=2 if pretty else None))
 

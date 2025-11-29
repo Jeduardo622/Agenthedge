@@ -32,6 +32,7 @@ Sources: `ExecSpec.md` (risk constraints, escalation), `Designing an Autonomous 
 4. **Scenario & Stress Testing**
    - Weekly: apply historical shock library (e.g., 5% market drop, 10% single-name gap).
    - Monthly: run macro regimes (rate hikes, liquidity crunch) to validate capital adequacy.
+   - Automated harness (`risk/stress.py`) now executes deterministic shock scenarios each runtime cadence and escalates breaches via the kill-switch topic.
 
 ## Automation Hooks
 - `risk.check_trade(trade_pack)` -> returns {approved, adjustments, rationale, metrics}.
@@ -48,6 +49,7 @@ Sources: `ExecSpec.md` (risk constraints, escalation), `Designing an Autonomous 
 | --- | --- |
 | Soft breach (>=80% limit) | Notify Director, require acknowledgement, consider scaling down future orders. |
 | Hard breach | Auto-pause, cancel pending orders, reposition to cash where feasible, escalate to human oversight. |
+| Stress-test breach | Runtime kill-switch engages; risk alerts include scenario + estimated P&L for forensics. |
 | Consecutive execution failures (≥3) | Force risk-off mode, require Execution RCA before resuming. |
 | Model anomaly (e.g., variance spike) | Disable affected strategy, run diagnostics, retrain if necessary. |
 

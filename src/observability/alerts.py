@@ -11,6 +11,8 @@ from typing import Any, Mapping, MutableMapping, Protocol, Sequence
 
 import requests
 
+from .state import get_observability_state
+
 _LOGGER = logging.getLogger("agenthedge.alerts")
 _SEVERITY_ORDER: MutableMapping[str, int] = {
     "debug": 0,
@@ -112,6 +114,10 @@ class AlertNotifier:
         if not self._should_emit(resolved_severity):
             return
         event = AlertEvent(action=action, severity=resolved_severity, payload=payload)
+        try:
+            get_observability_state().record_alert(action, resolved_severity, payload)
+        except Exception:  # pragma: no cover - safety guard
+            _LOGGER.exception("failed to record alert state for action=%s", action)
         for transport in self._transports:
             try:
                 transport.send(event)

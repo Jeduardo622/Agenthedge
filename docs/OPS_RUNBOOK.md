@@ -41,6 +41,10 @@ Escalation steps follow `GOVERNANCE.md` matrix; severe incidents require manual 
 5. **Execution Failure**
    - Retry with alternate venue/params if within guardrails.
    - On repeated failure, halt and flag for manual intervention.
+6. **Kill-Switch Event (`risk/compliance.kill_switch`)**
+   - Runtime halts ticks automatically; confirm all agents in safe state.
+   - Review payload (reason + metrics), produce incident ticket, and capture forensic snapshot.
+   - Reset requires human approval plus `runtime resume` command with documented sign-off.
 
 ## Maintenance Windows
 - Weekly (Saturday 10:00-14:00 local): dependency updates, model retraining, prompt refresh.
@@ -50,9 +54,17 @@ Escalation steps follow `GOVERNANCE.md` matrix; severe incidents require manual 
 - APScheduler for cron-like orchestration (`run_daily_trade`, `midday_check`, `eod_closure` jobs).
 - Runtime CLI (`poetry run python -m cli.runtime <cmd>`) for tick execution and health snapshots.
 - Observability stack (Prometheus + Grafana or Streamlit) for live monitoring; Prom metrics exposed via `infra.metrics`.
+- Scheduler service: `poetry run python -m cli.scheduler run` (Pacific Time, NYSE holiday-aware). Use `poetry run python -m cli.scheduler run-once <job>` during dry runs to trigger a specific job (`run_daily_trade`, `midday_check`, `eod_closure`) without keeping the daemon up.
 - Streamlit telemetry dashboard: `poetry run streamlit run src/observability/dashboard.py` (shows runtime health, portfolio, provider status, Prometheus tick stats).
-- Alert notifier fan-out configured via `ALERT_*` env vars (webhook URL, min severity, per-action overrides); risk/compliance agents emit alerts on `risk_alert`, `risk_reject`, and `compliance_reject`.
+- Grafana stack (optional): `docker compose -f ops/observability/docker-compose.yml up -d`, import `ops/observability/grafana_dashboard.json`.
+- Alert notifier fan-out configured via `ALERT_*` env vars (webhook URL, min severity, per-action overrides); risk/compliance agents emit alerts on `risk_alert`, `risk_reject`, `risk_stop_loss`, `risk_stress_breach`, and `compliance_reject`.
+- Kill-switch topics: `risk.kill_switch`, `compliance.kill_switch`, `runtime.kill_switch` — all funnel into runtime halt handling.
 - Slack/email/webhook notifications for alerts.
+
+## Logging
+- `infra.logging.configure_logging` wires console + JSON file handlers (rotating daily, 7-day retention). Files under `storage/logs/agenthedge.log*`.
+- Tune with `LOG_LEVEL`, `LOG_DIR`, `LOG_RETENTION_DAYS`.
+- Include `run_id` + environment on every record to correlate with audit reports; ingest into external SIEM if needed.
 
 ### Bootstrap Procedure
 1. `poetry install && poetry shell`

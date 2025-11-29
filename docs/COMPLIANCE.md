@@ -18,13 +18,14 @@ Guarantee that every action across the autonomous hedge fund adheres to global s
 4. **Jurisdiction Awareness**: Tag each instrument with applicable regimes; enforce local rules (e.g., short-sale uptick rules, commodity limits).
 5. **Data Ethics**: Use only authorized public data. Any new data source requires approval via `DATA_GOVERNANCE.md`.
 6. **Disclosure Management**: Track positions requiring regulatory filings (e.g., 13D thresholds in live deployment) even during simulation for readiness.
+7. **Automated Prohibited-Behavior Screens**: Phase 2 adds deterministic scans for spoiler keywords (spoofing, layering, MNPI, etc.) and insider flags; breaches trigger a compliance kill-switch broadcast.
 
 ## Compliance Workflow
 1. Receive trade pack from Director/Quant with full rationale and data lineage.
 2. Run automated checks:
    - Restricted instruments / sanction lists.
    - Position & reporting limits.
-   - Strategy behavior against prohibited patterns.
+   - Strategy behavior against prohibited patterns (uses `COMPLIANCE_PROHIBITED_TACTICS` env and metadata heuristics).
    - Data provenance validation.
 3. Return `approve | reject | conditional` decision with citations and logging.
 4. Monitor live trades for deviations (e.g., slippage beyond tolerance, partial fills) and instruct Execution for corrective actions if needed.

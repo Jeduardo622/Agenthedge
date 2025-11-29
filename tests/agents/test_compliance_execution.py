@@ -102,3 +102,36 @@ def test_compliance_emits_alert_on_reject(tmp_path: Path, monkeypatch: MonkeyPat
     assert any(event["action"] == "compliance_reject" for event in captured)
     assert captured[0]["severity"] == "error"
     compliance.teardown()
+
+
+def test_compliance_blocks_prohibited_tactic(tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+    monkeypatch.setenv("COMPLIANCE_PROHIBITED_TACTICS", "spoofing")
+    store = PortfolioStore(tmp_path / "portfolio.json", initial_cash=100000.0)
+    bus = MessageBus()
+    compliance = ComplianceAgent(_context("compliance", store, bus))
+    compliance.setup()
+    approvals: List[Dict[str, Any]] = []
+    kill_events: List[Dict[str, Any]] = []
+    bus.subscribe(
+        lambda envelope: approvals.append(envelope.message.payload), topics=["compliance.approval"]
+    )
+    bus.subscribe(
+        lambda envelope: kill_events.append(envelope.message.payload),
+        topics=["compliance.kill_switch"],
+    )
+
+    bus.publish(
+        "risk.approval",
+        payload={
+            "proposal_id": "p3",
+            "symbol": "SPY",
+            "price": 100.0,
+            "quantity": 10,
+            "tactic": "Spoofing ladder",
+        },
+    )
+
+    assert approvals == []
+    assert kill_events
+    assert kill_events[0]["reason"].startswith("prohibited_tactic")
+    compliance.teardown()
