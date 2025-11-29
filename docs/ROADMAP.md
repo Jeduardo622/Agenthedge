@@ -2,6 +2,8 @@
 
 Derived from `Designing an Autonomous Multi-Agent Financial Trading System.pdf` and `Technical Implementation Plan_ Agentic Hedge Fund Simulator.pdf`.
 
+> **Go-Live Gate:** Before promoting a phase to production/paper-trading, complete the steps in [`docs/READINESS_CHECKLIST.md`](docs/READINESS_CHECKLIST.md).
+
 ## Phase 0 — Foundation (Week 0-1)
 - Finalize governance docs (this set) and agent charters.
 - Stand up repo scaffolding: Poetry environment, lint/test harness, basic CI workflow.
@@ -29,6 +31,7 @@ Derived from `Designing an Autonomous Multi-Agent Financial Trading System.pdf` 
 - ✅ Strategy Council now federates multiple strategy plug-ins (`src/strategies/*`, `src/agents/impl/quant.py`) with quorum/weighting logic plus dedicated `strategy.proposal.*` topics.
 - ✅ Reinforcement loop implemented via the performance tracker (`src/learning/performance.py`) and `strategy.feedback` penalties emitted by Risk/Compliance to down-rank problematic strategies.
 - ✅ Backtest package + CLI (`src/backtest/engine.py`, `src/cli/backtest.py`, `scripts/backtest_strategy.py`) replays historical data, persists artifacts under `storage/backtests/`, and must pass before promoting new strategy mixes.
+- 🔜 Post-phase readiness: run through `docs/READINESS_CHECKLIST.md` to ensure env, tests, backtests, and observability are locked prior to daily ops.
 
 ## Milestone Checkpoints
 | Milestone | Exit Criteria |
