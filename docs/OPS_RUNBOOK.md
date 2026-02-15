@@ -76,7 +76,12 @@ Escalation steps follow `GOVERNANCE.md` matrix; severe incidents require manual 
 - `infra.logging.configure_logging` wires console + JSON file handlers (rotating daily, 7-day retention). Files under `storage/logs/agenthedge.log*`.
 - Tune with `LOG_LEVEL`, `LOG_DIR`, `LOG_RETENTION_DAYS`.
 - Include `run_id` + environment on every record to correlate with audit reports; ingest into external SIEM if needed.
-- Validate audit-chain integrity after incidents/promotions: `poetry run python scripts/verify_audit_chain.py --path storage/audit/runtime_events.jsonl`.
+- Audit cutover workflow before enabling hash-chain gate on legacy environments:
+  - `poetry run python scripts/cutover_audit_chain.py --active-path storage/audit/runtime_events.jsonl --archive-dir storage/audit/archive`
+  - Optional split for mixed logs: `poetry run python scripts/migrate_audit_chain.py --source storage/audit/runtime_events.jsonl --archive-dir storage/audit/archive`
+- Validate audit-chain integrity after incidents/promotions and write evidence report:
+  - `poetry run python scripts/verify_audit_chain.py --path storage/audit/runtime_events.jsonl --report-dir storage/audit/reports`
+  - Attach the latest `storage/audit/reports/audit_chain_report_*.json` to the change ticket.
 
 ### Bootstrap Procedure
 1. `poetry install && poetry shell`

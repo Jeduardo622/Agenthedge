@@ -66,6 +66,10 @@ Use this checklist before enabling a full daily trading cycle. It consolidates r
 - [ ] Heartbeat timeout + behavior anomaly controls validated (alerts + runtime escalation paths).
 - [ ] Data quality checks/quarantine workflow validated and reviewed with `scripts/review_quarantine.py`.
 - [ ] `poetry run pytest -q`, `poetry run mypy src`, and `poetry run flake8` all green on the release commit.
-- [ ] Audit-chain verification passes: `poetry run python scripts/verify_audit_chain.py --path storage/audit/runtime_events.jsonl`.
+- [ ] Audit-chain cutover completed for legacy logs (if needed): archive path recorded from `scripts/cutover_audit_chain.py`.
+- [ ] Active chained audit file path recorded (default `storage/audit/runtime_events.jsonl`).
+- [ ] Audit-chain verification passes with report artifact:
+  - `poetry run python scripts/verify_audit_chain.py --path storage/audit/runtime_events.jsonl --report-dir storage/audit/reports`
+  - Latest `storage/audit/reports/audit_chain_report_*.json` attached to release evidence.
 
 When sections 1-7 are checked, the system is ready for Phase 4 operations and paper trading. Live capital requires section 8 sign-off plus governance approval on the exact release SHA.
