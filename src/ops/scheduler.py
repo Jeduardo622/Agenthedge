@@ -21,7 +21,7 @@ class SchedulerRuntime(Protocol):
     def run_once(self) -> None: ...
     def bootstrap(self) -> None: ...
     def health(self) -> Mapping[str, object]: ...
-    def stop(self, wait: bool = True) -> None: ...
+    def stop(self, *, wait: bool = True) -> None: ...
 
 
 class SchedulerService:
@@ -63,6 +63,11 @@ class SchedulerService:
             name="midday_check",
         )
         self._scheduler.add_job(
+            self.heartbeat_check,
+            CronTrigger(hour="*", minute=30, timezone=self._tz),
+            name="heartbeat_check",
+        )
+        self._scheduler.add_job(
             self.eod_closure,
             CronTrigger(hour=13, minute=30, timezone=self._tz),
             name="eod_closure",
@@ -102,6 +107,25 @@ class SchedulerService:
             health = runtime.health()
             self._write_snapshot("eod", health)
             self._record_job("eod_closure", status="completed")
+        finally:
+            runtime.stop(wait=False)
+
+    def heartbeat_check(self) -> None:
+        runtime = self._runtime_builder()
+        try:
+            runtime.bootstrap()
+            health = runtime.health()
+            runtime_controls = health.get("runtime_controls", {})
+            stale = []
+            if isinstance(runtime_controls, Mapping):
+                raw_stale = runtime_controls.get("stale_heartbeats", [])
+                if isinstance(raw_stale, list):
+                    stale = raw_stale
+            self._record_job(
+                "heartbeat_check",
+                status="completed",
+                details={"stale_heartbeats": stale},
+            )
         finally:
             runtime.stop(wait=False)
 

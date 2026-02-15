@@ -85,3 +85,62 @@ def test_market_snapshot_and_macro(monkeypatch):
 
     health = service.providers_health()
     assert all(health.values())
+
+
+def test_snapshot_includes_lineage_and_quality_metadata(monkeypatch, tmp_path) -> None:
+    class FakeAlpha:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def ping(self):
+            return True
+
+        def get_company_overview(self, symbol: str):
+            return {}
+
+        def get_equity_timeseries(self, symbol: str, **kwargs):
+            return {}
+
+    class FakeFinnhub:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def ping(self):
+            return True
+
+        def get_quote(self, symbol: str):
+            return {"symbol": symbol, "c": 120.0, "pc": 100.0}
+
+        def get_fundamentals(self, symbol: str, metric: str = "all"):
+            return {"metric": {}}
+
+    class FakeNews:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def ping(self):
+            return True
+
+        def get_company_news(self, symbol: str):
+            return []
+
+    config = DataProviderConfig(
+        alpha_vantage_key="alpha",
+        finnhub_key="finn",
+        fred_api_key="fred",
+        news_api_key="news",
+        data_outlier_pct_threshold=0.05,
+        quarantine_enabled=True,
+        quarantine_path=str(tmp_path / "q.jsonl"),
+    )
+    monkeypatch.setattr("data.ingestion.service.AlphaVantageProvider", FakeAlpha)
+    monkeypatch.setattr("data.ingestion.service.FinnhubProvider", FakeFinnhub)
+    monkeypatch.setattr("data.ingestion.service.FredProvider", FakeNews)
+    monkeypatch.setattr("data.ingestion.service.NewsProvider", FakeNews)
+
+    service = DataIngestionService(config=config)
+    snapshot = service.get_market_snapshot("AAPL")
+
+    assert "lineage" in snapshot.metadata
+    assert snapshot.metadata["degraded_mode"] is True
+    assert snapshot.metadata["quality_issues"]

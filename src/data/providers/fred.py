@@ -29,7 +29,13 @@ class FredProvider(BaseProvider):
     ) -> None:
         if not config.fred_api_key:
             raise MissingApiKeyError("FRED API key missing")
-        super().__init__("fred", cache, retries=2, rate_limit_per_minute=120)
+        super().__init__(
+            "fred",
+            cache,
+            retries=2,
+            rate_limit_per_minute=120,
+            http_timeout_seconds=config.provider_http_timeout_seconds,
+        )
         self._client = client or Fred(api_key=config.fred_api_key)
 
     def ping(self) -> bool:  # pragma: no cover
@@ -56,11 +62,14 @@ class FredProvider(BaseProvider):
 
     def search_series(self, pattern: str) -> pd.DataFrame:
         cache_key = self._cache_key("search", pattern)
-        return self.fetch_with_cache(
-            cache_key,
-            f"search {pattern}",
-            lambda: self._call("search", self._client.search, text=pattern),
-        )
+
+        def op() -> pd.DataFrame:
+            result = self._call("search", self._client.search, text=pattern)
+            if not isinstance(result, pd.DataFrame):
+                raise DataProviderError("FRED search returned invalid payload")
+            return result
+
+        return self.fetch_with_cache(cache_key, f"search {pattern}", op)
 
     def _series(self, series_id: str, start: date | None, end: date | None) -> pd.Series:
         def op() -> pd.Series:

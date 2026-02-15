@@ -15,8 +15,18 @@ if TYPE_CHECKING:  # pragma: no cover - type checking only
 
 
 MetricSink = Callable[[str, float, Mapping[str, Any] | None], None]
-AuditSink = Callable[[str, Mapping[str, Any] | None], None]
-AlertSink = Callable[[str, Mapping[str, Any] | None, str | None], None]
+AuditSink = Callable[[str, Mapping[str, Any] | None, Mapping[str, Any] | None], None]
+
+
+class AlertSink(Protocol):
+    def __call__(
+        self,
+        action: str,
+        payload: Mapping[str, Any] | None = None,
+        *,
+        severity: str | None = None,
+    ) -> None:  # pragma: no cover - Protocol definition
+        ...
 
 
 class SupportsClose(Protocol):
@@ -42,7 +52,15 @@ class AgentContext:
 
     def audit(self, action: str, payload: Mapping[str, Any] | None = None) -> None:
         if self.audit_sink:
-            self.audit_sink(action, payload or {})
+            self.audit_sink(
+                action,
+                payload or {},
+                {
+                    "agent_id": self.name,
+                    "run_id": self.run_id,
+                    "environment": self.environment,
+                },
+            )
 
     def record_metric(self, name: str, value: float, tags: Mapping[str, Any] | None = None) -> None:
         if self.metric_sink:
@@ -113,4 +131,4 @@ class AgentContext:
         severity: str | None = None,
     ) -> None:
         if self.alert_sink:
-            self.alert_sink(action, payload or {}, severity)
+            self.alert_sink(action, payload or {}, severity=severity)

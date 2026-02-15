@@ -33,6 +33,22 @@ def _get_int(source: Mapping[str, str], key: str, default: int) -> int:
     return value
 
 
+def _get_float(source: Mapping[str, str], key: str, default: float) -> float:
+    raw = source.get(key)
+    if raw is None:
+        return default
+    stripped = raw.strip()
+    if not stripped:
+        return default
+    try:
+        value = float(stripped)
+    except ValueError as exc:
+        raise ProviderConfigError(f"{key} must be a float, got {raw!r}") from exc
+    if value < 0:
+        raise ProviderConfigError(f"{key} must be non-negative, got {value}")
+    return value
+
+
 def _get_bool(source: Mapping[str, str], key: str, default: bool) -> bool:
     raw = source.get(key)
     if raw is None:
@@ -59,6 +75,23 @@ class DataProviderConfig:
     cache_max_items: int = 512
     cache_enabled: bool = True
     log_level: str = "INFO"
+    alpha_vantage_retries: int = 3
+    alpha_vantage_retry_delay: float = 1.0
+    alpha_vantage_rate_limit_backoff_seconds: float = 5.0
+    alpha_vantage_fallback_enabled: bool = True
+    alpha_vantage_timeseries_enabled: bool = True
+    provider_http_timeout_seconds: float = 10.0
+    data_quality_enabled: bool = True
+    data_quote_freshness_seconds: int = 300
+    data_news_freshness_seconds: int = 3600
+    data_outlier_pct_threshold: float = 0.15
+    quarantine_enabled: bool = False
+    quarantine_path: str = "storage/quarantine/quarantined_data.jsonl"
+    degraded_mode_enabled: bool = True
+    alpha_vantage_key_alias: str = "alpha_vantage"
+    finnhub_key_alias: str = "finnhub"
+    news_api_key_alias: str = "newsapi"
+    fred_key_alias: str = "fred"
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "DataProviderConfig":
@@ -72,6 +105,33 @@ class DataProviderConfig:
             cache_max_items=_get_int(env_map, "MAX_CACHE_SIZE", 512),
             cache_enabled=_get_bool(env_map, "DATA_CACHE_ENABLED", True),
             log_level=(env_map.get("LOG_LEVEL") or "INFO").upper(),
+            alpha_vantage_retries=_get_int(env_map, "ALPHA_VANTAGE_MAX_RETRIES", 3),
+            alpha_vantage_retry_delay=_get_float(env_map, "ALPHA_VANTAGE_RETRY_DELAY_SECONDS", 2.0),
+            alpha_vantage_rate_limit_backoff_seconds=_get_float(
+                env_map, "ALPHA_VANTAGE_RATE_LIMIT_BACKOFF_SECONDS", 12.0
+            ),
+            alpha_vantage_fallback_enabled=_get_bool(
+                env_map, "ALPHA_VANTAGE_FALLBACK_ENABLED", True
+            ),
+            alpha_vantage_timeseries_enabled=_get_bool(
+                env_map, "ALPHA_VANTAGE_TIMESERIES_ENABLED", True
+            ),
+            provider_http_timeout_seconds=_get_float(
+                env_map, "PROVIDER_HTTP_TIMEOUT_SECONDS", 10.0
+            ),
+            data_quality_enabled=_get_bool(env_map, "DATA_QUALITY_ENABLED", True),
+            data_quote_freshness_seconds=_get_int(env_map, "DATA_QUOTE_FRESHNESS_SECONDS", 300),
+            data_news_freshness_seconds=_get_int(env_map, "DATA_NEWS_FRESHNESS_SECONDS", 3600),
+            data_outlier_pct_threshold=_get_float(env_map, "DATA_OUTLIER_PCT_THRESHOLD", 0.15),
+            quarantine_enabled=_get_bool(env_map, "QUARANTINE_ENABLED", False),
+            quarantine_path=(
+                env_map.get("QUARANTINE_PATH") or "storage/quarantine/quarantined_data.jsonl"
+            ),
+            degraded_mode_enabled=_get_bool(env_map, "DEGRADED_MODE_ENABLED", True),
+            alpha_vantage_key_alias=env_map.get("ALPHA_VANTAGE_KEY_ALIAS", "alpha_vantage"),
+            finnhub_key_alias=env_map.get("FINNHUB_KEY_ALIAS", "finnhub"),
+            news_api_key_alias=env_map.get("NEWSAPI_KEY_ALIAS", "newsapi"),
+            fred_key_alias=env_map.get("FRED_KEY_ALIAS", "fred"),
         )
 
     def require(self, field: str) -> str:
@@ -82,7 +142,7 @@ class DataProviderConfig:
             raise ProviderConfigError(f"{field} is required for this provider")
         return value
 
-    def as_dict(self) -> MutableMapping[str, str | int | bool | None]:
+    def as_dict(self) -> MutableMapping[str, str | int | float | bool | None]:
         """Expose configuration for debugging/log serialization."""
 
         return {
@@ -94,4 +154,23 @@ class DataProviderConfig:
             "cache_max_items": self.cache_max_items,
             "cache_enabled": self.cache_enabled,
             "log_level": self.log_level,
+            "alpha_vantage_retries": self.alpha_vantage_retries,
+            "alpha_vantage_retry_delay": self.alpha_vantage_retry_delay,
+            "alpha_vantage_rate_limit_backoff_seconds": (
+                self.alpha_vantage_rate_limit_backoff_seconds
+            ),
+            "alpha_vantage_fallback_enabled": self.alpha_vantage_fallback_enabled,
+            "alpha_vantage_timeseries_enabled": self.alpha_vantage_timeseries_enabled,
+            "provider_http_timeout_seconds": self.provider_http_timeout_seconds,
+            "data_quality_enabled": self.data_quality_enabled,
+            "data_quote_freshness_seconds": self.data_quote_freshness_seconds,
+            "data_news_freshness_seconds": self.data_news_freshness_seconds,
+            "data_outlier_pct_threshold": self.data_outlier_pct_threshold,
+            "quarantine_enabled": self.quarantine_enabled,
+            "quarantine_path": self.quarantine_path,
+            "degraded_mode_enabled": self.degraded_mode_enabled,
+            "alpha_vantage_key_alias": self.alpha_vantage_key_alias,
+            "finnhub_key_alias": self.finnhub_key_alias,
+            "news_api_key_alias": self.news_api_key_alias,
+            "fred_key_alias": self.fred_key_alias,
         }

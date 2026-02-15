@@ -17,8 +17,8 @@ The hedge fund follows a multi-agent hierarchy modeled after a human investment 
 1. **Strategic Directive:** Director sets focus (markets, themes, risk appetite) per daily/weekly cadence.
 2. **Research Cycle:** The Strategy Council instantiates approved plug-ins, evaluates directives, blends signals via quorum/weighting, and produces structured trade proposals (entry/exit, conviction, strategy lineage).
 3. **Parallel Review:** Risk scales or rejects proposals; Compliance screens regulatory aspects simultaneously.
-4. **Final Assembly:** Director reconciles feedback, packages approved trade plan, and sets execution priorities.
-5. **Execution & Monitoring:** Execution agent routes orders, confirms fills, and shares metrics. Risk and Compliance continue post-trade monitoring and escalate breaches if detected.
+4. **Final Assembly:** Director reconciles feedback, issues `director.approval` with decision metadata, and sets execution priorities.
+5. **Execution & Monitoring:** Execution agent routes orders only after Director approval, confirms fills, and shares metrics. Risk and Compliance continue post-trade monitoring and escalate breaches if detected.
 
 ## Governance Artefacts
 - `AGENTS.md`: role descriptions, KPIs, data contracts.
@@ -26,6 +26,7 @@ The hedge fund follows a multi-agent hierarchy modeled after a human investment 
 - `RISK_MANAGEMENT.md`, `COMPLIANCE.md`: detailed policies.
 - `OPS_RUNBOOK.md`: operational cadence and playbooks.
 - `AUDIT_TRAIL.md`: log schema plus retention plan.
+- `READINESS_CHECKLIST.md`: phase readiness and live-capital go/no-go gates.
 
 ## Escalation Paths
 | Trigger | Automatic Action | Escalation Target |
@@ -55,3 +56,11 @@ The hedge fund follows a multi-agent hierarchy modeled after a human investment 
 - **Observability:** Streamlit dashboard now surfaces council weights, penalties, and backtest summaries so governance committees can audit alignment quickly.
 
 These KPIs feed into observability tooling described in the Technical Implementation Plan (logging, metrics, dashboards).
+
+## Phase 4 Launch Sign-off — 2025-11-29
+| Role / Owner | Decision | Evidence | Notes |
+| --- | --- | --- | --- |
+| Director Agent (Portfolio Manager) | ✅ Approve Phase 4 go-live | Backtest run `bt-20251129T190306` (`storage/backtests/bt-20251129T190306/result.json`) shows +4.0% return over 2024-01-01→2024-11-29 with 268 trades. | Strategy weights seeded in `storage/strategy_state/performance.json`. |
+| Risk (CRO) | ✅ Limits reviewed | `pytest tests/agents/test_risk.py` & `tests/backtest/test_engine.py` passing on 2025-11-29; VaR/drawdown hooks exercised via synthetic run `scripts/mock_run_once.py`. | Kill-switch state clear per `cli.runtime health --raw`. |
+| Compliance (CCO) | ✅ Policy alignment | `.env` reviewed vs `docs/SECURITY.md` rotation log; `pytest tests/agents/test_compliance_execution.py` green; audit trail path `storage/audit/runtime_events.jsonl` verified writeable. | Restricted list + prohibited tactic hooks triggered in unit tests; alert webhook smoke test recorded via `observability.alerts.AlertNotifier`. |
+| Operations (SRE + Observability) | ✅ Monitoring + runbook ready | Streamlit dashboard smoke test (`streamlit_stdout.log`) + alert webhook test (httpbin) succeeded; `docs/OPS_RUNBOOK.md` Backtesting & Promotion section reviewed 2025-11-29. | Prometheus/Grafana stack validated via `ops/observability/docker-compose.yml config`. |

@@ -27,7 +27,12 @@ class FinnhubProvider(BaseProvider):
     ) -> None:
         if not config.finnhub_key:
             raise MissingApiKeyError("Finnhub API key missing")
-        super().__init__("finnhub", cache, rate_limit_per_minute=60)
+        super().__init__(
+            "finnhub",
+            cache,
+            rate_limit_per_minute=60,
+            http_timeout_seconds=config.provider_http_timeout_seconds,
+        )
         self._client = client or finnhub.Client(api_key=config.finnhub_key)
 
     def ping(self) -> bool:  # pragma: no cover - trivial

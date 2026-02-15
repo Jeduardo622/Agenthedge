@@ -5,7 +5,7 @@ Operational procedures derived from `ExecSpec.md` (delegation & escalation) and 
 ## Daily Schedule (ET)
 | Time | Activity | Owner |
 | --- | --- | --- |
-| 08:00 | Health checks (data sources, API keys, agent heartbeat) | Data & Ops |
+| 08:00 | Health checks (data sources, API keys, runtime state) | Data & Ops |
 | 08:15 | Data ingestion refresh (prices, news, sentiment, macro) | Data agent |
 | 08:30 | Strategy briefing: Director ingests fresh KPIs, sets focus | Director |
 | 08:35 | Specialist analysis runs (fundamental, technical, sentiment, macro) | Quant agents |
@@ -33,7 +33,7 @@ Escalation steps follow `GOVERNANCE.md` matrix; severe incidents require manual 
    - Quarantine suspect dataset, switch to backup source.
    - Notify Quant agents to avoid impacted signals.
 3. **Risk Breach**
-   - Risk agent pauses new orders, Execution cancels outstanding orders, Director compiles incident report.
+   - Risk agent pauses new directives, Execution blocks new fills immediately, Director compiles incident report.
    - Human approval required before resuming.
 4. **Compliance Veto**
    - Block trade, annotate reason, inform strategy owner.
@@ -59,13 +59,24 @@ Escalation steps follow `GOVERNANCE.md` matrix; severe incidents require manual 
 - Grafana stack (optional): `docker compose -f ops/observability/docker-compose.yml up -d`, import `ops/observability/grafana_dashboard.json`.
 - Alert notifier fan-out configured via `ALERT_*` env vars (webhook URL, min severity, per-action overrides); risk/compliance agents emit alerts on `risk_alert`, `risk_reject`, `risk_stop_loss`, `risk_stress_breach`, and `compliance_reject`.
 - Kill-switch topics: `risk.kill_switch`, `compliance.kill_switch`, `runtime.kill_switch` — all funnel into runtime halt handling.
+- Message bus ACL enforcement is default-on outside development; use `BUS_ACL_ENFORCE` to override in controlled drills.
+- Network allowlist controls: set `NETWORK_ALLOWLIST_ENABLED=true`, `NETWORK_ALLOWLIST_DOMAINS=<csv>`, and optionally `NETWORK_ALLOWLIST_ENFORCE=true` to block disallowed outbound requests.
+- Runtime heartbeat + anomaly controls: `HEARTBEAT_MONITOR_ENABLED`, `HEARTBEAT_TIMEOUT_SECONDS`, `ANOMALY_DETECTION_ENABLED`, `ANOMALY_THRESHOLD_ZSCORE`, `ANOMALY_CRITICAL_ZSCORE`.
+- Quarantine review: `poetry run python scripts/review_quarantine.py --path storage/quarantine/quarantined_data.jsonl`; release with `--release-symbol <SYMBOL> --release-type <quote|fundamentals|news>`.
 - Slack/email/webhook notifications for alerts.
 - Backtest CLI: `poetry run python scripts/backtest_strategy.py --symbol SPY --symbol QQQ --start 2024-01-02 --end 2024-01-31 --capital 1000000` writes artifacts to `storage/backtests/<run_id>/` (portfolio snapshot, audit log, result.json).
+- Alpha Vantage troubleshooting:
+  - Runtime emits `alpha_vantage_call_failed` warnings plus Prometheus counters. Inspect `storage/logs/agenthedge.log` and the Grafana dashboard before paging Ops.
+  - When fundamentals fail or return `{}`, ingestion automatically falls back to Finnhub’s `company_basic_financials`. If both feeds fail, ticks continue with an empty fundamentals blob so strategies can skip gracefully.
+  - Time-series failures degrade to using Finnhub’s latest quote (no crash). Expect warning `alpha_vantage_timeseries_failed symbol=...`.
+  - Tune the knobs in `.env`: `ALPHA_VANTAGE_MAX_RETRIES`, `ALPHA_VANTAGE_RETRY_DELAY_SECONDS`, `ALPHA_VANTAGE_RATE_LIMIT_BACKOFF_SECONDS`, `ALPHA_VANTAGE_FALLBACK_ENABLED`.
+  - To capture raw API output for incident reports, run a one-off script (e.g., `poetry run python - <<'PY' ...`) against `https://www.alphavantage.co/query?function=OVERVIEW&symbol=<ticker>&apikey=...` and attach the body to the ticket.
 
 ## Logging
 - `infra.logging.configure_logging` wires console + JSON file handlers (rotating daily, 7-day retention). Files under `storage/logs/agenthedge.log*`.
 - Tune with `LOG_LEVEL`, `LOG_DIR`, `LOG_RETENTION_DAYS`.
 - Include `run_id` + environment on every record to correlate with audit reports; ingest into external SIEM if needed.
+- Validate audit-chain integrity after incidents/promotions: `poetry run python scripts/verify_audit_chain.py --path storage/audit/runtime_events.jsonl`.
 
 ### Bootstrap Procedure
 1. `poetry install && poetry shell`

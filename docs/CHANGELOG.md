@@ -8,3 +8,8 @@
 ## 2025-11-27
 - Captured runtime health snapshot for compliance (`storage/audit/health_snapshot_2025-11-27.json`) using `poetry run python -m cli.runtime health`.
 - Added `scripts/mock_run_once.py` to run the agent pipeline against a deterministic ingestion stub, generating initial `storage/strategy_state/portfolio.json` and `storage/audit/runtime_events.jsonl` artifacts for Sprint 1 validation.
+
+## 2026-01-30
+- Added Director approval gate before execution and propagated decision metadata through the agent pipeline.
+- Hardened audit log schema with run/agent metadata and hash chaining for tamper detection.
+- Introduced message bus publish ACLs with default enforcement outside development (override via `BUS_ACL_ENFORCE`).

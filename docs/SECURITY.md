@@ -12,10 +12,11 @@ Combines requirements from `ExecSpec.md` (security & kill switches) and the Tech
 | --- | --- | --- |
 | Identity & Access | Principle of least privilege per agent; trade-only broker keys without withdrawal rights. | Director cannot execute trades; Execution cannot change strategy. |
 | Secrets Management | Store API keys in environment-specific vault or encrypted files. Rotate quarterly or after suspected exposure. | Never log raw secrets; use aliases. |
-| Network & APIs | Restrict outbound calls to approved domains. Enforce TLS. Monitor API rate + failure anomalies. | Data agent maintains allowlist. |
+| Network & APIs | Restrict outbound calls to approved domains. Enforce TLS. Monitor API rate + failure anomalies. | Enforced via `NETWORK_ALLOWLIST_*` policy on provider + webhook HTTP paths. |
 | Code Integrity | Signed releases, checksum validation for agent prompts/configs. Pre-commit + CI security scans. | Leverage dependency scanning (pip-audit). |
-| Runtime Monitoring | Heartbeat checks per agent, anomaly detection on behavior (e.g., unusual order frequency). | Alerts integrate with ops channels. |
-| Kill Switches | Global manual kill (human), automated kill on compliance/risk/security triggers, per-agent disable toggles. | Execution agent cancels outstanding orders on trigger. |
+| Runtime Monitoring | Heartbeat checks per agent, anomaly detection on behavior (e.g., unusual order frequency). | Heartbeat timeout monitor and anomaly detector are active in runtime with alert + kill escalation. |
+| Kill Switches | Global manual kill (human), automated kill on compliance/risk/security triggers, per-agent disable toggles. | Runtime halts ticks; Execution blocks new fills after trigger (paper engine has no outstanding order queue). |
+| Message Bus Controls | Restrict publish topics by agent role using runtime ACLs. | Enforced by default outside development (`ENVIRONMENT!=development`) or explicitly via `BUS_ACL_ENFORCE`. |
 | Logging & Forensics | Immutable logs with tamper-evident storage; replicate to cold storage daily. | Supports investigations and regulatory reporting. |
 | Environment Hardening | Run agents in sandboxed containers/VMs, enforce OS patches, minimize installed software. | For local dev, use virtualenv and restricted OS account. |
 | Adaptive Strategy Controls | `strategy.feedback` channel is authenticated; performance tracker weights (`storage/strategy_state/performance.json`) and backtest artifacts (`storage/backtests/`) are access-controlled. | Prevents malicious weight manipulation and ensures only approved backtest outputs gate live deployment. |
@@ -37,3 +38,15 @@ Combines requirements from `ExecSpec.md` (security & kill switches) and the Tech
 - Automated tests verifying that unauthorized trades are blocked when keys are scoped correctly.
 - Chaos-style simulations (disable data source, inject fake latency) to confirm resilience.
 - Strategy feedback drills: simulate repeated risk/compliance breaches to confirm the Strategy Council down-ranks or disables offending strategies automatically.
+
+## Control Status (Implementation Snapshot)
+- **Implemented now:** tamper-evident audit chain, kill-switch propagation, execution approval-chain checks, replay protection, runtime circuit breaker, and ACL topic enforcement outside development.
+- **Planned hardening:** advanced policy tuning for allowlist/anomaly thresholds and staged rollout in production environments.
+
+## Secret Rotation Log (Phase 4 Launch)
+| Secret | Scope | Last Rotated | Next Rotation | Owner | Notes |
+| --- | --- | --- | --- | --- | --- |
+| Alpha Vantage / Finnhub / NewsAPI | Market + sentiment data (read-only) | 2025-11-29 | 2026-02-28 | Data Ops | Keys stored in local `.env`, vaulted copy in Azure Key Vault `kv-agenthedge-dev`. |
+| FRED API | Macro data (read-only) | 2025-11-29 | 2026-05-31 | Macro Ops | No PII, rotation aligned with quarterly macro review. |
+| Alpaca Paper Trading | Trade-only paper creds | 2025-11-29 | 2026-02-28 | Trading Ops | Withdrawal rights disabled per broker console, alerts configured on credential use. |
+| Alert Webhook Token | Observability notifications | 2025-11-20 | 2025-12-31 | SRE | Token stored in `.env`, mirrored into ops secret manager for CI. |

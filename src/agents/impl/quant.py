@@ -116,6 +116,7 @@ class StrategyCouncilAgent(BaseAgent):
 
         snapshot = self.portfolio_store.snapshot()
         directive_id = payload.get("directive_id")
+        decision_id = payload.get("decision_id") or directive_id
         proposals: List[StrategyDecision] = []
         for strategy in self.strategies:
             decision = strategy.generate(
@@ -129,14 +130,14 @@ class StrategyCouncilAgent(BaseAgent):
             )
             if not decision:
                 continue
-            self._publish_strategy_proposal(decision, directive_id)
+            self._publish_strategy_proposal(decision, directive_id, decision_id)
             proposals.append(decision)
         if not proposals:
             return
-        consensus = self._build_consensus(symbol, price, proposals, directive_id)
+        consensus = self._build_consensus(symbol, price, proposals, directive_id, decision_id)
         if not consensus:
             return
-        self.bus.publish("quant.proposal", payload=consensus)
+        self.bus.publish("quant.proposal", payload=consensus, publisher=self.name)
         self.audit("quant_consensus", consensus)
         self.publish_metric(
             "quant_proposal", 1.0, {"symbol": symbol, "action": consensus["action"]}
@@ -166,9 +167,11 @@ class StrategyCouncilAgent(BaseAgent):
         self,
         decision: StrategyDecision,
         directive_id: str | None,
+        decision_id: str | None,
     ) -> None:
         payload = {
             "proposal_id": str(uuid.uuid4()),
+            "decision_id": decision_id or directive_id,
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "strategy": decision.strategy,
             "symbol": decision.symbol,
@@ -178,10 +181,12 @@ class StrategyCouncilAgent(BaseAgent):
             "rationale": decision.rationale,
             "metadata": {
                 **decision.metadata,
-                "data_refs": {"directive_id": directive_id},
+                "data_refs": {"directive_id": directive_id, "decision_id": decision_id},
             },
         }
-        self.bus.publish(f"strategy.proposal.{decision.strategy}", payload=payload)
+        self.bus.publish(
+            f"strategy.proposal.{decision.strategy}", payload=payload, publisher=self.name
+        )
         self.audit("strategy_proposal", payload)
         self.publish_metric(
             "strategy_proposal",
@@ -195,6 +200,7 @@ class StrategyCouncilAgent(BaseAgent):
         price: float,
         decisions: Sequence[StrategyDecision],
         directive_id: str | None,
+        decision_id: str | None,
     ) -> Dict[str, Any] | None:
         aggregates: Dict[str, Dict[str, Any]] = defaultdict(
             lambda: {"weight": 0.0, "count": 0, "decisions": []}
@@ -223,6 +229,7 @@ class StrategyCouncilAgent(BaseAgent):
         proposal_id = str(uuid.uuid4())
         return {
             "proposal_id": proposal_id,
+            "decision_id": decision_id or directive_id or proposal_id,
             "symbol": symbol,
             "price": price,
             "action": action,
@@ -248,6 +255,7 @@ class StrategyCouncilAgent(BaseAgent):
                     "weight_threshold": self.weight_threshold,
                 },
                 "directive_id": directive_id,
+                "decision_id": decision_id,
             },
         }
 

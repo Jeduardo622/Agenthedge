@@ -6,18 +6,20 @@ import json
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Sequence
+from typing import Any, Dict, List, Mapping, Sequence, cast
 
 import yfinance as yf
 
 from agents.base import BaseAgent
 from agents.context import AgentContext
 from agents.impl.compliance import ComplianceAgent
+from agents.impl.director import DirectorAgent
 from agents.impl.execution import ExecutionAgent
 from agents.impl.quant import StrategyCouncilAgent
 from agents.impl.risk import RiskAgent
 from agents.messaging import Envelope, MessageBus
 from audit import JsonlAuditSink
+from data.ingestion.service import DataIngestionService
 from learning import PerformanceTracker
 from observability.state import ObservabilityState
 from portfolio.store import PortfolioStore
@@ -249,7 +251,7 @@ class BacktestEngine:
                         current_date, datetime.min.time(), tzinfo=timezone.utc
                     ).isoformat(),
                 }
-                bus.publish("director.directive", payload=directive)
+                bus.publish("director.directive", payload=directive, publisher="director")
                 last_prices[symbol] = bar.close
             nav = _estimate_nav(portfolio_store, last_prices)
             nav_series.append({"date": current_date.isoformat(), "nav": round(nav, 2)})
@@ -287,6 +289,7 @@ class BacktestEngine:
         strategies: Sequence[Strategy],
     ) -> Dict[str, BaseAgent]:
         ingestion_stub = _BacktestIngestionStub()
+        ingestion_service = cast(DataIngestionService, ingestion_stub)
         shared_extras = {
             "portfolio_store": portfolio_store,
             "message_bus": bus,
@@ -296,9 +299,17 @@ class BacktestEngine:
             "performance_tracker": performance_tracker,
         }
         agents: Dict[str, BaseAgent] = {}
+        director_context = AgentContext.build_default(
+            name="director",
+            ingestion=ingestion_service,
+            cache=None,
+            extras=shared_extras,
+            audit_sink=audit_sink,
+        ).with_message_bus(bus)
+        agents["director"] = DirectorAgent(director_context)
         quant_context = AgentContext.build_default(
             name="quant",
-            ingestion=ingestion_stub,
+            ingestion=ingestion_service,
             cache=None,
             extras={**shared_extras, "strategies": strategies},
             audit_sink=audit_sink,
@@ -306,7 +317,7 @@ class BacktestEngine:
         agents["quant"] = StrategyCouncilAgent(quant_context)
         risk_context = AgentContext.build_default(
             name="risk",
-            ingestion=ingestion_stub,
+            ingestion=ingestion_service,
             cache=None,
             extras=shared_extras,
             audit_sink=audit_sink,
@@ -314,7 +325,7 @@ class BacktestEngine:
         agents["risk"] = RiskAgent(risk_context)
         compliance_context = AgentContext.build_default(
             name="compliance",
-            ingestion=ingestion_stub,
+            ingestion=ingestion_service,
             cache=None,
             extras=shared_extras,
             audit_sink=audit_sink,
@@ -322,7 +333,7 @@ class BacktestEngine:
         agents["compliance"] = ComplianceAgent(compliance_context)
         execution_context = AgentContext.build_default(
             name="execution",
-            ingestion=ingestion_stub,
+            ingestion=ingestion_service,
             cache=None,
             extras=shared_extras,
             audit_sink=audit_sink,

@@ -27,7 +27,12 @@ class NewsProvider(BaseProvider):
     ) -> None:
         if not config.news_api_key:
             raise MissingApiKeyError("News API key missing")
-        super().__init__("newsapi", cache, rate_limit_per_minute=30)
+        super().__init__(
+            "newsapi",
+            cache,
+            rate_limit_per_minute=30,
+            http_timeout_seconds=config.provider_http_timeout_seconds,
+        )
         self._client = client or NewsApiClient(api_key=config.news_api_key)
 
     def ping(self) -> bool:  # pragma: no cover

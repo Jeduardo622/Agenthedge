@@ -75,13 +75,19 @@ class ComplianceAgent(BaseAgent):
         price = _as_float(payload.get("price"))
         quantity = _as_float(payload.get("quantity"))
         proposal_id = payload.get("proposal_id")
+        decision_id = payload.get("decision_id") or proposal_id
         strategies = (
             payload.get("strategies") if isinstance(payload.get("strategies"), list) else None
         )
         if not symbol or price is None or quantity is None or not proposal_id:
             return
         if symbol in self.restricted:
-            payload = {"proposal_id": proposal_id, "symbol": symbol, "reason": "restricted_symbol"}
+            payload = {
+                "proposal_id": proposal_id,
+                "decision_id": decision_id,
+                "symbol": symbol,
+                "reason": "restricted_symbol",
+            }
             self.audit("compliance_reject", payload)
             self.alert("compliance_reject", payload, severity="error")
             self._record_compliance(approved=False)
@@ -92,10 +98,11 @@ class ComplianceAgent(BaseAgent):
         if prohibited_reason:
             payload = {
                 "proposal_id": proposal_id,
+                "decision_id": decision_id,
                 "symbol": symbol,
                 "reason": prohibited_reason,
             }
-            self.bus.publish("compliance.kill_switch", payload=payload)
+            self.bus.publish("compliance.kill_switch", payload=payload, publisher=self.name)
             self.audit("compliance_reject", payload)
             self.alert("compliance_reject", payload, severity="critical")
             self._record_compliance(approved=False)
@@ -103,9 +110,8 @@ class ComplianceAgent(BaseAgent):
                 self._emit_strategy_feedback(strategies, reason=prohibited_reason, delta=-0.3)
             return
         snapshot = self.portfolio_store.snapshot()
-        current_qty = (
-            snapshot.positions.get(symbol).quantity if symbol in snapshot.positions else 0.0
-        )
+        position = snapshot.positions.get(symbol)
+        current_qty = position.quantity if position else 0.0
         projected_qty = current_qty + quantity
         projected_notional = abs(projected_qty * price)
         nav = snapshot.cash + sum(
@@ -116,6 +122,7 @@ class ComplianceAgent(BaseAgent):
         if (projected_notional / nav) > self.max_position_pct:
             payload = {
                 "proposal_id": proposal_id,
+                "decision_id": decision_id,
                 "symbol": symbol,
                 "reason": "concentration_limit",
             }
@@ -125,11 +132,18 @@ class ComplianceAgent(BaseAgent):
             if strategies:
                 self._emit_strategy_feedback(strategies, reason="concentration_limit")
             return
+        approvals = dict(payload.get("approvals") or {})
+        approvals["compliance"] = {
+            "status": "approved",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
         approval = {
             **payload,
             "projected_quantity": projected_qty,
+            "decision_id": decision_id,
+            "approvals": approvals,
         }
-        self.bus.publish("compliance.approval", payload=approval)
+        self.bus.publish("compliance.approval", payload=approval, publisher=self.name)
         self.publish_metric("compliance_approved", 1.0, {"symbol": symbol})
         self._record_compliance(approved=True)
 
@@ -189,5 +203,5 @@ class ComplianceAgent(BaseAgent):
                 "reason": f"compliance_{reason}",
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             }
-            self.bus.publish("strategy.feedback", payload=payload)
+            self.bus.publish("strategy.feedback", payload=payload, publisher=self.name)
             self.audit("strategy_feedback", payload)

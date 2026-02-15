@@ -20,7 +20,7 @@ class FakeRuntime:
         self.run_once_called = False
         self.bootstrap_called = False
         self.stopped = False
-        self._health = {"tick_count": 1}
+        self._health = {"tick_count": 1, "runtime_controls": {"stale_heartbeats": []}}
 
     def run_once(self) -> None:
         self.run_once_called = True
@@ -92,3 +92,14 @@ def test_eod_closure_writes_snapshot(tmp_path) -> None:
     snapshot = state.snapshot()
     assert files, "eod snapshot file missing"
     assert snapshot["scheduler"]["eod_closure"]["status"] == "completed"
+
+
+def test_heartbeat_check_records_state(tmp_path) -> None:
+    service, runtime, state = _build_scheduler(tmp_path=tmp_path, trading_day=True)
+    runtime._health["runtime_controls"] = {"stale_heartbeats": ["risk"]}
+
+    service.heartbeat_check()
+
+    snapshot = state.snapshot()
+    assert snapshot["scheduler"]["heartbeat_check"]["status"] == "completed"
+    assert snapshot["scheduler"]["heartbeat_check"]["details"]["stale_heartbeats"] == ["risk"]

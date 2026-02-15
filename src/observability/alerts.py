@@ -8,8 +8,11 @@ import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Mapping, MutableMapping, Protocol, Sequence
+from urllib.parse import urlparse
 
 import requests
+
+from infra.network import get_network_allowlist_policy
 
 from .state import get_observability_state
 
@@ -27,6 +30,16 @@ DEFAULT_ACTION_SEVERITIES = {
     "risk_reject": "error",
     "compliance_reject": "error",
 }
+
+
+def _is_placeholder_webhook(url: str) -> bool:
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    if not host:
+        return True
+    if host in {"example.com", "www.example.com", "hooks.example.com"}:
+        return True
+    return "example.com" in host
 
 
 @dataclass(slots=True)
@@ -64,6 +77,14 @@ class WebhookTransport:
         self.timeout_seconds = timeout_seconds
 
     def send(self, event: AlertEvent) -> None:
+        policy = get_network_allowlist_policy()
+        allowed, reason = policy.validate(self.url)
+        if not allowed:
+            message = f"alert webhook blocked url={self.url!r} reason={reason}"
+            if policy.enforce:
+                raise PermissionError(message)
+            _LOGGER.warning(message)
+            return
         response = requests.post(
             self.url,
             json=event.as_dict(),
@@ -145,9 +166,11 @@ class AlertNotifier:
         source = env or os.environ
         transports: list[AlertTransport] = []
         webhook_url = source.get("ALERT_WEBHOOK_URL", "").strip()
-        if webhook_url:
+        if webhook_url and not _is_placeholder_webhook(webhook_url):
             timeout = float(source.get("ALERT_WEBHOOK_TIMEOUT_SECONDS", "4.0"))
             transports.append(WebhookTransport(webhook_url, timeout_seconds=timeout))
+        elif webhook_url:
+            _LOGGER.warning("alert webhook URL appears to be a placeholder; skipping")
         stdout_enabled = source.get("ALERT_STDOUT_ENABLED", "true").lower() not in {
             "0",
             "false",

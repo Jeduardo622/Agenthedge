@@ -6,9 +6,19 @@ import logging
 import threading
 import time
 from abc import ABC, abstractmethod
-from typing import Callable, Mapping, TypeVar, cast
+from typing import Any, Callable, Mapping, TypeVar, cast
+
+from infra.network import get_network_allowlist_policy
 
 from ..cache import TTLCache
+
+requests: Any = None
+try:  # pragma: no cover - optional dependency guard
+    import requests as _requests
+
+    requests = _requests
+except ImportError:  # pragma: no cover
+    pass
 
 T = TypeVar("T")
 
@@ -54,6 +64,7 @@ class BaseProvider(ABC):
         retries: int = 3,
         retry_delay: float = 1.0,
         rate_limit_per_minute: float | None = None,
+        http_timeout_seconds: float | None = None,
     ) -> None:
         self.name = name
         self._cache = cache
@@ -64,6 +75,7 @@ class BaseProvider(ABC):
             RateLimiter(rate_limit_per_minute / 60.0) if rate_limit_per_minute else None
         )
         self.logger = logging.getLogger(f"agenthedge.data.{name}")
+        _configure_requests_timeout(http_timeout_seconds)
 
     @abstractmethod
     def ping(self) -> bool:
@@ -111,3 +123,27 @@ class BaseProvider(ABC):
 
     def rate_limit_info(self) -> Mapping[str, float | None]:
         return {"rate_limit_per_minute": self._rate_limit_per_minute}
+
+
+def _configure_requests_timeout(timeout_seconds: float | None) -> None:
+    if not requests or not timeout_seconds or timeout_seconds <= 0:
+        return
+    if getattr(requests, "_agenthedge_timeout_patched", False):
+        return
+
+    original_request = requests.sessions.Session.request
+
+    def _request_with_timeout(self, method, url, **kwargs):  # type: ignore[no-untyped-def]
+        policy = get_network_allowlist_policy()
+        allowed, reason = policy.validate(url)
+        if not allowed:
+            message = f"outbound request blocked url={url!r} reason={reason}"
+            if policy.enforce:
+                raise PermissionError(message)
+            logging.getLogger("agenthedge.network").warning(message)
+        if kwargs.get("timeout") is None:
+            kwargs["timeout"] = timeout_seconds
+        return original_request(self, method, url, **kwargs)
+
+    requests.sessions.Session.request = _request_with_timeout
+    requests._agenthedge_timeout_patched = True

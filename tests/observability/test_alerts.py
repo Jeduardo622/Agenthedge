@@ -4,6 +4,7 @@ from typing import List
 
 from pytest import MonkeyPatch
 
+from infra.network import reset_network_allowlist_policy_cache
 from observability.alerts import AlertEvent, AlertNotifier
 
 
@@ -37,3 +38,23 @@ def test_notifier_from_env_overrides(monkeypatch: MonkeyPatch) -> None:
 
     assert notifier.min_severity == "error"
     assert notifier.action_severities["risk_alert"] == "critical"
+
+
+def test_webhook_transport_respects_allowlist(monkeypatch: MonkeyPatch, caplog) -> None:
+    reset_network_allowlist_policy_cache()
+    monkeypatch.setenv("NETWORK_ALLOWLIST_ENABLED", "true")
+    monkeypatch.setenv("NETWORK_ALLOWLIST_ENFORCE", "true")
+    monkeypatch.setenv("NETWORK_ALLOWLIST_DOMAINS", "allowed.local")
+
+    notifier = AlertNotifier.from_env(
+        {
+            "ALERT_WEBHOOK_URL": "https://blocked.local/notify",
+            "ALERT_STDOUT_ENABLED": "false",
+            "ALERT_MIN_SEVERITY": "info",
+            "NETWORK_ALLOWLIST_ENABLED": "true",
+            "NETWORK_ALLOWLIST_ENFORCE": "true",
+            "NETWORK_ALLOWLIST_DOMAINS": "allowed.local",
+        }
+    )
+    notifier.notify("risk_alert", {"symbol": "SPY"}, severity="warning")
+    assert "alert webhook blocked" in caplog.text

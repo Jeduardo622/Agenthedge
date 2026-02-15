@@ -7,7 +7,7 @@ import pytest
 from data.cache import TTLCache
 from data.config import DataProviderConfig
 from data.providers.alpha_vantage import AlphaVantageProvider
-from data.providers.base import DataProviderError
+from data.providers.base import DataProviderError, TransientProviderError
 from data.providers.finnhub import FinnhubProvider
 from data.providers.news import NewsProvider
 
@@ -43,6 +43,9 @@ def _config() -> DataProviderConfig:
         finnhub_key="finn",
         fred_api_key="fred",
         news_api_key="news",
+        alpha_vantage_retries=1,
+        alpha_vantage_retry_delay=0.0,
+        alpha_vantage_rate_limit_backoff_seconds=0.0,
     )
 
 
@@ -98,3 +101,153 @@ def test_finnhub_retries_on_transient(monkeypatch):
 
     assert quote["c"] == 420.0
     assert provider._cache is not None
+
+
+def test_alpha_vantage_empty_overview_returns_empty_payload():
+    class EmptyFundamentals:
+        def get_company_overview(self, symbol: str) -> dict:
+            return {}
+
+    provider = AlphaVantageProvider(
+        _config(),
+        cache=TTLCache(),
+        timeseries=_TimeseriesStub(),
+        fundamentals=EmptyFundamentals(),
+        fx=_FxStub(),
+    )
+    assert provider.get_company_overview("AAPL") == {}
+
+
+def test_alpha_vantage_rate_limit_detection_note():
+    provider = AlphaVantageProvider(
+        _config(),
+        cache=TTLCache(),
+        timeseries=_TimeseriesStub(),
+        fundamentals=_FundamentalsStub(),
+        fx=_FxStub(),
+    )
+    with pytest.raises(TransientProviderError):
+        provider._detect_rate_limit(
+            "company overview",
+            {
+                "Note": (
+                    "Thank you for using Alpha Vantage! "
+                    "Our standard API call frequency is 25 calls per day."
+                )
+            },
+        )
+
+
+def test_ingestion_falls_back_to_finnhub(monkeypatch):
+    from data.ingestion.service import DataIngestionService
+
+    class AlphaFail:
+        def get_company_overview(self, symbol: str) -> dict:
+            raise DataProviderError("boom")
+
+        def get_equity_timeseries(self, *args, **kwargs):
+            return {"2024-01-02": {"4. close": "123"}}
+
+    class FinnhubStub:
+        def get_fundamentals(self, symbol: str, metric: str = "all") -> dict:
+            return {
+                "metric": {
+                    "peExclExtraTTM": 11.0,
+                    "netProfitMarginTTM": 0.15,
+                }
+            }
+
+        def get_quote(self, symbol: str) -> dict:
+            return {"c": 100.0}
+
+        def get_company_news(self, symbol: str) -> list[dict]:
+            return []
+
+    class NewsStub:
+        def get_company_news(self, symbol: str) -> list[dict]:
+            return []
+
+    service = DataIngestionService(config=_config())
+    service._providers["alpha_vantage"] = AlphaFail()
+    service._providers["finnhub"] = FinnhubStub()
+    service._providers["newsapi"] = NewsStub()
+
+    snapshot = service.get_market_snapshot("AAPL")
+    assert snapshot.fundamentals["_source"] == "finnhub"
+    assert snapshot.fundamentals["PERatio"] == 11.0
+
+
+def test_ingestion_fallback_can_be_disabled(monkeypatch):
+    from data.ingestion.service import DataIngestionService
+
+    config = _config()
+    object.__setattr__(config, "alpha_vantage_fallback_enabled", False)
+
+    class AlphaFail:
+        def get_company_overview(self, symbol: str) -> dict:
+            raise DataProviderError("boom")
+
+    service = DataIngestionService(config=config)
+    service._providers["alpha_vantage"] = AlphaFail()
+
+    with pytest.raises(DataProviderError):
+        service._fetch_fundamentals("AAPL", AlphaFail())
+
+
+def test_ingestion_returns_empty_when_all_fundamentals_fail(monkeypatch):
+    from data.ingestion.service import DataIngestionService
+
+    class AlphaFail:
+        def get_company_overview(self, symbol: str) -> dict:
+            raise DataProviderError("boom")
+
+        def get_equity_timeseries(self, *args, **kwargs):
+            return {"2024-01-02": {"4. close": "123"}}
+
+    class FinnhubEmpty:
+        def get_fundamentals(self, symbol: str, metric: str = "all") -> dict:
+            return {"metric": {}}
+
+        def get_quote(self, symbol: str) -> dict:
+            return {"c": 100.0}
+
+        def get_company_news(self, symbol: str) -> list[dict]:
+            return []
+
+    class NewsStub:
+        def get_company_news(self, symbol: str) -> list[dict]:
+            return []
+
+    service = DataIngestionService(config=_config())
+    service._providers["alpha_vantage"] = AlphaFail()
+    service._providers["finnhub"] = FinnhubEmpty()
+    service._providers["newsapi"] = NewsStub()
+
+    snapshot = service.get_market_snapshot("AAPL")
+    assert snapshot.fundamentals == {}
+
+
+def test_ingestion_uses_quote_when_timeseries_fail(monkeypatch):
+    from data.ingestion.service import DataIngestionService
+
+    class AlphaTimeseriesFail:
+        def get_company_overview(self, symbol: str) -> dict:
+            return {"Symbol": symbol, "PERatio": "10"}
+
+        def get_equity_timeseries(self, *args, **kwargs):
+            raise DataProviderError("ts boom")
+
+    class FinnhubQuoteNews:
+        def get_quote(self, symbol: str) -> dict:
+            return {"c": 432.1}
+
+        def get_company_news(self, symbol: str) -> list[dict]:
+            return []
+
+    service = DataIngestionService(config=_config())
+    service._providers["alpha_vantage"] = AlphaTimeseriesFail()
+    service._providers["finnhub"] = FinnhubQuoteNews()
+    service._providers["newsapi"] = FinnhubQuoteNews()
+
+    snapshot = service.get_market_snapshot("AAPL")
+    assert snapshot.latest_close == 432.1

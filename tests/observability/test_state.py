@@ -11,6 +11,8 @@ def test_observability_state_tracks_sections() -> None:
     state.record_alert("risk_alert", "warning", {"symbol": "AAPL"})
     state.record_scheduler_event("run_daily_trade", status="completed", details={"ticks": 1})
     state.record_audit_report({"week": "2025-W48"})
+    state.record_heartbeat("risk", {"stale": False})
+    state.record_anomaly("execution.fill", {"severity": "warning"})
 
     snapshot = state.snapshot()
     assert snapshot["risk"]["nav"] == 1_000_000
@@ -19,3 +21,5 @@ def test_observability_state_tracks_sections() -> None:
     assert snapshot["alerts"]["counts"]["warning"] == 1
     assert "run_daily_trade" in snapshot["scheduler"]
     assert snapshot["audit"]["week"] == "2025-W48"
+    assert snapshot["heartbeats"]["risk"]["stale"] is False
+    assert snapshot["anomalies"]["execution.fill"]["severity"] == "warning"

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fnmatch
 import threading
 import uuid
 from collections import deque
@@ -47,25 +48,37 @@ class Subscription:
 class MessageBus:
     """Thread-safe pub/sub bus with bounded replay buffer."""
 
-    def __init__(self, *, max_history: int = 512) -> None:
+    def __init__(
+        self,
+        *,
+        max_history: int = 512,
+    ) -> None:
         self._subs: Dict[str, Subscription] = {}
         self._history: Deque[Envelope] = deque(maxlen=max_history)
         self._lock = threading.RLock()
+        self._publish_acl: Dict[str, set[str]] = {}
+        self._enforce_acl = False
 
     def publish(
         self,
         topic: str,
         payload: Payload = None,
         *,
+        publisher: str | None = None,
         metadata: Mapping[str, object] | None = None,
     ) -> Envelope:
+        if not self._is_allowed(topic, publisher):
+            raise PermissionError(f"Publisher {publisher!r} not allowed for topic {topic!r}")
         envelope = Envelope(
             id=str(uuid.uuid4()),
             message=Message(
                 topic=topic,
                 payload=payload or {},
                 created_at=datetime.now(timezone.utc),
-                metadata=metadata or {},
+                metadata={
+                    **(metadata or {}),
+                    "publisher": publisher,
+                },
             ),
         )
         with self._lock:
@@ -122,3 +135,32 @@ class MessageBus:
     def depth(self) -> int:
         with self._lock:
             return len(self._history)
+
+    def configure_acl(
+        self,
+        rules: Mapping[str, Sequence[str]] | None = None,
+        *,
+        enforce: bool = False,
+    ) -> None:
+        self._publish_acl = {
+            topic: {publisher for publisher in publishers if publisher}
+            for topic, publishers in (rules or {}).items()
+        }
+        self._enforce_acl = enforce
+
+    def acl_status(self) -> MutableMapping[str, object]:
+        return {
+            "enforced": self._enforce_acl,
+            "rule_count": len(self._publish_acl),
+            "rules": sorted(self._publish_acl.keys()),
+        }
+
+    def _is_allowed(self, topic: str, publisher: str | None) -> bool:
+        if not self._enforce_acl or not self._publish_acl:
+            return True
+        if not publisher:
+            return False
+        for pattern, allowed in self._publish_acl.items():
+            if fnmatch.fnmatch(topic, pattern):
+                return publisher in allowed
+        return False

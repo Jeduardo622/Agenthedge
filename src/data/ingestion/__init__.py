@@ -1,5 +1,5 @@
 """High-level data ingestion service plumbing multiple providers."""
 
-from .service import DataIngestionService
+from .service import DataIngestionService, MarketSnapshot
 
-__all__ = ["DataIngestionService"]
+__all__ = ["DataIngestionService", "MarketSnapshot"]

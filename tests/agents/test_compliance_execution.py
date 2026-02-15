@@ -8,6 +8,7 @@ from pytest import MonkeyPatch
 
 from agents.context import AgentContext
 from agents.impl.compliance import ComplianceAgent
+from agents.impl.director import DirectorAgent
 from agents.impl.execution import ExecutionAgent
 from agents.messaging import MessageBus
 from portfolio.store import PortfolioStore
@@ -36,8 +37,10 @@ def test_compliance_allows_and_execution_applies_trade(
     store = PortfolioStore(tmp_path / "portfolio.json", initial_cash=100000.0)
     bus = MessageBus()
     compliance = ComplianceAgent(_context("compliance", store, bus))
+    director = DirectorAgent(_context("director", store, bus))
     execution = ExecutionAgent(_context("execution", store, bus))
     compliance.setup()
+    director.setup()
     execution.setup()
     fills: List[Dict[str, Any]] = []
     bus.subscribe(
@@ -46,13 +49,101 @@ def test_compliance_allows_and_execution_applies_trade(
 
     bus.publish(
         "risk.approval",
-        payload={"proposal_id": "p1", "symbol": "SPY", "price": 100.0, "quantity": 10},
+        payload={
+            "proposal_id": "p1",
+            "decision_id": "d1",
+            "symbol": "SPY",
+            "price": 100.0,
+            "quantity": 10,
+            "approvals": {"risk": {"status": "approved", "timestamp": "2026-01-01T00:00:00+00:00"}},
+        },
+        publisher="risk",
     )
 
     assert fills
     assert store.snapshot().cash == 100000.0 - (100.0 * 10)
 
     compliance.teardown()
+    director.teardown()
+    execution.teardown()
+
+
+def test_execution_rejects_replayed_director_approval(tmp_path: Path) -> None:
+    store = PortfolioStore(tmp_path / "portfolio.json", initial_cash=100000.0)
+    bus = MessageBus()
+    execution = ExecutionAgent(_context("execution", store, bus))
+    execution.setup()
+    payload = {
+        "proposal_id": "p-replay",
+        "decision_id": "d-replay",
+        "director_approval_id": "a-replay",
+        "symbol": "SPY",
+        "price": 100.0,
+        "quantity": 1.0,
+        "approvals": {
+            "risk": {"status": "approved"},
+            "compliance": {"status": "approved"},
+            "director": {"status": "approved"},
+        },
+    }
+
+    bus.publish("director.approval", payload=payload, publisher="director")
+    bus.publish("director.approval", payload=payload, publisher="director")
+
+    snapshot = store.snapshot()
+    assert snapshot.positions["SPY"].quantity == 1.0
+    execution.teardown()
+
+
+def test_execution_rejects_missing_required_approvals(tmp_path: Path) -> None:
+    store = PortfolioStore(tmp_path / "portfolio.json", initial_cash=100000.0)
+    bus = MessageBus()
+    execution = ExecutionAgent(_context("execution", store, bus))
+    execution.setup()
+
+    bus.publish(
+        "director.approval",
+        payload={
+            "proposal_id": "p-missing",
+            "decision_id": "d-missing",
+            "director_approval_id": "a-missing",
+            "symbol": "SPY",
+            "price": 100.0,
+            "quantity": 1.0,
+            "approvals": {"director": {"status": "approved"}},
+        },
+        publisher="director",
+    )
+
+    assert "SPY" not in store.snapshot().positions
+    execution.teardown()
+
+
+def test_execution_blocks_after_kill_switch(tmp_path: Path) -> None:
+    store = PortfolioStore(tmp_path / "portfolio.json", initial_cash=100000.0)
+    bus = MessageBus()
+    execution = ExecutionAgent(_context("execution", store, bus))
+    execution.setup()
+    bus.publish("risk.kill_switch", payload={"reason": "stop"}, publisher="risk")
+    bus.publish(
+        "director.approval",
+        payload={
+            "proposal_id": "p-kill",
+            "decision_id": "d-kill",
+            "director_approval_id": "a-kill",
+            "symbol": "SPY",
+            "price": 100.0,
+            "quantity": 1.0,
+            "approvals": {
+                "risk": {"status": "approved"},
+                "compliance": {"status": "approved"},
+                "director": {"status": "approved"},
+            },
+        },
+        publisher="director",
+    )
+
+    assert "SPY" not in store.snapshot().positions
     execution.teardown()
 
 

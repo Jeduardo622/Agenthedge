@@ -124,6 +124,7 @@ class RiskAgent(BaseAgent):
         proposal_id = payload.get("proposal_id")
         if not symbol or price is None or quantity is None or not proposal_id:
             return
+        decision_id = payload.get("decision_id") or proposal_id
         snapshot = self.portfolio_store.snapshot()
         exposures = self._build_exposure_table(snapshot)
         projected_exposures = dict(exposures)
@@ -144,6 +145,7 @@ class RiskAgent(BaseAgent):
             self._reject_with_reason(
                 proposal_id,
                 symbol,
+                decision_id=decision_id,
                 reason="notional_limit",
                 extra={"notional": round(notional, 2), "limit": round(limit, 2)},
                 strategies=payload.get("strategies"),
@@ -153,6 +155,7 @@ class RiskAgent(BaseAgent):
             self._reject_with_reason(
                 proposal_id,
                 symbol,
+                decision_id=decision_id,
                 reason="gross_leverage_limit",
                 extra={"projected_leverage": round(leverage, 3)},
             )
@@ -165,16 +168,29 @@ class RiskAgent(BaseAgent):
             self._reject_with_reason(
                 proposal_id,
                 symbol,
+                decision_id=decision_id,
                 reason="var_limit",
                 extra={"var_pct": round(var_pct, 4), "var_amount": round(var_amount, 2)},
             )
             return
+        approvals = dict(payload.get("approvals") or {})
+        approvals["risk"] = {
+            "status": "approved",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "metrics": {
+                "gross_exposure": gross,
+                "leverage": leverage,
+                "var_pct": var_pct,
+            },
+        }
         approval = {
             "proposal_id": proposal_id,
+            "decision_id": decision_id,
             "symbol": symbol,
             "price": price,
             "quantity": quantity,
             "risk_limit": limit,
+            "approvals": approvals,
             "risk_metrics": {
                 "nav": nav,
                 "gross_exposure": gross,
@@ -201,7 +217,7 @@ class RiskAgent(BaseAgent):
             var_pct=var_pct,
             var_amount=var_amount,
         )
-        self.bus.publish("risk.approval", payload=approval)
+        self.bus.publish("risk.approval", payload=approval, publisher=self.name)
         self.publish_metric("risk_approved", 1.0, {"symbol": symbol})
 
     def _maybe_run_stress_test(self) -> None:
@@ -250,12 +266,14 @@ class RiskAgent(BaseAgent):
         proposal_id: str,
         symbol: str,
         *,
+        decision_id: str | None = None,
         reason: str,
         extra: Mapping[str, float | int | str] | None = None,
         strategies: Sequence[Mapping[str, Any]] | None = None,
     ) -> None:
         payload: Dict[str, Any] = {
             "proposal_id": proposal_id,
+            "decision_id": decision_id or proposal_id,
             "symbol": symbol,
             "reason": reason,
         }
@@ -323,7 +341,7 @@ class RiskAgent(BaseAgent):
         prev_nav = self._nav_history[-2]
         if prev_nav:
             day_change_pct = (nav - prev_nav) / prev_nav
-            if abs(day_change_pct) >= self.nav_hard_stop_pct:
+            if day_change_pct <= -self.nav_hard_stop_pct:
                 self._emit_kill_switch(
                     reason="daily_loss_hard_stop",
                     details={"daily_change_pct": day_change_pct, "nav": nav},
@@ -349,7 +367,7 @@ class RiskAgent(BaseAgent):
 
     def _emit_kill_switch(self, *, reason: str, details: Mapping[str, Any]) -> None:
         payload = {"reason": reason, **details}
-        self.bus.publish("risk.kill_switch", payload=payload)
+        self.bus.publish("risk.kill_switch", payload=payload, publisher=self.name)
         self.alert("risk_kill_switch", payload, severity="critical")
         self.audit("risk_kill_switch", payload)
         strategies = details.get("strategies")
@@ -381,7 +399,7 @@ class RiskAgent(BaseAgent):
                 "quantity": position.quantity,
                 "loss_pct": move_pct,
             }
-            self.bus.publish("risk.stop_loss", payload=payload)
+            self.bus.publish("risk.stop_loss", payload=payload, publisher=self.name)
             self.alert("risk_stop_loss", payload, severity="error")
             self.audit("risk_stop_loss", payload)
         else:
@@ -440,5 +458,5 @@ class RiskAgent(BaseAgent):
                 "reason": reason,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             }
-            self.bus.publish("strategy.feedback", payload=payload)
+            self.bus.publish("strategy.feedback", payload=payload, publisher=self.name)
             self.audit("strategy_feedback", payload)
