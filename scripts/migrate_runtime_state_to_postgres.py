@@ -55,7 +55,11 @@ def _check_idempotent_run(
     dsn: str,
     migration_name: str,
     checksum: str,
+    target_present: bool,
+    force: bool,
 ) -> bool:
+    if force:
+        return False
     with postgres_connection(dsn) as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -75,7 +79,33 @@ def _check_idempotent_run(
                     f"migration {migration_name!r} already ran with different checksum "
                     f"(existing={existing}, incoming={checksum})."
                 )
-            return True
+            return target_present
+
+
+def _portfolio_target_present(*, dsn: str, account_id: str) -> bool:
+    with postgres_connection(dsn) as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT 1
+                FROM ah_portfolio_accounts
+                WHERE account_id = %s
+                LIMIT 1
+                """,
+                (account_id,),
+            )
+            return cur.fetchone() is not None
+
+
+def _audit_target_present(*, dsn: str, expected_rows: int) -> bool:
+    if expected_rows == 0:
+        return True
+    with postgres_connection(dsn) as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT COUNT(*) FROM ah_audit_events")
+            row = cur.fetchone()
+            count = int(row[0]) if row else 0
+            return count >= expected_rows
 
 
 def _record_migration_run(
@@ -117,6 +147,7 @@ def migrate_portfolio(
     dsn: str,
     portfolio_path: Path,
     account_id: str,
+    force: bool = False,
 ) -> dict[str, object]:
     payload = _load_portfolio(portfolio_path)
     checksum = _sha256_bytes(_canonical_json(payload).encode("utf-8"))
@@ -124,10 +155,13 @@ def migrate_portfolio(
     if not isinstance(positions, Mapping):
         raise ValueError("portfolio positions must be an object")
     source_rows = 1 + len(positions)
+    target_present = _portfolio_target_present(dsn=dsn, account_id=account_id)
     if _check_idempotent_run(
         dsn=dsn,
         migration_name=PORTFOLIO_MIGRATION_NAME,
         checksum=checksum,
+        target_present=target_present,
+        force=force,
     ):
         return {
             "migration": PORTFOLIO_MIGRATION_NAME,
@@ -219,14 +253,18 @@ def migrate_audit(
     *,
     dsn: str,
     audit_path: Path,
+    force: bool = False,
 ) -> dict[str, object]:
     records = _load_audit_lines(audit_path)
     checksum = _sha256_bytes(audit_path.read_bytes())
     source_rows = len(records)
+    target_present = _audit_target_present(dsn=dsn, expected_rows=source_rows)
     if _check_idempotent_run(
         dsn=dsn,
         migration_name=AUDIT_MIGRATION_NAME,
         checksum=checksum,
+        target_present=target_present,
+        force=force,
     ):
         return {
             "migration": AUDIT_MIGRATION_NAME,
@@ -321,6 +359,11 @@ def main() -> int:
         default="default",
         help="Target account identifier in Postgres",
     )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Re-apply migrations even when idempotency markers already exist",
+    )
     args = parser.parse_args()
 
     ensure_postgres_schema(args.dsn)
@@ -328,10 +371,12 @@ def main() -> int:
         dsn=args.dsn,
         portfolio_path=Path(args.portfolio_path),
         account_id=args.account_id,
+        force=args.force,
     )
     audit_report = migrate_audit(
         dsn=args.dsn,
         audit_path=Path(args.audit_path),
+        force=args.force,
     )
     summary = {
         "ran_at": datetime.now(timezone.utc).isoformat(),

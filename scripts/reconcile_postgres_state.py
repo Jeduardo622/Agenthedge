@@ -89,35 +89,39 @@ def _portfolio_match(
     *,
     source: Mapping[str, Any],
     target: Mapping[str, Any],
-) -> bool:
+) -> tuple[bool, str | None]:
     source_positions = source.get("positions", {})
     if not isinstance(source_positions, Mapping):
         source_positions = {}
+    target_cash_raw = target.get("cash")
+    target_realized_raw = target.get("realized_pnl")
+    if target_cash_raw is None or target_realized_raw is None:
+        return (False, "target portfolio account missing in Postgres")
     source_cash = float(source.get("cash", 0.0))
     source_realized = float(source.get("realized_pnl", 0.0))
-    target_cash = float(target.get("cash", 0.0))
-    target_realized = float(target.get("realized_pnl", 0.0))
+    target_cash = float(target_cash_raw)
+    target_realized = float(target_realized_raw)
     if round(source_cash, 6) != round(target_cash, 6):
-        return False
+        return (False, "cash mismatch")
     if round(source_realized, 6) != round(target_realized, 6):
-        return False
+        return (False, "realized_pnl mismatch")
     if len(source_positions) != len(target.get("positions", {})):
-        return False
+        return (False, "position count mismatch")
     for symbol, payload in source_positions.items():
         if not isinstance(payload, Mapping):
-            return False
+            return (False, f"invalid source position payload for {symbol}")
         target_payload = target.get("positions", {}).get(str(symbol).upper())
         if not isinstance(target_payload, Mapping):
-            return False
+            return (False, f"missing target position for {symbol}")
         src_qty = float(payload.get("quantity", 0.0))
         src_cost = float(payload.get("average_cost", 0.0))
         dst_qty = float(target_payload.get("quantity", 0.0))
         dst_cost = float(target_payload.get("average_cost", 0.0))
         if round(src_qty, 6) != round(dst_qty, 6):
-            return False
+            return (False, f"quantity mismatch for {symbol}")
         if round(src_cost, 6) != round(dst_cost, 6):
-            return False
-    return True
+            return (False, f"average_cost mismatch for {symbol}")
+    return (True, None)
 
 
 def main() -> int:
@@ -140,14 +144,21 @@ def main() -> int:
     source_portfolio = _load_portfolio(Path(args.portfolio_path))
     source_audit_count = _load_audit_count(Path(args.audit_path))
     postgres_state = _fetch_postgres_state(dsn=args.dsn, account_id=args.account_id)
-    portfolio_ok = _portfolio_match(source=source_portfolio, target=postgres_state)
+    portfolio_ok, portfolio_reason = _portfolio_match(
+        source=source_portfolio, target=postgres_state
+    )
     audit_ok = int(postgres_state["audit_count"]) >= int(source_audit_count)
+    audit_reason = None if audit_ok else "audit_count lower than source"
+    ok = portfolio_ok and audit_ok
 
     report = {
         "checked_at": datetime.now(timezone.utc).isoformat(),
+        "status": "ok" if ok else "mismatch",
         "account_id": args.account_id,
         "portfolio_match": portfolio_ok,
+        "portfolio_reason": portfolio_reason,
         "audit_count_match": audit_ok,
+        "audit_reason": audit_reason,
         "source": {
             "portfolio_path": args.portfolio_path,
             "audit_path": args.audit_path,
@@ -156,7 +167,7 @@ def main() -> int:
         "postgres": postgres_state,
     }
     print(json.dumps(report, indent=2))
-    return 0
+    return 0 if ok else 1
 
 
 if __name__ == "__main__":
