@@ -13,6 +13,7 @@ from agents.impl import register_builtin_agents
 from agents.registry import AgentRegistry
 from agents.runtime import AgentRuntime
 from audit import JsonlAuditSink
+from infra.runtime_state import RuntimeFenceError
 from portfolio.store import PortfolioStore
 
 
@@ -91,6 +92,21 @@ class MemoryStateSink:
             "kill_switch_reason": kill_switch_reason,
             "kill_switch_trigger": kill_switch_trigger,
         }
+
+
+class FenceRejectingStateSink(MemoryStateSink):
+    def save_checkpoint(
+        self,
+        *,
+        runtime_name: str,
+        fence_token: int | None,
+        tick_count: int,
+        bus_checkpoint: int,
+        kill_switch_reason: str | None,
+        kill_switch_trigger: str | None,
+        payload=None,
+    ) -> None:
+        raise RuntimeFenceError("runtime lease lost while persisting checkpoint")
 
 
 class MemoryBreakGlass:
@@ -404,3 +420,22 @@ def test_runtime_break_glass_bypasses_kill_switch_signal(tmp_path: Path) -> None
 
     health = runtime.health()
     assert health["kill_switch"]["engaged"] is False
+
+
+def test_runtime_checkpoint_fence_rejection_engages_kill_switch(tmp_path: Path) -> None:
+    registry = AgentRegistry()
+    registry.register("idle", lambda ctx: IdleAgent(ctx))
+    runtime = AgentRuntime(
+        registry=registry,
+        ingestion=FakeIngestion(),
+        config=AgentRuntimeConfig(tick_interval_seconds=0.001, max_ticks=1, pipeline=["idle"]),
+        audit_sink=JsonlAuditSink(tmp_path / "audit.jsonl"),
+        portfolio_store=PortfolioStore(tmp_path / "portfolio.json"),
+        state_sink=FenceRejectingStateSink(),
+    )
+
+    runtime.run_once()
+    health = runtime.health()
+
+    assert health["kill_switch"]["engaged"] is True
+    assert health["kill_switch"]["trigger"] == "runtime.fencing"

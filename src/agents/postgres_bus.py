@@ -10,7 +10,7 @@ import time
 import uuid
 from collections import deque
 from datetime import datetime, timezone
-from typing import Deque, Dict, List, Mapping, MutableMapping, Sequence
+from typing import Any, Deque, Dict, List, Mapping, MutableMapping, Sequence
 
 from infra.postgres import ensure_postgres_schema, postgres_connection
 
@@ -127,12 +127,32 @@ class PostgresMessageBus(MessageBus):
         *,
         topics: Sequence[str] | None = None,
         replay_last: int = 0,
+        subscription_key: str | None = None,
     ) -> Subscription:
         if self._closed:
             raise RuntimeError("MessageBus is closed")
-        subscription = Subscription(id=str(uuid.uuid4()), topics=topics, handler=handler)
+        subscription_id = subscription_key or str(uuid.uuid4())
+        replaced_thread: threading.Thread | None = None
+        with self._lock:
+            replaced = self._subs.pop(subscription_id, None)
+            if replaced:
+                replaced.active = False
+            replaced_thread = self._threads.pop(subscription_id, None)
+        if replaced_thread:
+            replaced_thread.join(timeout=2.0)
+        subscription = Subscription(id=subscription_id, topics=topics, handler=handler)
         with postgres_connection(self._dsn) as conn:
             with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT cursor_event_id
+                    FROM ah_bus_subscriptions
+                    WHERE subscription_id = %s
+                    """,
+                    (subscription.id,),
+                )
+                existing_row = cur.fetchone()
+                existing_cursor = _as_int(existing_row[0]) if existing_row else 0
                 cur.execute(
                     """
                     INSERT INTO ah_bus_subscriptions (
@@ -144,6 +164,11 @@ class PostgresMessageBus(MessageBus):
                         created_at,
                         updated_at
                     ) VALUES (%s, %s, %s::jsonb, TRUE, 0, NOW(), NOW())
+                    ON CONFLICT (subscription_id) DO UPDATE
+                    SET instance_id = EXCLUDED.instance_id,
+                        topics_json = EXCLUDED.topics_json,
+                        active = TRUE,
+                        updated_at = NOW()
                     """,
                     (
                         subscription.id,
@@ -151,35 +176,21 @@ class PostgresMessageBus(MessageBus):
                         _encode_topics(topics),
                     ),
                 )
-                if replay_last > 0:
-                    cur.execute(
-                        """
-                        SELECT event_id, topic
-                        FROM ah_bus_events
-                        ORDER BY event_id DESC
-                        LIMIT %s
-                        """,
-                        (replay_last,),
+                self._requeue_processing_deliveries(cur, subscription.id)
+                if existing_row:
+                    self._enqueue_backlog_deliveries(
+                        cur,
+                        subscription.id,
+                        topics=topics,
+                        after_event_id=existing_cursor,
                     )
-                    rows = list(reversed(cur.fetchall()))
-                    for row in rows:
-                        event_id = _as_int(row[0])
-                        topic = str(row[1])
-                        if _matches(str(topic), topics):
-                            cur.execute(
-                                """
-                                INSERT INTO ah_bus_deliveries (
-                                    subscription_id,
-                                    event_id,
-                                    status,
-                                    attempts,
-                                    next_attempt_at,
-                                    updated_at
-                                ) VALUES (%s, %s, 'pending', 0, NOW(), NOW())
-                                ON CONFLICT (subscription_id, event_id) DO NOTHING
-                                """,
-                                (subscription.id, event_id),
-                            )
+                elif replay_last > 0:
+                    self._enqueue_replay_deliveries(
+                        cur,
+                        subscription.id,
+                        topics=topics,
+                        replay_last=replay_last,
+                    )
         with self._lock:
             self._subs[subscription.id] = subscription
             thread = threading.Thread(
@@ -206,8 +217,9 @@ class PostgresMessageBus(MessageBus):
                     UPDATE ah_bus_subscriptions
                     SET active = FALSE, updated_at = NOW()
                     WHERE subscription_id = %s
+                      AND instance_id = %s
                     """,
-                    (subscription_id,),
+                    (subscription_id, self._instance_id),
                 )
         if thread:
             thread.join(timeout=2.0)
@@ -240,8 +252,13 @@ class PostgresMessageBus(MessageBus):
             with conn.cursor() as cur:
                 for sub_id in sub_ids:
                     cur.execute(
-                        "UPDATE ah_bus_subscriptions SET active = FALSE WHERE subscription_id = %s",
-                        (sub_id,),
+                        """
+                        UPDATE ah_bus_subscriptions
+                        SET active = FALSE
+                        WHERE subscription_id = %s
+                          AND instance_id = %s
+                        """,
+                        (sub_id, self._instance_id),
                     )
         for thread in threads:
             thread.join(timeout=2.0)
@@ -283,8 +300,15 @@ class PostgresMessageBus(MessageBus):
                     """
                     SELECT MIN(event_id)
                     FROM ah_bus_deliveries
-                    WHERE status IN ('pending', 'processing', 'retry')
-                    """
+                    WHERE subscription_id IN (
+                        SELECT subscription_id
+                        FROM ah_bus_subscriptions
+                        WHERE active = TRUE
+                          AND instance_id = %s
+                    )
+                      AND status IN ('pending', 'processing', 'retry')
+                    """,
+                    (self._instance_id,),
                 )
                 pending_row = cur.fetchone()
                 if not pending_row or pending_row[0] is None:
@@ -319,8 +343,13 @@ class PostgresMessageBus(MessageBus):
             with conn.cursor() as cur:
                 for sub_id in sub_ids:
                     cur.execute(
-                        "UPDATE ah_bus_subscriptions SET active = FALSE WHERE subscription_id = %s",
-                        (sub_id,),
+                        """
+                        UPDATE ah_bus_subscriptions
+                        SET active = FALSE
+                        WHERE subscription_id = %s
+                          AND instance_id = %s
+                        """,
+                        (sub_id, self._instance_id),
                     )
         if wait:
             for thread in threads:
@@ -399,14 +428,17 @@ class PostgresMessageBus(MessageBus):
                         e.created_at
                     FROM ah_bus_deliveries d
                     JOIN ah_bus_events e ON e.event_id = d.event_id
+                    JOIN ah_bus_subscriptions s ON s.subscription_id = d.subscription_id
                     WHERE d.subscription_id = %s
+                      AND s.active = TRUE
+                      AND s.instance_id = %s
                       AND d.status IN ('pending', 'retry')
                       AND d.next_attempt_at <= NOW()
                     ORDER BY d.event_id
                     LIMIT 1
                     FOR UPDATE SKIP LOCKED
                     """,
-                    (subscription_id,),
+                    (subscription_id, self._instance_id),
                 )
                 row = cur.fetchone()
                 if not row:
@@ -444,8 +476,9 @@ class PostgresMessageBus(MessageBus):
                     UPDATE ah_bus_subscriptions
                     SET cursor_event_id = GREATEST(cursor_event_id, %s), updated_at = NOW()
                     WHERE subscription_id = %s
+                      AND instance_id = %s
                     """,
-                    (event_id, subscription_id),
+                    (event_id, subscription_id, self._instance_id),
                 )
 
     def _mark_retry(self, delivery_id: int, error_message: str) -> None:
@@ -459,9 +492,95 @@ class PostgresMessageBus(MessageBus):
                         next_attempt_at = NOW() + (%s * INTERVAL '1 second'),
                         updated_at = NOW()
                     WHERE delivery_id = %s
+                      AND subscription_id IN (
+                          SELECT subscription_id
+                          FROM ah_bus_subscriptions
+                          WHERE instance_id = %s
+                      )
                     """,
-                    (error_message[:1000], self._retry_delay_seconds, delivery_id),
+                    (
+                        error_message[:1000],
+                        self._retry_delay_seconds,
+                        delivery_id,
+                        self._instance_id,
+                    ),
                 )
+
+    def _enqueue_replay_deliveries(
+        self,
+        cur: Any,
+        subscription_id: str,
+        *,
+        topics: Sequence[str] | None,
+        replay_last: int,
+    ) -> None:
+        cur.execute(
+            """
+            SELECT event_id, topic
+            FROM ah_bus_events
+            ORDER BY event_id DESC
+            LIMIT %s
+            """,
+            (replay_last,),
+        )
+        rows = list(reversed(cur.fetchall()))
+        for row in rows:
+            event_id = _as_int(row[0])
+            topic = str(row[1])
+            if _matches(topic, topics):
+                self._insert_pending_delivery(cur, subscription_id, event_id)
+
+    def _enqueue_backlog_deliveries(
+        self,
+        cur: Any,
+        subscription_id: str,
+        *,
+        topics: Sequence[str] | None,
+        after_event_id: int,
+    ) -> None:
+        cur.execute(
+            """
+            SELECT event_id, topic
+            FROM ah_bus_events
+            WHERE event_id > %s
+            ORDER BY event_id ASC
+            """,
+            (after_event_id,),
+        )
+        for row in cur.fetchall():
+            event_id = _as_int(row[0])
+            topic = str(row[1])
+            if _matches(topic, topics):
+                self._insert_pending_delivery(cur, subscription_id, event_id)
+
+    def _insert_pending_delivery(self, cur: Any, subscription_id: str, event_id: int) -> None:
+        cur.execute(
+            """
+            INSERT INTO ah_bus_deliveries (
+                subscription_id,
+                event_id,
+                status,
+                attempts,
+                next_attempt_at,
+                updated_at
+            ) VALUES (%s, %s, 'pending', 0, NOW(), NOW())
+            ON CONFLICT (subscription_id, event_id) DO NOTHING
+            """,
+            (subscription_id, event_id),
+        )
+
+    def _requeue_processing_deliveries(self, cur: Any, subscription_id: str) -> None:
+        cur.execute(
+            """
+            UPDATE ah_bus_deliveries
+            SET status = 'retry',
+                next_attempt_at = NOW(),
+                updated_at = NOW()
+            WHERE subscription_id = %s
+              AND status = 'processing'
+            """,
+            (subscription_id,),
+        )
 
 
 def _encode_topics(topics: Sequence[str] | None) -> str:

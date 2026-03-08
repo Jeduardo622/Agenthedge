@@ -160,10 +160,21 @@ class MessageBus:
         *,
         topics: Sequence[str] | None = None,
         replay_last: int = 0,
+        subscription_key: str | None = None,
     ) -> Subscription:
         if self._closed:
             raise RuntimeError("MessageBus is closed")
-        subscription = Subscription(id=str(uuid.uuid4()), topics=topics, handler=handler)
+        subscription_id = subscription_key or str(uuid.uuid4())
+        replaced_worker: _SubscriptionWorker | None = None
+        with self._lock:
+            replaced = self._subs.pop(subscription_id, None)
+            if replaced:
+                replaced.active = False
+            replaced_worker = self._workers.pop(subscription_id, None)
+        if replaced_worker:
+            replaced_worker.stop()
+            replaced_worker.join(timeout=2.0)
+        subscription = Subscription(id=subscription_id, topics=topics, handler=handler)
         worker = _SubscriptionWorker(subscription, self._logger)
         with self._lock:
             self._subs[subscription.id] = subscription

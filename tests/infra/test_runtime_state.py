@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 
+import pytest
+
 from infra import runtime_state
 
 
@@ -93,6 +95,7 @@ def test_postgres_runtime_state_sink_emits_expected_writes(monkeypatch) -> None:
         [
             ("instance-1", 2),
             ("instance-1", 2, 4, 5, None, None, {"pending": 0}),
+            ("instance-1",),
         ]
     )
     acquired, token = sink.acquire_lease(runtime_name="runtime", lease_seconds=30)
@@ -123,3 +126,33 @@ def test_postgres_runtime_state_sink_emits_expected_writes(monkeypatch) -> None:
     assert "UPDATE ah_runtime_leases" in executed_sql
     assert "DELETE FROM ah_runtime_leases" in executed_sql
     assert "SELECT" in executed_sql and "ah_runtime_checkpoints" in executed_sql
+
+
+def test_postgres_runtime_state_sink_rejects_checkpoint_without_active_lease(monkeypatch) -> None:
+    cursor = _FakeCursor()
+    conn = _FakeConnection(cursor)
+
+    @contextmanager
+    def _fake_connection(_dsn: str):
+        yield conn
+
+    monkeypatch.setattr(runtime_state, "ensure_postgres_schema", lambda _dsn: None)
+    monkeypatch.setattr(runtime_state, "postgres_connection", _fake_connection)
+
+    sink = runtime_state.PostgresRuntimeStateSink(
+        "postgresql://localhost/agenthedge",
+        instance_id="instance-1",
+        profile="staging",
+        backend="postgres",
+    )
+
+    with pytest.raises(runtime_state.RuntimeFenceError):
+        sink.save_checkpoint(
+            runtime_name="runtime",
+            fence_token=2,
+            tick_count=4,
+            bus_checkpoint=9,
+            kill_switch_reason=None,
+            kill_switch_trigger=None,
+            payload={"pending_deliveries": {}},
+        )

@@ -18,6 +18,10 @@ def _as_int(value: object) -> int:
     raise TypeError(f"cannot coerce {type(value).__name__} to int")
 
 
+class RuntimeFenceError(RuntimeError):
+    """Raised when runtime checkpoint writes fail lease/fence validation."""
+
+
 class RuntimeStateSink(Protocol):
     def mark_started(self) -> None: ...
 
@@ -358,8 +362,28 @@ class PostgresRuntimeStateSink:
         kill_switch_trigger: str | None,
         payload: Mapping[str, object] | None = None,
     ) -> None:
+        if fence_token is None:
+            raise RuntimeFenceError("fence_token is required for durable checkpoint writes")
         with postgres_connection(self._dsn) as conn:
             with conn.cursor() as cur:
+                token = int(fence_token)
+                cur.execute(
+                    """
+                    SELECT owner_instance_id
+                    FROM ah_runtime_leases
+                    WHERE runtime_name = %s
+                      AND owner_instance_id = %s
+                      AND fence_token = %s
+                      AND lease_expires_at > NOW()
+                    FOR UPDATE
+                    """,
+                    (runtime_name, self._instance_id, token),
+                )
+                if not cur.fetchone():
+                    raise RuntimeFenceError(
+                        "runtime lease ownership changed before checkpoint write "
+                        f"(runtime_name={runtime_name}, instance_id={self._instance_id})"
+                    )
                 cur.execute(
                     """
                     INSERT INTO ah_runtime_checkpoints (
@@ -386,7 +410,7 @@ class PostgresRuntimeStateSink:
                     (
                         runtime_name,
                         self._instance_id,
-                        int(fence_token) if fence_token is not None else None,
+                        token,
                         int(tick_count),
                         int(bus_checkpoint),
                         kill_switch_reason,

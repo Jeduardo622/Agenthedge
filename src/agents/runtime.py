@@ -15,7 +15,7 @@ from data.cache import TTLCache
 from data.ingestion import DataIngestionService
 from infra.break_glass import BreakGlassStore, NullBreakGlassStore
 from infra.metrics import PrometheusMetricSink
-from infra.runtime_state import NullRuntimeStateSink, RuntimeStateSink
+from infra.runtime_state import NullRuntimeStateSink, RuntimeFenceError, RuntimeStateSink
 from learning.performance import PerformanceTracker
 from observability.alerts import AlertNotifier
 from observability.anomaly import BehaviorAnomalyDetector
@@ -80,6 +80,7 @@ class AgentRuntime:
         self._runtime_lease_seconds = self.config.runtime_lease_seconds
         self._runtime_fence_token: int | None = None
         self._bus_checkpoint: int = 0
+        self._checkpoint_fence_lost = False
         self._acl_enforced = self._resolve_acl_enforcement()
         self.bus.configure_acl(DEFAULT_BUS_ACL, enforce=self._acl_enforced)
         self.logger.info(
@@ -353,6 +354,7 @@ class AgentRuntime:
             self._handle_kill_signal,
             topics=topics,
             replay_last=0,
+            subscription_key=f"runtime:{self._runtime_name}:kill-switch",
         )
 
     def _register_anomaly_monitor(self) -> None:
@@ -362,6 +364,7 @@ class AgentRuntime:
             self._handle_execution_fill_for_anomaly,
             topics=["execution.fill"],
             replay_last=0,
+            subscription_key=f"runtime:{self._runtime_name}:anomaly",
         )
 
     def _handle_kill_signal(self, envelope: Envelope) -> None:
@@ -698,15 +701,38 @@ class AgentRuntime:
             )
 
     def _persist_checkpoint(self) -> None:
-        self._state_sink.save_checkpoint(
-            runtime_name=self._runtime_name,
-            fence_token=self._runtime_fence_token,
-            tick_count=self._tick_count,
-            bus_checkpoint=self._bus_checkpoint,
-            kill_switch_reason=self._kill_switch_reason,
-            kill_switch_trigger=self._kill_switch_trigger,
-            payload={"pending_deliveries": self.bus.pending_deliveries()},
-        )
+        try:
+            self._state_sink.save_checkpoint(
+                runtime_name=self._runtime_name,
+                fence_token=self._runtime_fence_token,
+                tick_count=self._tick_count,
+                bus_checkpoint=self._bus_checkpoint,
+                kill_switch_reason=self._kill_switch_reason,
+                kill_switch_trigger=self._kill_switch_trigger,
+                payload={"pending_deliveries": self.bus.pending_deliveries()},
+            )
+        except RuntimeFenceError as exc:
+            if self._checkpoint_fence_lost:
+                return
+            self._checkpoint_fence_lost = True
+            if not self._kill_switch_reason:
+                self._kill_switch_reason = "checkpoint_fence_lost"
+                self._kill_switch_trigger = "runtime.fencing"
+            payload = {
+                "runtime_name": self._runtime_name,
+                "instance_id": self._runtime_instance_id,
+                "error": str(exc),
+                "tick_count": self._tick_count,
+                "bus_checkpoint": self._bus_checkpoint,
+            }
+            self.logger.error("checkpoint persistence fenced: %s", exc)
+            try:
+                self._audit_runtime("runtime_checkpoint_fence_lost", payload)
+            except Exception:
+                self.logger.exception("failed to audit checkpoint fence loss")
+            if self._alert_sink:
+                self._alert_sink("runtime_checkpoint_fence_lost", payload, severity="critical")
+            self._stop_event.set()
 
     def _resolve_bus_checkpoint(self) -> int:
         raw = getattr(self.bus, "caught_up_checkpoint", None)

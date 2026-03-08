@@ -2,6 +2,7 @@ name: staged-release-gates
 
 on:
   workflow_dispatch:
+  pull_request:
   push:
     branches:
       - main
@@ -65,6 +66,13 @@ jobs:
         run: |
           poetry run python scripts/migrate_runtime_state_to_postgres.py --dsn "$POSTGRES_DSN"
           poetry run python scripts/reconcile_postgres_state.py --dsn "$POSTGRES_DSN"
+
+      - name: Break-glass end-to-end
+        run: |
+          poetry run pytest tests/integration/test_break_glass_integration.py -q
+          override_id=$(poetry run python -m cli.runtime break-glass-activate --control runtime.bus --reason "ci-gate-validation" --created-by ci --ttl-seconds 60 | awk '{print $NF}')
+          poetry run python -m cli.runtime break-glass-status --raw
+          poetry run python -m cli.runtime break-glass-revoke "$override_id" --revoked-by ci
 
       - name: Canary runtime
         run: |

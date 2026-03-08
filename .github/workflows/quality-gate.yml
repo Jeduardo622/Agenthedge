@@ -49,6 +49,8 @@ jobs:
       matrix:
         suite:
           - durable-bus
+          - failover-e2e
+          - break-glass-e2e
           - failover-drill
     services:
       postgres:
@@ -88,7 +90,11 @@ jobs:
       - name: Run integration matrix target
         run: |
           if [ "${{ matrix.suite }}" = "durable-bus" ]; then
-            poetry run pytest tests/integration/test_postgres_bus_integration.py -q
+            poetry run pytest tests/integration/test_postgres_bus_integration.py -k "delivery_isolated_and_ordered or slow_subscriber_does_not_block_others" -q
+          elif [ "${{ matrix.suite }}" = "failover-e2e" ]; then
+            poetry run pytest tests/integration/test_postgres_bus_integration.py -k "checkpoint_rejects_stale_owner_after_failover or durable_subscription_takeover_recovers_processing_delivery or runtime_failover_preserves_dedupe_at_storage_boundary" -q
+          elif [ "${{ matrix.suite }}" = "break-glass-e2e" ]; then
+            poetry run pytest tests/integration/test_break_glass_integration.py -q
           else
             poetry run python scripts/failover_drill.py --dsn "$POSTGRES_DSN"
           fi
