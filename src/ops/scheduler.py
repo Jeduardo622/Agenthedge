@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Mapping, Protocol
@@ -12,6 +13,16 @@ from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from agents.runtime_builder import build_runtime_from_env
+from infra.postgres import (
+    advisory_lock_key,
+    get_postgres_dsn,
+    postgres_connection,
+    resolve_runtime_backend,
+    resolve_runtime_profile,
+    try_advisory_lock,
+    unlock_advisory_lock,
+)
+from infra.runtime_state import NullRuntimeStateSink, PostgresRuntimeStateSink, RuntimeStateSink
 from observability.state import ObservabilityState, get_observability_state
 
 from .calendar import USTradingCalendar
@@ -35,6 +46,7 @@ class SchedulerService:
         calendar: USTradingCalendar | None = None,
         snapshot_dir: Path | None = None,
         runtime_builder: Callable[[], SchedulerRuntime] | None = None,
+        state_sink: RuntimeStateSink | None = None,
     ) -> None:
         self._tz = ZoneInfo(timezone_name)
         self._scheduler = BlockingScheduler(timezone=self._tz)
@@ -43,6 +55,21 @@ class SchedulerService:
         self._snapshot_dir = snapshot_dir or Path("storage/audit")
         self._snapshot_dir.mkdir(parents=True, exist_ok=True)
         self._runtime_builder = runtime_builder or (lambda: build_runtime_from_env(load_env=False))
+        env = os.environ
+        self._runtime_backend = resolve_runtime_backend(env)
+        self._postgres_dsn = get_postgres_dsn(env, required=False)
+        self._leader_lock_key = advisory_lock_key("ah_scheduler_leader")
+        if state_sink is not None:
+            self._state_sink = state_sink
+        elif self._runtime_backend == "postgres" and self._postgres_dsn:
+            self._state_sink = PostgresRuntimeStateSink(
+                self._postgres_dsn,
+                instance_id=env.get("RUN_ID", "scheduler"),
+                profile=resolve_runtime_profile(env),
+                backend=self._runtime_backend,
+            )
+        else:
+            self._state_sink = NullRuntimeStateSink()
         self._register_jobs()
 
     def start(self) -> None:
@@ -74,6 +101,9 @@ class SchedulerService:
         )
 
     def run_daily_trade(self) -> None:
+        self._run_as_leader("run_daily_trade", self._run_daily_trade_impl)
+
+    def _run_daily_trade_impl(self) -> None:
         now = datetime.now(self._tz)
         if not self._calendar.is_trading_day(now.date()):
             self._record_job(
@@ -91,6 +121,9 @@ class SchedulerService:
             runtime.stop(wait=False)
 
     def midday_check(self) -> None:
+        self._run_as_leader("midday_check", self._run_midday_check_impl)
+
+    def _run_midday_check_impl(self) -> None:
         runtime = self._runtime_builder()
         try:
             runtime.bootstrap()
@@ -101,6 +134,9 @@ class SchedulerService:
             runtime.stop(wait=False)
 
     def eod_closure(self) -> None:
+        self._run_as_leader("eod_closure", self._run_eod_closure_impl)
+
+    def _run_eod_closure_impl(self) -> None:
         runtime = self._runtime_builder()
         try:
             runtime.bootstrap()
@@ -111,6 +147,9 @@ class SchedulerService:
             runtime.stop(wait=False)
 
     def heartbeat_check(self) -> None:
+        self._run_as_leader("heartbeat_check", self._run_heartbeat_check_impl)
+
+    def _run_heartbeat_check_impl(self) -> None:
         runtime = self._runtime_builder()
         try:
             runtime.bootstrap()
@@ -141,6 +180,29 @@ class SchedulerService:
         details = details or {}
         details["timezone"] = str(self._tz)
         self._state.record_scheduler_event(job_name, status=status, details=details)
+        self._state_sink.record_scheduler_run(
+            job_name=job_name,
+            status=status,
+            details=details,
+        )
+
+    def _run_as_leader(self, job_name: str, callback: Callable[[], None]) -> None:
+        if self._runtime_backend != "postgres" or not self._postgres_dsn:
+            callback()
+            return
+        with postgres_connection(self._postgres_dsn) as conn:
+            acquired = try_advisory_lock(conn, key=self._leader_lock_key)
+            if not acquired:
+                self._record_job(
+                    job_name,
+                    status="skipped",
+                    details={"reason": "leader_lock_not_acquired"},
+                )
+                return
+            try:
+                callback()
+            finally:
+                unlock_advisory_lock(conn, key=self._leader_lock_key)
 
 
 __all__ = ["SchedulerService"]

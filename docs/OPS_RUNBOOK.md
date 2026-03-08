@@ -56,12 +56,25 @@ Escalation steps follow `GOVERNANCE.md` matrix; severe incidents require manual 
 - Observability stack (Prometheus + Grafana or Streamlit) for live monitoring; Prom metrics exposed via `infra.metrics`.
 - Scheduler service: `poetry run python -m cli.scheduler run` (Pacific Time, NYSE holiday-aware). Use `poetry run python -m cli.scheduler run-once <job>` during dry runs to trigger a specific job (`run_daily_trade`, `midday_check`, `eod_closure`) without keeping the daemon up.
 - Streamlit telemetry dashboard: `poetry run streamlit run src/observability/dashboard.py` (shows runtime health, portfolio, provider status, Prometheus tick stats).
-- Grafana stack (optional): `docker compose -f ops/observability/docker-compose.yml up -d`, import `ops/observability/grafana_dashboard.json`.
+- Grafana stack (optional): set `GRAFANA_ADMIN_USER` and `GRAFANA_ADMIN_PASSWORD`, then run `docker compose -f ops/observability/docker-compose.yml up -d`, import `ops/observability/grafana/dashboards/runtime.json`.
 - Alert notifier fan-out configured via `ALERT_*` env vars (webhook URL, min severity, per-action overrides); risk/compliance agents emit alerts on `risk_alert`, `risk_reject`, `risk_stop_loss`, `risk_stress_breach`, and `compliance_reject`.
 - Kill-switch topics: `risk.kill_switch`, `compliance.kill_switch`, `runtime.kill_switch` — all funnel into runtime halt handling.
 - Message bus ACL enforcement is default-on outside development; use `BUS_ACL_ENFORCE` to override in controlled drills.
 - Network allowlist controls: set `NETWORK_ALLOWLIST_ENABLED=true`, `NETWORK_ALLOWLIST_DOMAINS=<csv>`, and optionally `NETWORK_ALLOWLIST_ENFORCE=true` to block disallowed outbound requests.
 - Runtime heartbeat + anomaly controls: `HEARTBEAT_MONITOR_ENABLED`, `HEARTBEAT_TIMEOUT_SECONDS`, `ANOMALY_DETECTION_ENABLED`, `ANOMALY_THRESHOLD_ZSCORE`, `ANOMALY_CRITICAL_ZSCORE`.
+- Runtime async bus drain control: `RUNTIME_BUS_DRAIN_TIMEOUT_SECONDS` (runtime kill-switches if delivery cannot drain within timeout).
+- Runtime profile/backend controls:
+  - `RUNTIME_PROFILE=dev|staging|prod` (default `dev`)
+  - `RUNTIME_BACKEND=in_memory|postgres` (defaults by profile)
+  - `POSTGRES_DSN` required for `postgres` backend
+  - `RUNTIME_NAME` + `RUNTIME_LEASE_SECONDS` configure runtime lease/fencing semantics
+  - `PORTFOLIO_ACCOUNT_ID` and `PORTFOLIO_INITIAL_CASH` control durable ledger bootstrap
+- Break-glass controls:
+  - `BREAK_GLASS_ENABLED=true|false`
+  - `BREAK_GLASS_DEFAULT_TTL_SECONDS` and `BREAK_GLASS_MAX_TTL_SECONDS`
+  - CLI commands: `break-glass-activate`, `break-glass-status`, `break-glass-revoke`
+- Provider live health probe controls: `PROVIDER_HEALTH_TTL_SECONDS`, `PROVIDER_HEALTH_PROBE_SYMBOL`, `PROVIDER_HEALTH_PROBE_SERIES_ID`, `PROVIDER_HEALTH_PROBE_QUERY`.
+- Scheduler leader election uses a Postgres advisory lock (`ah_scheduler_leader`) so only one runtime node executes cron jobs at a time.
 - Quarantine review: `poetry run python scripts/review_quarantine.py --path storage/quarantine/quarantined_data.jsonl`; release with `--release-symbol <SYMBOL> --release-type <quote|fundamentals|news>`.
 - Slack/email/webhook notifications for alerts.
 - Backtest CLI: `poetry run python scripts/backtest_strategy.py --symbol SPY --symbol QQQ --start 2024-01-02 --end 2024-01-31 --capital 1000000` writes artifacts to `storage/backtests/<run_id>/` (portfolio snapshot, audit log, result.json).
@@ -82,6 +95,12 @@ Escalation steps follow `GOVERNANCE.md` matrix; severe incidents require manual 
 - Validate audit-chain integrity after incidents/promotions and write evidence report:
   - `poetry run python scripts/verify_audit_chain.py --path storage/audit/runtime_events.jsonl --report-dir storage/audit/reports`
   - Attach the latest `storage/audit/reports/audit_chain_report_*.json` to the change ticket.
+- Durable-state cutover and reconciliation:
+  - `poetry run python scripts/migrate_runtime_state_to_postgres.py --dsn <POSTGRES_DSN> --portfolio-path storage/strategy_state/portfolio.json --audit-path storage/audit/runtime_events.jsonl`
+  - `poetry run python scripts/reconcile_postgres_state.py --dsn <POSTGRES_DSN> --portfolio-path storage/strategy_state/portfolio.json --audit-path storage/audit/runtime_events.jsonl`
+- Staged release drills:
+  - `poetry run python scripts/canary_postgres_runtime.py --dsn <POSTGRES_DSN>`
+  - `poetry run python scripts/failover_drill.py --dsn <POSTGRES_DSN>`
 
 ### Bootstrap Procedure
 1. `poetry install && poetry shell`

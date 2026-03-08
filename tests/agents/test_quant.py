@@ -60,6 +60,7 @@ def test_strategy_council_emits_consensus(tmp_path):
             "quote": {"pc": 100.0},
         },
     )
+    assert bus.drain(1.0) is True
 
     assert consensus_messages
     assert consensus_messages[0]["action"] == "buy"
@@ -88,6 +89,7 @@ def test_strategy_council_requires_alignment(tmp_path):
             "quote": {"pc": 50.5},
         },
     )
+    assert bus.drain(1.0) is True
 
     assert consensus_messages == []
     agent.teardown()

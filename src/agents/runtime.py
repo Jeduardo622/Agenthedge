@@ -13,7 +13,9 @@ from typing import Any, Dict, List, Mapping
 from audit import JsonlAuditSink
 from data.cache import TTLCache
 from data.ingestion import DataIngestionService
+from infra.break_glass import BreakGlassStore, NullBreakGlassStore
 from infra.metrics import PrometheusMetricSink
+from infra.runtime_state import NullRuntimeStateSink, RuntimeStateSink
 from learning.performance import PerformanceTracker
 from observability.alerts import AlertNotifier
 from observability.anomaly import BehaviorAnomalyDetector
@@ -58,7 +60,10 @@ class AgentRuntime:
         metric_sink: MetricSink | None = None,
         audit_sink: AuditSink | None = None,
         portfolio_store: PortfolioStore | None = None,
+        bus: MessageBus | None = None,
         alert_notifier: AlertNotifier | None = None,
+        state_sink: RuntimeStateSink | None = None,
+        break_glass_store: BreakGlassStore | None = None,
         observability_state: ObservabilityState | None = None,
     ) -> None:
         self.logger = logging.getLogger("agenthedge.runtime")
@@ -66,7 +71,15 @@ class AgentRuntime:
         self.ingestion = ingestion
         self.cache = cache
         self.config = config or AgentRuntimeConfig.from_env()
-        self.bus = MessageBus()
+        self.bus = bus or MessageBus()
+        self._state_sink = state_sink or NullRuntimeStateSink()
+        self._break_glass = break_glass_store or NullBreakGlassStore()
+        self._break_glass_enabled = self.config.break_glass_enabled
+        self._runtime_instance_id = os.environ.get("RUN_ID", "runtime")
+        self._runtime_name = self.config.runtime_name
+        self._runtime_lease_seconds = self.config.runtime_lease_seconds
+        self._runtime_fence_token: int | None = None
+        self._bus_checkpoint: int = 0
         self._acl_enforced = self._resolve_acl_enforcement()
         self.bus.configure_acl(DEFAULT_BUS_ACL, enforce=self._acl_enforced)
         self.logger.info(
@@ -124,10 +137,15 @@ class AgentRuntime:
             1, int(os.environ.get("RUNTIME_AGENT_FAILURE_THRESHOLD", "3"))
         )
         self._failure_action = os.environ.get("RUNTIME_AGENT_FAILURE_ACTION", "halt").lower()
+        self._bus_drain_timeout_seconds = max(
+            0.01, float(os.environ.get("RUNTIME_BUS_DRAIN_TIMEOUT_SECONDS", "2.0"))
+        )
         self._register_kill_switch()
         self._register_anomaly_monitor()
 
     def bootstrap(self) -> None:
+        self._acquire_runtime_lease()
+        self._restore_checkpoint()
         agent_names = self.config.enabled_agents or self.registry.list_agents()
         agent_names = self._order_agents(agent_names)
         agent_names = self._dedupe_agents(agent_names)
@@ -159,6 +177,8 @@ class AgentRuntime:
         self._agent_heartbeats = {agent.name: now for agent in self._agents}
         for agent in self._agents:
             agent.ensure_setup()
+        self._state_sink.mark_started()
+        self._persist_checkpoint()
 
     def start(self) -> None:
         if self._thread and self._thread.is_alive():
@@ -181,6 +201,10 @@ class AgentRuntime:
         if self._anomaly_subscription:
             self.bus.unsubscribe(self._anomaly_subscription.id)
             self._anomaly_subscription = None
+        self.bus.close(wait=wait)
+        self._state_sink.heartbeat(status="stopped")
+        self._persist_checkpoint()
+        self._release_runtime_lease()
         self.logger.info("agent runtime stopped")
 
     def run_once(self) -> None:
@@ -198,6 +222,14 @@ class AgentRuntime:
             time.sleep(self.config.tick_interval_seconds)
 
     def _run_iteration(self) -> None:
+        self._refresh_acl_policy()
+        if not self._renew_runtime_lease():
+            self._engage_kill_switch(
+                trigger="runtime.fencing",
+                reason="runtime_lease_lost",
+                payload={"runtime_name": self._runtime_name},
+            )
+            return
         if self._kill_switch_reason:
             self.logger.warning("kill switch engaged; skipping tick")
             return
@@ -214,8 +246,19 @@ class AgentRuntime:
                 continue
             self._agent_failure_counts[agent.name] = 0
             self._record_heartbeat(agent.name)
+        if not self._drain_bus():
+            return
+        if self._kill_switch_reason:
+            self.logger.warning(
+                "kill switch engaged during message delivery; skipping tick completion"
+            )
+            return
         self._check_heartbeats()
         self._tick_count += 1
+        self._state_sink.heartbeat(status="running")
+        self._state_sink.record_provider_health(self.ingestion.providers_health())
+        self._bus_checkpoint = self._resolve_bus_checkpoint()
+        self._persist_checkpoint()
         queue_depth = self.bus.depth()
         if self.metric_sink:
             self.metric_sink(
@@ -251,6 +294,7 @@ class AgentRuntime:
                 "trigger": self._kill_switch_trigger,
             },
             "bus_acl": self.bus.acl_status(),
+            "runtime_backend": self.bus.__class__.__name__,
             "runtime_controls": {
                 "disabled_agents": sorted(self._disabled_agents),
                 "agent_failures": dict(self._agent_failure_counts),
@@ -258,8 +302,15 @@ class AgentRuntime:
                 "failure_action": self._failure_action,
                 "heartbeat_timeout_seconds": self._heartbeat_timeout_seconds,
                 "stale_heartbeats": sorted(self._stale_heartbeats),
+                "runtime_name": self._runtime_name,
+                "runtime_fence_token": self._runtime_fence_token,
+                "bus_checkpoint": self._bus_checkpoint,
                 "anomaly_detection_enabled": self._anomaly_detection_enabled,
                 "anomaly": self._anomaly_detector.snapshot(),
+                "break_glass_enabled": self._break_glass_enabled,
+                "break_glass_active": (
+                    self._break_glass.active_overrides() if self._break_glass_enabled else []
+                ),
             },
             "observability": (
                 self._observability_state.snapshot() if self._observability_state else {}
@@ -315,6 +366,13 @@ class AgentRuntime:
 
     def _handle_kill_signal(self, envelope: Envelope) -> None:
         payload = dict(envelope.message.payload or {})
+        if self._break_glass_active("runtime.kill_switch"):
+            self._record_break_glass_bypass(
+                control_name="runtime.kill_switch",
+                payload=payload,
+                trigger=envelope.message.topic,
+            )
+            return
         raw_reason = payload.get("reason")
         reason = raw_reason if isinstance(raw_reason, str) and raw_reason else "unspecified"
         self._engage_kill_switch(trigger=envelope.message.topic, reason=reason, payload=payload)
@@ -323,6 +381,13 @@ class AgentRuntime:
         self, *, trigger: str, reason: str, payload: Mapping[str, Any] | None = None
     ) -> None:
         if self._kill_switch_reason:
+            return
+        if self._break_glass_active("runtime.kill_switch") or self._break_glass_active(trigger):
+            self._record_break_glass_bypass(
+                control_name=trigger,
+                payload=dict(payload or {}),
+                trigger=trigger,
+            )
             return
         self._kill_switch_reason = reason
         self._kill_switch_trigger = trigger
@@ -349,9 +414,12 @@ class AgentRuntime:
                 },
                 severity="critical",
             )
+        self._persist_checkpoint()
         self._stop_event.set()
 
     def _record_heartbeat(self, agent_name: str) -> None:
+        if agent_name in self._disabled_agents:
+            return
         now = time.time()
         self._agent_heartbeats[agent_name] = now
         if agent_name in self._stale_heartbeats:
@@ -367,8 +435,11 @@ class AgentRuntime:
     def _check_heartbeats(self) -> None:
         if not self._heartbeat_monitor_enabled:
             return
+        self._prune_disabled_heartbeats()
         now = time.time()
-        for agent_name, last_seen in self._agent_heartbeats.items():
+        for agent_name, last_seen in list(self._agent_heartbeats.items()):
+            if agent_name in self._disabled_agents:
+                continue
             age = max(0.0, now - last_seen)
             if self.metric_sink:
                 self.metric_sink("runtime_heartbeat_age_seconds", age, {"agent": agent_name})
@@ -395,6 +466,13 @@ class AgentRuntime:
             if self._alert_sink:
                 self._alert_sink("runtime_heartbeat_stale", payload, severity="error")
             if self._heartbeat_kill_enabled:
+                if self._break_glass_active("runtime.heartbeat"):
+                    self._record_break_glass_bypass(
+                        control_name="runtime.heartbeat",
+                        payload=payload,
+                        trigger="runtime.heartbeat",
+                    )
+                    continue
                 self._engage_kill_switch(
                     trigger="runtime.heartbeat",
                     reason=f"stale_heartbeat:{agent_name}",
@@ -444,6 +522,7 @@ class AgentRuntime:
         self._audit_runtime("runtime_agent_circuit_breaker", payload)
         if action == "disable":
             self._disabled_agents.add(agent.name)
+            self._remove_heartbeat_tracking(agent.name)
             if self._alert_sink:
                 self._alert_sink("runtime_agent_disabled", payload, severity="error")
             return
@@ -461,6 +540,62 @@ class AgentRuntime:
             payload,
             {"agent_id": "runtime", "run_id": "runtime", "environment": "system"},
         )
+        self._state_sink.record_incident(action, payload)
+
+    def _drain_bus(self) -> bool:
+        try:
+            drained = self.bus.drain(self._bus_drain_timeout_seconds)
+        except Exception as exc:
+            payload = {
+                "timeout_seconds": self._bus_drain_timeout_seconds,
+                "error": f"{type(exc).__name__}: {exc}",
+            }
+            self._audit_runtime("runtime_bus_drain_timeout", payload)
+            if self._alert_sink:
+                self._alert_sink("runtime_bus_drain_timeout", payload, severity="critical")
+            if self._break_glass_active("runtime.bus"):
+                self._record_break_glass_bypass(
+                    control_name="runtime.bus",
+                    payload=payload,
+                    trigger="runtime.bus",
+                )
+                return True
+            self._engage_kill_switch(
+                trigger="runtime.bus",
+                reason="bus_drain_error",
+                payload=payload,
+            )
+            return False
+        if drained:
+            return True
+        payload = {
+            "timeout_seconds": self._bus_drain_timeout_seconds,
+            "pending_deliveries": self.bus.pending_deliveries(),
+        }
+        self._audit_runtime("runtime_bus_drain_timeout", payload)
+        if self._alert_sink:
+            self._alert_sink("runtime_bus_drain_timeout", payload, severity="critical")
+        if self._break_glass_active("runtime.bus"):
+            self._record_break_glass_bypass(
+                control_name="runtime.bus",
+                payload=payload,
+                trigger="runtime.bus",
+            )
+            return True
+        self._engage_kill_switch(
+            trigger="runtime.bus",
+            reason="bus_drain_timeout",
+            payload=payload,
+        )
+        return False
+
+    def _remove_heartbeat_tracking(self, agent_name: str) -> None:
+        self._agent_heartbeats.pop(agent_name, None)
+        self._stale_heartbeats.discard(agent_name)
+
+    def _prune_disabled_heartbeats(self) -> None:
+        for agent_name in list(self._disabled_agents):
+            self._remove_heartbeat_tracking(agent_name)
 
     def _resolve_acl_enforcement(self) -> bool:
         raw = os.environ.get("BUS_ACL_ENFORCE")
@@ -468,3 +603,115 @@ class AgentRuntime:
             return raw.lower() in {"1", "true", "yes"}
         env = os.environ.get("ENVIRONMENT", "development").lower()
         return env not in {"development", "dev", "local", "test"}
+
+    def _break_glass_active(self, control_name: str) -> bool:
+        if not self._break_glass_enabled:
+            return False
+        try:
+            return self._break_glass.is_active(control_name)
+        except Exception as exc:
+            self.logger.error("break-glass status check failed: %s", exc)
+            return False
+
+    def _record_break_glass_bypass(
+        self,
+        *,
+        control_name: str,
+        payload: Mapping[str, Any],
+        trigger: str,
+    ) -> None:
+        body = {
+            "control_name": control_name,
+            "trigger": trigger,
+            "payload": dict(payload),
+        }
+        self._audit_runtime("runtime_break_glass_bypass", body)
+        if self._alert_sink:
+            self._alert_sink("runtime_break_glass_bypass", body, severity="warning")
+
+    def _refresh_acl_policy(self) -> None:
+        target = self._acl_enforced
+        if self._break_glass_active("bus.acl"):
+            target = False
+        current = bool(self.bus.acl_status().get("enforced"))
+        if current == target:
+            return
+        self.bus.configure_acl(DEFAULT_BUS_ACL, enforce=target)
+        self.logger.warning("runtime bus ACL enforcement toggled", extra={"enforced": target})
+
+    def _acquire_runtime_lease(self) -> None:
+        acquired, token = self._state_sink.acquire_lease(
+            runtime_name=self._runtime_name,
+            lease_seconds=self._runtime_lease_seconds,
+        )
+        if not acquired:
+            raise RuntimeError(
+                f"runtime lease unavailable for {self._runtime_name}; another leader is active"
+            )
+        self._runtime_fence_token = token
+
+    def _renew_runtime_lease(self) -> bool:
+        if self._runtime_fence_token is None:
+            return True
+        return self._state_sink.renew_lease(
+            runtime_name=self._runtime_name,
+            fence_token=self._runtime_fence_token,
+            lease_seconds=self._runtime_lease_seconds,
+        )
+
+    def _release_runtime_lease(self) -> None:
+        if self._runtime_fence_token is None:
+            return
+        self._state_sink.release_lease(
+            runtime_name=self._runtime_name,
+            fence_token=self._runtime_fence_token,
+        )
+        self._runtime_fence_token = None
+
+    def _restore_checkpoint(self) -> None:
+        checkpoint = self._state_sink.load_checkpoint(runtime_name=self._runtime_name)
+        if not checkpoint:
+            return
+        raw_tick_count = checkpoint.get("tick_count")
+        raw_bus_checkpoint = checkpoint.get("bus_checkpoint")
+        if isinstance(raw_tick_count, int):
+            self._tick_count = raw_tick_count
+        if isinstance(raw_bus_checkpoint, int):
+            self._bus_checkpoint = raw_bus_checkpoint
+        kill_reason = checkpoint.get("kill_switch_reason")
+        kill_trigger = checkpoint.get("kill_switch_trigger")
+        if isinstance(kill_reason, str) and kill_reason:
+            self._kill_switch_reason = kill_reason
+            self._kill_switch_trigger = (
+                str(kill_trigger)
+                if isinstance(kill_trigger, str) and kill_trigger
+                else "checkpoint"
+            )
+            self._stop_event.set()
+            self.logger.error(
+                "runtime restored in kill-switch state from checkpoint",
+                extra={
+                    "runtime_name": self._runtime_name,
+                    "trigger": self._kill_switch_trigger,
+                    "reason": self._kill_switch_reason,
+                },
+            )
+
+    def _persist_checkpoint(self) -> None:
+        self._state_sink.save_checkpoint(
+            runtime_name=self._runtime_name,
+            fence_token=self._runtime_fence_token,
+            tick_count=self._tick_count,
+            bus_checkpoint=self._bus_checkpoint,
+            kill_switch_reason=self._kill_switch_reason,
+            kill_switch_trigger=self._kill_switch_trigger,
+            payload={"pending_deliveries": self.bus.pending_deliveries()},
+        )
+
+    def _resolve_bus_checkpoint(self) -> int:
+        raw = getattr(self.bus, "caught_up_checkpoint", None)
+        if callable(raw):
+            checkpoint = raw()
+            if isinstance(checkpoint, int):
+                return checkpoint
+        return self.bus.depth()

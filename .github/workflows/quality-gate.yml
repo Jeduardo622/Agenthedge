@@ -1,0 +1,94 @@
+name: quality-gate
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Poetry
+        uses: abatilo/actions-poetry@v4
+        with:
+          poetry-version: "1.8.4"
+
+      - name: Install dependencies
+        run: poetry install --with dev
+
+      - name: Run tests with coverage gate
+        run: poetry run pytest --cov=src --cov-fail-under=80
+
+      - name: Type checks
+        run: poetry run mypy src
+
+      - name: Lint
+        run: poetry run flake8 src tests
+
+      - name: Packaging smoke check
+        run: |
+          poetry build
+          poetry run python scripts/package_smoke.py
+
+      - name: Dependency vulnerability audit
+        run: poetry run pip-audit
+
+  postgres-integration:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        suite:
+          - durable-bus
+          - failover-drill
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: agenthedge
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      POSTGRES_DSN: postgresql://postgres:postgres@localhost:5432/agenthedge
+      RUNTIME_BACKEND: postgres
+      RUNTIME_PROFILE: staging
+      BREAK_GLASS_ENABLED: "true"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Poetry
+        uses: abatilo/actions-poetry@v4
+        with:
+          poetry-version: "1.8.4"
+
+      - name: Install dependencies
+        run: poetry install --with dev
+
+      - name: Run integration matrix target
+        run: |
+          if [ "${{ matrix.suite }}" = "durable-bus" ]; then
+            poetry run pytest tests/integration/test_postgres_bus_integration.py -q
+          else
+            poetry run python scripts/failover_drill.py --dsn "$POSTGRES_DSN"
+          fi

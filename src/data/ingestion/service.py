@@ -53,6 +53,7 @@ class DataIngestionService:
         self._quarantine = QuarantineStore(self.config.quarantine_path)
         self._degraded_mode = False
         self._degraded_reasons: set[str] = set()
+        self._provider_health_cache: Dict[str, tuple[float, Dict[str, Any]]] = {}
         self._wire_providers()
 
     def _wire_providers(self) -> None:
@@ -296,18 +297,68 @@ class DataIngestionService:
 
     def providers_health(self) -> Dict[str, Dict[str, Any]]:
         status: Dict[str, Dict[str, Any]] = {}
+        now_epoch = datetime.utcnow().timestamp()
         for name, provider in self._providers.items():
-            health: Dict[str, Any] = {"available": False}
-            try:
-                health["available"] = bool(provider.ping())
-            except Exception:
-                health["available"] = False
+            health = self._provider_health(name, provider, now_epoch)
             if hasattr(provider, "rate_limit_info"):
                 health.update(provider.rate_limit_info())
             health["degraded_mode"] = self._degraded_mode
             health["degraded_reasons"] = sorted(self._degraded_reasons)
             status[name] = health
         return status
+
+    def _provider_health(self, name: str, provider: Any, now_epoch: float) -> Dict[str, Any]:
+        cached = self._provider_health_cache.get(name)
+        if cached and now_epoch < cached[0]:
+            cached_payload = dict(cached[1])
+            cached_payload["probe_cached"] = True
+            return cached_payload
+        checked_at = datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+        payload: Dict[str, Any] = {
+            "available": False,
+            "probe_cached": False,
+            "probe_checked_at": checked_at,
+        }
+        probe = self._provider_probe(name, provider)
+        try:
+            probe()
+            payload["available"] = True
+        except Exception as exc:
+            payload["available"] = False
+            payload["probe_error"] = f"{type(exc).__name__}: {exc}"
+        ttl = float(max(1, self.config.provider_health_ttl_seconds))
+        self._provider_health_cache[name] = (now_epoch + ttl, dict(payload))
+        return payload
+
+    def _provider_probe(self, name: str, provider: Any) -> Any:
+        symbol = self.config.provider_health_probe_symbol
+        if name == "alpha_vantage":
+            return lambda: provider.get_company_overview(symbol)
+        if name == "finnhub":
+            return lambda: provider.get_quote(symbol)
+        if name == "fred":
+            series_id = self.config.provider_health_probe_series_id
+            end = date.today()
+            start = end - timedelta(days=7)
+            return lambda: provider.get_series(
+                series_id,
+                observation_start=start,
+                observation_end=end,
+            )
+        if name == "newsapi":
+            query = self.config.provider_health_probe_query
+            end = datetime.utcnow()
+            start = end - timedelta(days=1)
+            return lambda: provider.search_topic(
+                query,
+                from_datetime=start,
+                to_datetime=end,
+                page_size=1,
+            )
+        ping = getattr(provider, "ping", None)
+        if callable(ping):
+            return ping
+        raise RuntimeError(f"Provider {name} does not expose a health probe")
 
     def degraded_state(self) -> Dict[str, Any]:
         return {

@@ -45,10 +45,18 @@ Informed by the Technical Implementation Plan (CI/CD, sanity checks) and the arc
 - **Production (paper trading):** Feature flags and shadow modes; no untested code promoted.
 
 ## Sanity Check Scripts
-- `scripts/health_check.py` ensures API keys + data sources reachable.
-- `scripts/risk_sanity.py` runs quick VaR/drawdown check before trading.
+- `poetry run python -m cli.runtime health --raw` ensures agents + providers are bootstrappable.
+- `poetry run python -m cli.scheduler run-once midday_check` runs a quick risk/compliance heartbeat.
 - `scripts/backtest_strategy.py` validates strategy before enabling live cycle.
+- `poetry build && poetry run python scripts/package_smoke.py` validates the wheel contains/imports critical runtime modules.
 - `poetry run python scripts/backtest_strategy.py --symbol SPY --start 2024-01-02 --end 2024-01-05 --capital 100000` should complete within CI budget and attach the resulting `storage/backtests/<run_id>/result.json` as an artifact for code review.
+- Postgres cutover checks:
+  - `poetry run python scripts/migrate_runtime_state_to_postgres.py --dsn <POSTGRES_DSN>`
+  - `poetry run python scripts/reconcile_postgres_state.py --dsn <POSTGRES_DSN>`
+- Durable bus integration:
+  - `POSTGRES_DSN=... poetry run pytest tests/integration/test_postgres_bus_integration.py -q`
+- Failover drill:
+  - `poetry run python scripts/failover_drill.py --dsn <POSTGRES_DSN>`
 
 ## Reporting
 - Test reports exported as JUnit XML for CI artifacts.

@@ -22,6 +22,36 @@ poetry run python -m cli.runtime health     # bootstrap + emit structured health
 
 All commands load `.env` automatically (via `python-dotenv`) and register builtin agents + providers.
 
+Provider health checks now use live lightweight probes (cached by TTL) instead of static `ping()`:
+- `PROVIDER_HEALTH_TTL_SECONDS` (default `300`)
+- `PROVIDER_HEALTH_PROBE_SYMBOL` (default `SPY`)
+- `PROVIDER_HEALTH_PROBE_SERIES_ID` (default `DGS10`)
+- `PROVIDER_HEALTH_PROBE_QUERY` (default `markets`)
+
+Runtime async message delivery is drained per tick; tune drain timeout with:
+- `RUNTIME_BUS_DRAIN_TIMEOUT_SECONDS` (default `2.0`)
+
+Runtime backend selection (Postgres durable control plane):
+- `RUNTIME_PROFILE` (`dev|staging|prod`, default `dev`)
+- `RUNTIME_BACKEND` (`in_memory|postgres`, defaults to `postgres` in `staging/prod`)
+- `POSTGRES_DSN` (required when backend is `postgres`)
+- `RUNTIME_NAME` (leader/lease identity namespace, default `default`)
+- `RUNTIME_LEASE_SECONDS` (lease heartbeat interval budget, default `30`)
+- `PORTFOLIO_ACCOUNT_ID` (default `default`)
+- `PORTFOLIO_INITIAL_CASH` (default `1000000`)
+- `BREAK_GLASS_ENABLED` (default `false`)
+- `BREAK_GLASS_DEFAULT_TTL_SECONDS` (default `900`)
+- `BREAK_GLASS_MAX_TTL_SECONDS` (default `86400`)
+
+Break-glass commands (Postgres backend only):
+- `poetry run python -m cli.runtime break-glass-activate --control runtime.kill_switch --reason "incident" --created-by ops`
+- `poetry run python -m cli.runtime break-glass-status`
+- `poetry run python -m cli.runtime break-glass-revoke <override_id> --revoked-by ops`
+
+Cutover tooling:
+- `poetry run python scripts/migrate_runtime_state_to_postgres.py --dsn <POSTGRES_DSN>`
+- `poetry run python scripts/reconcile_postgres_state.py --dsn <POSTGRES_DSN>`
+
 ## Strategy Council & Backtests
 
 - **Strategy plug-ins:** Live under `src/strategies/` and are orchestrated by the Strategy Council agent (`src/agents/impl/quant.py`). Additions must include docs + tests before being enabled.
@@ -36,6 +66,7 @@ poetry run pytest
 poetry run pytest tests/agents/test_runtime.py -k pipeline
 poetry run black src tests
 poetry run mypy src
+poetry build && poetry run python scripts/package_smoke.py
 ```
 
 ## Key Components

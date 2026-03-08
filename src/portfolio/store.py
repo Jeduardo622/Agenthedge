@@ -108,7 +108,14 @@ class PortfolioStore:
             "last_updated": snap.last_updated,
         }
 
-    def apply_fill(self, *, symbol: str, quantity: float, price: float) -> Mapping[str, float]:
+    def apply_fill(
+        self,
+        *,
+        symbol: str,
+        quantity: float,
+        price: float,
+        dedup_key: str | None = None,
+    ) -> Mapping[str, float]:
         """Apply a trade fill; quantity > 0 for buy, < 0 for sell."""
 
         if quantity == 0.0:

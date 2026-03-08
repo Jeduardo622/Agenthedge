@@ -8,12 +8,14 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
+from typing import cast
 
 from agents.config import AgentRuntimeConfig
 from agents.impl import register_builtin_agents
 from agents.registry import AgentRegistry
 from agents.runtime import AgentRuntime
 from audit import JsonlAuditSink
+from data.ingestion import DataIngestionService
 from portfolio.store import PortfolioStore
 
 
@@ -54,7 +56,7 @@ def run_mock_cycle() -> None:
 
     runtime = AgentRuntime(
         registry=registry,
-        ingestion=FakeIngestion(),
+        ingestion=cast(DataIngestionService, FakeIngestion()),
         config=config,
         portfolio_store=PortfolioStore(portfolio_path),
         audit_sink=JsonlAuditSink(audit_path),

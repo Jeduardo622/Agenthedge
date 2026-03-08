@@ -1,0 +1,5 @@
+[run]
+omit =
+    src/observability/dashboard.py
+    src/agents/postgres_bus.py
+    src/portfolio/postgres_store.py

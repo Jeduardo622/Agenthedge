@@ -1,0 +1,75 @@
+name: staged-release-gates
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+jobs:
+  staged-gates:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: agenthedge
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      POSTGRES_DSN: postgresql://postgres:postgres@localhost:5432/agenthedge
+      RUNTIME_BACKEND: postgres
+      RUNTIME_PROFILE: staging
+      BREAK_GLASS_ENABLED: "true"
+      BREAK_GLASS_DEFAULT_TTL_SECONDS: "900"
+      BREAK_GLASS_MAX_TTL_SECONDS: "86400"
+      ALPHA_VANTAGE_API_KEY: "stub"
+      FINNHUB_API_KEY: "stub"
+      FRED_API_KEY: "stub"
+      NEWSAPI_KEY: "stub"
+      ALERT_WEBHOOK_URL: "https://example.invalid/webhook"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Poetry
+        uses: abatilo/actions-poetry@v4
+        with:
+          poetry-version: "1.8.4"
+
+      - name: Install dependencies
+        run: poetry install --with dev
+
+      - name: Prepare migration fixtures
+        run: |
+          mkdir -p storage/strategy_state storage/audit
+          cat > storage/strategy_state/portfolio.json <<'JSON'
+          {"cash":1000000.0,"realized_pnl":0.0,"positions":{"SPY":{"quantity":10.0,"average_cost":500.0}}}
+          JSON
+          cat > storage/audit/runtime_events.jsonl <<'JSONL'
+          {"event_id":"evt-1","timestamp":"2026-01-01T00:00:00+00:00","event_type":"runtime_tick","payload":{"tick":1},"prev_hash":null}
+          JSONL
+
+      - name: Schema migration dry-run
+        run: |
+          poetry run python scripts/migrate_runtime_state_to_postgres.py --dsn "$POSTGRES_DSN"
+          poetry run python scripts/reconcile_postgres_state.py --dsn "$POSTGRES_DSN"
+
+      - name: Canary runtime
+        run: |
+          poetry run python scripts/canary_postgres_runtime.py --dsn "$POSTGRES_DSN" --run-id "canary-${GITHUB_RUN_ID}"
+
+      - name: Failover drill
+        run: |
+          poetry run python scripts/failover_drill.py --dsn "$POSTGRES_DSN"

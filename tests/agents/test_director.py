@@ -40,6 +40,7 @@ def test_director_includes_data_metadata_in_directive(tmp_path) -> None:
     )
 
     director.tick()
+    assert bus.drain(1.0) is True
 
     assert directives
     assert directives[0]["data_metadata"]["degraded_mode"] is True

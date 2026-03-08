@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from pathlib import Path
 
+from infra.runtime_state import NullRuntimeStateSink
 from observability.state import ObservabilityState
 from ops.calendar import USTradingCalendar
 from ops.scheduler import SchedulerService
@@ -103,3 +105,74 @@ def test_heartbeat_check_records_state(tmp_path) -> None:
     snapshot = state.snapshot()
     assert snapshot["scheduler"]["heartbeat_check"]["status"] == "completed"
     assert snapshot["scheduler"]["heartbeat_check"]["details"]["stale_heartbeats"] == ["risk"]
+
+
+def test_scheduler_skips_job_when_leader_lock_not_acquired(tmp_path, monkeypatch) -> None:
+    runtime = FakeRuntime()
+    state = ObservabilityState()
+
+    @contextmanager
+    def _fake_connection(_dsn: str):
+        yield object()
+
+    monkeypatch.setattr("ops.scheduler.resolve_runtime_backend", lambda _env=None: "postgres")
+    monkeypatch.setattr(
+        "ops.scheduler.get_postgres_dsn",
+        lambda _env=None, required=False: "postgresql://localhost/agenthedge",
+    )
+    monkeypatch.setattr("ops.scheduler.postgres_connection", _fake_connection)
+    monkeypatch.setattr("ops.scheduler.try_advisory_lock", lambda _conn, key: False)
+
+    service = SchedulerService(
+        state=state,
+        calendar=StaticCalendar(True),
+        snapshot_dir=tmp_path,
+        runtime_builder=lambda: runtime,
+        state_sink=NullRuntimeStateSink(),
+    )
+
+    service.run_daily_trade()
+
+    snapshot = state.snapshot()
+    assert runtime.run_once_called is False
+    assert snapshot["scheduler"]["run_daily_trade"]["status"] == "skipped"
+    assert (
+        snapshot["scheduler"]["run_daily_trade"]["details"]["reason"] == "leader_lock_not_acquired"
+    )
+
+
+def test_scheduler_executes_job_and_releases_lock(tmp_path, monkeypatch) -> None:
+    runtime = FakeRuntime()
+    state = ObservabilityState()
+    unlock_calls: list[int] = []
+
+    @contextmanager
+    def _fake_connection(_dsn: str):
+        yield object()
+
+    monkeypatch.setattr("ops.scheduler.resolve_runtime_backend", lambda _env=None: "postgres")
+    monkeypatch.setattr(
+        "ops.scheduler.get_postgres_dsn",
+        lambda _env=None, required=False: "postgresql://localhost/agenthedge",
+    )
+    monkeypatch.setattr("ops.scheduler.postgres_connection", _fake_connection)
+    monkeypatch.setattr("ops.scheduler.try_advisory_lock", lambda _conn, key: True)
+    monkeypatch.setattr(
+        "ops.scheduler.unlock_advisory_lock",
+        lambda _conn, key: unlock_calls.append(int(key)),
+    )
+
+    service = SchedulerService(
+        state=state,
+        calendar=StaticCalendar(True),
+        snapshot_dir=tmp_path,
+        runtime_builder=lambda: runtime,
+        state_sink=NullRuntimeStateSink(),
+    )
+
+    service.run_daily_trade()
+
+    snapshot = state.snapshot()
+    assert runtime.run_once_called is True
+    assert snapshot["scheduler"]["run_daily_trade"]["status"] == "completed"
+    assert unlock_calls, "expected advisory lock release call"

@@ -18,7 +18,7 @@ class JsonlAuditSink:
         self._path = Path(path)
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
-        self._last_hash: str | None = None
+        self._last_hash = _initialize_last_hash(self._path)
 
     def __call__(
         self,
@@ -80,6 +80,35 @@ def _hash_record(record: Mapping[str, object]) -> str:
 
 def _serialize_record(record: Mapping[str, object]) -> str:
     return json.dumps(record, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+
+
+def _initialize_last_hash(path: Path) -> str | None:
+    if not path.exists() or path.stat().st_size == 0:
+        return None
+    ok, errors = verify_jsonl_hash_chain(path)
+    if not ok:
+        details = "; ".join(errors[:3]) if errors else "unknown hash-chain failure"
+        raise ValueError(
+            "existing audit chain is invalid; resolve with scripts/cutover_audit_chain.py "
+            "or scripts/migrate_audit_chain.py before writing more events. "
+            f"details: {details}"
+        )
+    return _read_last_hash(path)
+
+
+def _read_last_hash(path: Path) -> str | None:
+    last_hash: str | None = None
+    with path.open("r", encoding="utf-8") as handle:
+        for line in handle:
+            raw = line.strip()
+            if not raw:
+                continue
+            record = json.loads(raw)
+            if isinstance(record, dict):
+                candidate = record.get("hash")
+                if isinstance(candidate, str) and candidate:
+                    last_hash = candidate
+    return last_hash
 
 
 def verify_jsonl_hash_chain(path: str | Path) -> tuple[bool, list[str]]:

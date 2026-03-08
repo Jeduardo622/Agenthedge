@@ -92,6 +92,10 @@ class DataProviderConfig:
     finnhub_key_alias: str = "finnhub"
     news_api_key_alias: str = "newsapi"
     fred_key_alias: str = "fred"
+    provider_health_ttl_seconds: int = 300
+    provider_health_probe_symbol: str = "SPY"
+    provider_health_probe_series_id: str = "DGS10"
+    provider_health_probe_query: str = "markets"
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "DataProviderConfig":
@@ -132,6 +136,16 @@ class DataProviderConfig:
             finnhub_key_alias=env_map.get("FINNHUB_KEY_ALIAS", "finnhub"),
             news_api_key_alias=env_map.get("NEWSAPI_KEY_ALIAS", "newsapi"),
             fred_key_alias=env_map.get("FRED_KEY_ALIAS", "fred"),
+            provider_health_ttl_seconds=_get_int(env_map, "PROVIDER_HEALTH_TTL_SECONDS", 300),
+            provider_health_probe_symbol=(
+                env_map.get("PROVIDER_HEALTH_PROBE_SYMBOL", "SPY").strip().upper() or "SPY"
+            ),
+            provider_health_probe_series_id=(
+                env_map.get("PROVIDER_HEALTH_PROBE_SERIES_ID", "DGS10").strip().upper() or "DGS10"
+            ),
+            provider_health_probe_query=(
+                env_map.get("PROVIDER_HEALTH_PROBE_QUERY", "markets").strip() or "markets"
+            ),
         )
 
     def require(self, field: str) -> str:
@@ -173,4 +187,8 @@ class DataProviderConfig:
             "finnhub_key_alias": self.finnhub_key_alias,
             "news_api_key_alias": self.news_api_key_alias,
             "fred_key_alias": self.fred_key_alias,
+            "provider_health_ttl_seconds": self.provider_health_ttl_seconds,
+            "provider_health_probe_symbol": self.provider_health_probe_symbol,
+            "provider_health_probe_series_id": self.provider_health_probe_series_id,
+            "provider_health_probe_query": self.provider_health_probe_query,
         }

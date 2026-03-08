@@ -226,38 +226,44 @@ class BacktestEngine:
         last_prices: Dict[str, float] = {}
         nav_series: List[Mapping[str, Any]] = []
 
-        for current_date in dataset.dates() or [config.start]:
-            for symbol in config.symbols:
-                bar = dataset.get_bar(symbol, current_date)
-                if not bar:
-                    continue
-                prev_close = dataset.previous_close(symbol, current_date) or bar.close
-                change_pct = ((bar.close - prev_close) / prev_close * 100) if prev_close else 0.0
-                fundamentals = (
-                    {"PERatio": 15.0, "ProfitMargin": 0.15}
-                    if change_pct >= 0.0
-                    else {"PERatio": 40.0, "ProfitMargin": 0.01}
-                )
-                sentiment = max(-0.5, min(0.5, change_pct / 5.0))
-                news = [{"sentiment": sentiment}]
-                directive = {
-                    "directive_id": f"{symbol}-{current_date.isoformat()}",
-                    "symbol": symbol,
-                    "latest_close": bar.close,
-                    "quote": {"pc": prev_close},
-                    "fundamentals": fundamentals,
-                    "news": news,
-                    "timestamp": datetime.combine(
-                        current_date, datetime.min.time(), tzinfo=timezone.utc
-                    ).isoformat(),
-                }
-                bus.publish("director.directive", payload=directive, publisher="director")
-                last_prices[symbol] = bar.close
-            nav = _estimate_nav(portfolio_store, last_prices)
-            nav_series.append({"date": current_date.isoformat(), "nav": round(nav, 2)})
-
-        for agent in agents.values():
-            agent.shutdown()
+        try:
+            for current_date in dataset.dates() or [config.start]:
+                for symbol in config.symbols:
+                    bar = dataset.get_bar(symbol, current_date)
+                    if not bar:
+                        continue
+                    prev_close = dataset.previous_close(symbol, current_date) or bar.close
+                    change_pct = (
+                        ((bar.close - prev_close) / prev_close * 100) if prev_close else 0.0
+                    )
+                    fundamentals = (
+                        {"PERatio": 15.0, "ProfitMargin": 0.15}
+                        if change_pct >= 0.0
+                        else {"PERatio": 40.0, "ProfitMargin": 0.01}
+                    )
+                    sentiment = max(-0.5, min(0.5, change_pct / 5.0))
+                    news = [{"sentiment": sentiment}]
+                    directive = {
+                        "directive_id": f"{symbol}-{current_date.isoformat()}",
+                        "symbol": symbol,
+                        "latest_close": bar.close,
+                        "quote": {"pc": prev_close},
+                        "fundamentals": fundamentals,
+                        "news": news,
+                        "timestamp": datetime.combine(
+                            current_date, datetime.min.time(), tzinfo=timezone.utc
+                        ).isoformat(),
+                    }
+                    bus.publish("director.directive", payload=directive, publisher="director")
+                    last_prices[symbol] = bar.close
+                if not bus.drain(2.0):
+                    raise RuntimeError("Backtest message bus drain timed out")
+                nav = _estimate_nav(portfolio_store, last_prices)
+                nav_series.append({"date": current_date.isoformat(), "nav": round(nav, 2)})
+        finally:
+            for agent in agents.values():
+                agent.shutdown()
+            bus.close(wait=True)
 
         final_nav = nav_series[-1]["nav"] if nav_series else config.initial_cash
         return_pct = (

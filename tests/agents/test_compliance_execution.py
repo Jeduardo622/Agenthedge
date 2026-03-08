@@ -59,6 +59,7 @@ def test_compliance_allows_and_execution_applies_trade(
         },
         publisher="risk",
     )
+    assert bus.drain(1.0) is True
 
     assert fills
     assert store.snapshot().cash == 100000.0 - (100.0 * 10)
@@ -89,6 +90,7 @@ def test_execution_rejects_replayed_director_approval(tmp_path: Path) -> None:
 
     bus.publish("director.approval", payload=payload, publisher="director")
     bus.publish("director.approval", payload=payload, publisher="director")
+    assert bus.drain(1.0) is True
 
     snapshot = store.snapshot()
     assert snapshot.positions["SPY"].quantity == 1.0
@@ -114,6 +116,7 @@ def test_execution_rejects_missing_required_approvals(tmp_path: Path) -> None:
         },
         publisher="director",
     )
+    assert bus.drain(1.0) is True
 
     assert "SPY" not in store.snapshot().positions
     execution.teardown()
@@ -142,6 +145,7 @@ def test_execution_blocks_after_kill_switch(tmp_path: Path) -> None:
         },
         publisher="director",
     )
+    assert bus.drain(1.0) is True
 
     assert "SPY" not in store.snapshot().positions
     execution.teardown()
@@ -162,6 +166,7 @@ def test_compliance_blocks_restricted_symbol(tmp_path: Path, monkeypatch: Monkey
         "risk.approval",
         payload={"proposal_id": "p1", "symbol": "SPY", "price": 100.0, "quantity": 10},
     )
+    assert bus.drain(1.0) is True
 
     assert approvals == []
     compliance.teardown()
@@ -189,6 +194,7 @@ def test_compliance_emits_alert_on_reject(tmp_path: Path, monkeypatch: MonkeyPat
         "risk.approval",
         payload={"proposal_id": "p2", "symbol": "SPY", "price": 100.0, "quantity": 10},
     )
+    assert bus.drain(1.0) is True
 
     assert any(event["action"] == "compliance_reject" for event in captured)
     assert captured[0]["severity"] == "error"
@@ -221,6 +227,7 @@ def test_compliance_blocks_prohibited_tactic(tmp_path: Path, monkeypatch: Monkey
             "tactic": "Spoofing ladder",
         },
     )
+    assert bus.drain(1.0) is True
 
     assert approvals == []
     assert kill_events

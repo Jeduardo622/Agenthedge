@@ -114,6 +114,7 @@ class ExecutionAgent(BaseAgent):
             symbol=symbol,
             quantity=quantity,
             price=price,
+            dedup_key=approval_id,
         )
         self._consumed_approval_ids.add(approval_id)
         event = {

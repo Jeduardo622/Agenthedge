@@ -37,6 +37,7 @@ def test_risk_approves_within_limit(tmp_path: Path, monkeypatch: MonkeyPatch) ->
         "quant.proposal",
         payload={"proposal_id": "p1", "symbol": "SPY", "price": 100.0, "quantity": 100},
     )
+    assert bus.drain(1.0) is True
 
     assert approvals
     risk.teardown()
@@ -57,6 +58,7 @@ def test_risk_rejects_large_notional(tmp_path: Path, monkeypatch: MonkeyPatch) -
         "quant.proposal",
         payload={"proposal_id": "p2", "symbol": "SPY", "price": 100.0, "quantity": 2000},
     )
+    assert bus.drain(1.0) is True
 
     assert approvals == []
     risk.teardown()
@@ -85,6 +87,7 @@ def test_risk_reject_emits_alert(tmp_path: Path, monkeypatch: MonkeyPatch) -> No
         "quant.proposal",
         payload={"proposal_id": "p3", "symbol": "SPY", "price": 100.0, "quantity": 2000},
     )
+    assert bus.drain(1.0) is True
 
     assert any(event["action"] == "risk_reject" for event in captured)
     assert captured[0]["severity"] == "error"
@@ -112,6 +115,7 @@ def test_risk_rejects_var_breach(tmp_path: Path, monkeypatch: MonkeyPatch) -> No
         "quant.proposal",
         payload={"proposal_id": "p4", "symbol": "SPY", "price": 100.0, "quantity": 900},
     )
+    assert bus.drain(1.0) is True
 
     assert approvals == []
     risk.teardown()
@@ -131,6 +135,7 @@ def test_risk_emits_stop_loss_event(tmp_path: Path, monkeypatch: MonkeyPatch) ->
     )
 
     bus.publish("market.snapshot", payload={"symbol": "SPY", "latest_close": 90.0})
+    assert bus.drain(1.0) is True
 
     assert stop_events
     assert stop_events[0]["symbol"] == "SPY"
