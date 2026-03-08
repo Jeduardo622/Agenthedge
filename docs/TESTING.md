@@ -54,9 +54,15 @@ Informed by the Technical Implementation Plan (CI/CD, sanity checks) and the arc
   - `poetry run python scripts/migrate_runtime_state_to_postgres.py --dsn <POSTGRES_DSN>`
   - `poetry run python scripts/reconcile_postgres_state.py --dsn <POSTGRES_DSN>`
 - Durable bus integration:
-  - `POSTGRES_DSN=... poetry run pytest tests/integration/test_postgres_bus_integration.py -q`
+  - PowerShell: `$env:POSTGRES_DSN="postgresql://postgres:postgres@localhost:55432/agenthedge"; poetry run pytest tests/integration/test_postgres_bus_integration.py -q`
+  - Bash: `POSTGRES_DSN=postgresql://postgres:postgres@localhost:55432/agenthedge poetry run pytest tests/integration/test_postgres_bus_integration.py -q`
 - Failover drill:
   - `poetry run python scripts/failover_drill.py --dsn <POSTGRES_DSN>`
+
+## Local Postgres Notes
+- Use host port `55432` for local Docker Postgres to avoid conflicts with host-level Postgres listeners on `5432`.
+- Example container startup:
+  - `docker run --name agenthedge-pg -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=agenthedge -p 55432:5432 -d postgres:16`
 
 ## Reporting
 - Test reports exported as JUnit XML for CI artifacts.

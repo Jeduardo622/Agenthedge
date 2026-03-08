@@ -67,6 +67,8 @@ Escalation steps follow `GOVERNANCE.md` matrix; severe incidents require manual 
   - `RUNTIME_PROFILE=dev|staging|prod` (default `dev`)
   - `RUNTIME_BACKEND=in_memory|postgres` (defaults by profile)
   - `POSTGRES_DSN` required for `postgres` backend
+  - Local Docker recommendation (Windows/macOS/Linux desktops): map container `5432` to host `55432` to avoid collisions with any host-installed Postgres on `5432`
+  - Example local DSN: `postgresql://postgres:postgres@localhost:55432/agenthedge`
   - `RUNTIME_NAME` + `RUNTIME_LEASE_SECONDS` configure runtime lease/fencing semantics
   - `PORTFOLIO_ACCOUNT_ID` and `PORTFOLIO_INITIAL_CASH` control durable ledger bootstrap
 - Break-glass controls:
@@ -101,6 +103,9 @@ Escalation steps follow `GOVERNANCE.md` matrix; severe incidents require manual 
 - Staged release drills:
   - `poetry run python scripts/canary_postgres_runtime.py --dsn <POSTGRES_DSN>`
   - `poetry run python scripts/failover_drill.py --dsn <POSTGRES_DSN>`
+- Troubleshooting local auth failures:
+  - If you see `password authentication failed for user "postgres"` while using `localhost:5432`, verify you are hitting the Docker container and not a host Postgres service.
+  - Preferred local command: `docker run --name agenthedge-pg -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=agenthedge -p 55432:5432 -d postgres:16`
 
 ### Bootstrap Procedure
 1. `poetry install && poetry shell`

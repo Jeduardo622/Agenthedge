@@ -52,6 +52,13 @@ Cutover tooling:
 - `poetry run python scripts/migrate_runtime_state_to_postgres.py --dsn <POSTGRES_DSN>`
 - `poetry run python scripts/reconcile_postgres_state.py --dsn <POSTGRES_DSN>`
 
+Local Docker Postgres (recommended):
+- Use host port `55432` to avoid collisions with local Windows/Postgres services on `5432`.
+- Example run command:
+  - `docker run --name agenthedge-pg -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=agenthedge -p 55432:5432 -d postgres:16`
+- Example DSN:
+  - `postgresql://postgres:postgres@localhost:55432/agenthedge`
+
 ## Strategy Council & Backtests
 
 - **Strategy plug-ins:** Live under `src/strategies/` and are orchestrated by the Strategy Council agent (`src/agents/impl/quant.py`). Additions must include docs + tests before being enabled.
