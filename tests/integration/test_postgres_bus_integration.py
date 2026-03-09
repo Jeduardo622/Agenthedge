@@ -202,6 +202,58 @@ def test_postgres_bus_slow_subscriber_does_not_block_others(postgres_dsn: str) -
     bus.close(wait=True)
 
 
+def test_postgres_bus_wait_until_caught_up_respects_target_event(postgres_dsn: str) -> None:
+    _reset_bus_tables(postgres_dsn)
+    bus = PostgresMessageBus(
+        postgres_dsn,
+        instance_id="it-postgres-bus-catchup",
+        poll_interval_seconds=0.02,
+        retry_delay_seconds=0.02,
+    )
+    seen: list[int] = []
+    bus.subscribe(
+        lambda envelope: seen.append(int(dict(envelope.message.payload or {})["n"])),
+        topics=["topic"],
+        replay_last=0,
+        subscription_key="runtime:catchup",
+    )
+    bus.publish("topic", payload={"n": 1}, publisher="test")
+    target = bus.high_watermark()
+
+    assert bus.wait_until_caught_up(target, 5.0) is True
+    assert seen == [1]
+    bus.close(wait=True)
+
+
+def test_postgres_bus_reports_non_zero_retry_rate_on_handler_failure(postgres_dsn: str) -> None:
+    _reset_bus_tables(postgres_dsn)
+    bus = PostgresMessageBus(
+        postgres_dsn,
+        instance_id="it-postgres-bus-retry-rate",
+        poll_interval_seconds=0.02,
+        retry_delay_seconds=0.02,
+    )
+    attempts = {"count": 0}
+
+    def flaky(_envelope) -> None:
+        if attempts["count"] < 1:
+            attempts["count"] += 1
+            raise RuntimeError("retry me")
+
+    bus.subscribe(
+        flaky,
+        topics=["topic"],
+        replay_last=0,
+        subscription_key="runtime:retry-rate",
+    )
+    bus.publish("topic", payload={"n": 1}, publisher="test")
+    assert bus.drain(5.0) is True
+
+    retry_rate = bus.delivery_retry_rate(300.0)
+    assert retry_rate > 0.0
+    bus.close(wait=True)
+
+
 def test_postgres_runtime_lease_failover(postgres_dsn: str) -> None:
     _reset_bus_tables(postgres_dsn)
     sink_a = PostgresRuntimeStateSink(

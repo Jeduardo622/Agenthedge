@@ -211,7 +211,7 @@ class ConnectionLike(Protocol):
 
 
 def resolve_runtime_profile(env: Mapping[str, str] | None = None) -> RuntimeProfile:
-    source = env or os.environ
+    source = env if env is not None else os.environ
     raw = (source.get("RUNTIME_PROFILE") or "dev").strip().lower()
     if raw not in {"dev", "staging", "prod"}:
         raise ValueError("RUNTIME_PROFILE must be one of: dev, staging, prod")
@@ -219,7 +219,7 @@ def resolve_runtime_profile(env: Mapping[str, str] | None = None) -> RuntimeProf
 
 
 def resolve_runtime_backend(env: Mapping[str, str] | None = None) -> RuntimeBackend:
-    source = env or os.environ
+    source = env if env is not None else os.environ
     raw = source.get("RUNTIME_BACKEND")
     if raw:
         normalized = raw.strip().lower()
@@ -235,7 +235,7 @@ def get_postgres_dsn(
     *,
     required: bool = False,
 ) -> str | None:
-    source = env or os.environ
+    source = env if env is not None else os.environ
     dsn = (source.get("POSTGRES_DSN") or "").strip()
     if dsn:
         return dsn

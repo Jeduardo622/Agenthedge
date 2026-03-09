@@ -58,6 +58,8 @@ Informed by the Technical Implementation Plan (CI/CD, sanity checks) and the arc
   - Bash: `POSTGRES_DSN=postgresql://postgres:postgres@localhost:55432/agenthedge poetry run pytest tests/integration/test_postgres_bus_integration.py -q`
 - Failover drill:
   - `poetry run python scripts/failover_drill.py --dsn <POSTGRES_DSN>`
+- Migration rollback simulation:
+  - `poetry run python scripts/migration_rollback_simulation.py --dsn <POSTGRES_DSN>`
 
 ## Local Postgres Notes
 - Use host port `55432` for local Docker Postgres to avoid conflicts with host-level Postgres listeners on `5432`.

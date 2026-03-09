@@ -13,6 +13,8 @@ from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from agents.runtime_builder import build_runtime_from_env
+from infra.governance import RuntimeGovernanceConfig
+from infra.metrics import PrometheusMetricSink
 from infra.postgres import (
     advisory_lock_key,
     get_postgres_dsn,
@@ -47,6 +49,7 @@ class SchedulerService:
         snapshot_dir: Path | None = None,
         runtime_builder: Callable[[], SchedulerRuntime] | None = None,
         state_sink: RuntimeStateSink | None = None,
+        metric_sink: PrometheusMetricSink | None = None,
     ) -> None:
         self._tz = ZoneInfo(timezone_name)
         self._scheduler = BlockingScheduler(timezone=self._tz)
@@ -56,15 +59,18 @@ class SchedulerService:
         self._snapshot_dir.mkdir(parents=True, exist_ok=True)
         self._runtime_builder = runtime_builder or (lambda: build_runtime_from_env(load_env=False))
         env = os.environ
+        self._instance_id = env.get("RUN_ID", "scheduler")
         self._runtime_backend = resolve_runtime_backend(env)
+        self._governance = RuntimeGovernanceConfig.from_env(env)
         self._postgres_dsn = get_postgres_dsn(env, required=False)
+        self._metric_sink = metric_sink or PrometheusMetricSink()
         self._leader_lock_key = advisory_lock_key("ah_scheduler_leader")
         if state_sink is not None:
             self._state_sink = state_sink
         elif self._runtime_backend == "postgres" and self._postgres_dsn:
             self._state_sink = PostgresRuntimeStateSink(
                 self._postgres_dsn,
-                instance_id=env.get("RUN_ID", "scheduler"),
+                instance_id=self._instance_id,
                 profile=resolve_runtime_profile(env),
                 backend=self._runtime_backend,
             )
@@ -179,6 +185,8 @@ class SchedulerService:
     ) -> None:
         details = details or {}
         details["timezone"] = str(self._tz)
+        if self._runtime_backend == "postgres":
+            details.setdefault("leader_instance_id", self._instance_id)
         self._state.record_scheduler_event(job_name, status=status, details=details)
         self._state_sink.record_scheduler_run(
             job_name=job_name,
@@ -199,10 +207,84 @@ class SchedulerService:
                     details={"reason": "leader_lock_not_acquired"},
                 )
                 return
+            if self._leader_changed(job_name):
+                self._metric_sink("scheduler_leadership_churn_total", 1.0, {"agent": "scheduler"})
+                churn_24h = self._leadership_churn_last_24h(job_name)
+                if churn_24h > self._governance.scheduler_leadership_churn_alert_threshold:
+                    payload = {
+                        "job_name": job_name,
+                        "churn_last_24h": churn_24h,
+                        "threshold": self._governance.scheduler_leadership_churn_alert_threshold,
+                    }
+                    self._state.record_alert(
+                        "scheduler_leadership_churn_slo_breach",
+                        "warning",
+                        payload,
+                    )
             try:
                 callback()
             finally:
                 unlock_advisory_lock(conn, key=self._leader_lock_key)
+
+    def _leader_changed(self, job_name: str) -> bool:
+        previous = self._latest_leader_instance(job_name)
+        return previous is not None and previous != self._instance_id
+
+    def _latest_leader_instance(self, job_name: str) -> str | None:
+        if self._runtime_backend != "postgres" or not self._postgres_dsn:
+            return None
+        try:
+            with postgres_connection(self._postgres_dsn) as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT details_json->>'leader_instance_id'
+                        FROM ah_scheduler_runs
+                        WHERE job_name = %s
+                          AND status = 'completed'
+                        ORDER BY created_at DESC
+                        LIMIT 1
+                        """,
+                        (job_name,),
+                    )
+                    row = cur.fetchone()
+                    if not row or row[0] is None:
+                        return None
+                    value = str(row[0]).strip()
+                    return value or None
+        except Exception:
+            return None
+
+    def _leadership_churn_last_24h(self, job_name: str) -> int:
+        if self._runtime_backend != "postgres" or not self._postgres_dsn:
+            return 0
+        try:
+            with postgres_connection(self._postgres_dsn) as conn:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        SELECT details_json->>'leader_instance_id'
+                        FROM ah_scheduler_runs
+                        WHERE job_name = %s
+                          AND status = 'completed'
+                          AND created_at >= NOW() - INTERVAL '24 hours'
+                        ORDER BY created_at ASC
+                        """,
+                        (job_name,),
+                    )
+                    rows = [str(row[0]).strip() for row in cur.fetchall() if row and row[0]]
+        except Exception:
+            return 0
+        transitions = 0
+        prev: str | None = None
+        for item in rows:
+            if prev is None:
+                prev = item
+                continue
+            if item != prev:
+                transitions += 1
+            prev = item
+        return transitions
 
 
 __all__ = ["SchedulerService"]

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -67,6 +68,7 @@ def test_null_runtime_state_sink_is_noop() -> None:
         kill_switch_reason=None,
         kill_switch_trigger=None,
     )
+    assert sink.last_failover_seconds() is None
 
 
 def test_postgres_runtime_state_sink_emits_expected_writes(monkeypatch) -> None:
@@ -93,7 +95,6 @@ def test_postgres_runtime_state_sink_emits_expected_writes(monkeypatch) -> None:
     sink.record_provider_health({"finnhub": {"available": True}})
     cursor.fetchone_values.extend(
         [
-            ("instance-1", 2),
             ("instance-1", 2, 4, 5, None, None, {"pending": 0}),
             ("instance-1",),
         ]
@@ -123,9 +124,41 @@ def test_postgres_runtime_state_sink_emits_expected_writes(monkeypatch) -> None:
     assert "INSERT INTO ah_scheduler_runs" in executed_sql
     assert "INSERT INTO ah_provider_health_snapshots" in executed_sql
     assert "INSERT INTO ah_runtime_leases" in executed_sql
-    assert "UPDATE ah_runtime_leases" in executed_sql
+    assert ("UPDATE ah_runtime_leases" in executed_sql) or ("DO NOTHING" in executed_sql)
     assert "DELETE FROM ah_runtime_leases" in executed_sql
     assert "SELECT" in executed_sql and "ah_runtime_checkpoints" in executed_sql
+
+
+def test_postgres_runtime_state_sink_tracks_failover_seconds(monkeypatch) -> None:
+    cursor = _FakeCursor()
+    conn = _FakeConnection(cursor)
+
+    @contextmanager
+    def _fake_connection(_dsn: str):
+        yield conn
+
+    monkeypatch.setattr(runtime_state, "ensure_postgres_schema", lambda _dsn: None)
+    monkeypatch.setattr(runtime_state, "postgres_connection", _fake_connection)
+
+    sink = runtime_state.PostgresRuntimeStateSink(
+        "postgresql://localhost/agenthedge",
+        instance_id="instance-2",
+        profile="staging",
+        backend="postgres",
+    )
+    cursor.rowcount = 0
+    cursor.fetchone_values.extend(
+        [
+            ("instance-1", 9, datetime.now(timezone.utc) - timedelta(seconds=5)),
+        ]
+    )
+    acquired, token = sink.acquire_lease(runtime_name="runtime", lease_seconds=30)
+
+    assert acquired is True
+    assert token == 10
+    failover = sink.last_failover_seconds()
+    assert failover is not None
+    assert failover > 0.0
 
 
 def test_postgres_runtime_state_sink_rejects_checkpoint_without_active_lease(monkeypatch) -> None:

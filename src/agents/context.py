@@ -94,7 +94,7 @@ class AgentContext:
         extras: Mapping[str, Any] | None = None,
         alert_sink: AlertSink | None = None,
     ) -> "AgentContext":
-        source = env or os.environ
+        source = env if env is not None else os.environ
         environment = source.get("ENVIRONMENT", "development")
         run_id = source.get("RUN_ID") or datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         return cls(

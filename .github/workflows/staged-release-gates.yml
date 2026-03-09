@@ -10,6 +10,9 @@ on:
 jobs:
   staged-gates:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
     services:
       postgres:
         image: postgres:16
@@ -52,6 +55,20 @@ jobs:
       - name: Install dependencies
         run: poetry install --with dev
 
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3.7.0
+
+      - name: Build and sign release artifact
+        run: |
+          poetry build
+          wheel_path=$(ls dist/*.whl | head -n 1)
+          cosign sign-blob --yes "$wheel_path" --output-signature "${wheel_path}.sig" --output-certificate "${wheel_path}.pem"
+          cosign verify-blob "$wheel_path" \
+            --signature "${wheel_path}.sig" \
+            --certificate "${wheel_path}.pem" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            --certificate-identity-regexp "^https://github.com/${{ github.repository }}/.github/workflows/staged-release-gates.yml@.*$"
+
       - name: Prepare migration fixtures
         run: |
           mkdir -p storage/strategy_state storage/audit
@@ -66,6 +83,10 @@ jobs:
         run: |
           poetry run python scripts/migrate_runtime_state_to_postgres.py --dsn "$POSTGRES_DSN"
           poetry run python scripts/reconcile_postgres_state.py --dsn "$POSTGRES_DSN"
+
+      - name: Migration rollback simulation
+        run: |
+          poetry run python scripts/migration_rollback_simulation.py --dsn "$POSTGRES_DSN"
 
       - name: Break-glass end-to-end
         run: |

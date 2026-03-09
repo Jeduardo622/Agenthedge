@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import pandas as pd
 
-from observability.dashboard_helpers import parse_agent_metrics, provider_frame
+from observability.dashboard_helpers import (
+    parse_agent_metrics,
+    parse_reliability_metrics,
+    provider_frame,
+)
 
 
 def test_parse_agent_metrics_extracts_rows_and_bus_depth() -> None:
@@ -39,3 +43,27 @@ def test_provider_frame_handles_empty_and_payload_rows() -> None:
     populated = provider_frame({"alpha_vantage": {"available": True, "degraded_mode": False}})
     assert list(populated["provider"]) == ["alpha_vantage"]
     assert bool(populated.iloc[0]["available"]) is True
+
+
+def test_parse_reliability_metrics_extracts_runtime_signals() -> None:
+    payload = """
+# HELP agent_runtime_event_lag Agent metric runtime_event_lag
+# TYPE agent_runtime_event_lag gauge
+agent_runtime_event_lag{agent="runtime"} 12
+# HELP agent_runtime_delivery_retry_rate Agent metric runtime_delivery_retry_rate
+# TYPE agent_runtime_delivery_retry_rate gauge
+agent_runtime_delivery_retry_rate{agent="runtime"} 0.125
+# HELP agent_scheduler_leadership_churn_total Number of scheduler leadership transitions
+# TYPE agent_scheduler_leadership_churn_total counter
+agent_scheduler_leadership_churn_total{agent="scheduler"} 3
+# HELP agent_runtime_failover_time_seconds Runtime failover recovery duration in seconds
+# TYPE agent_runtime_failover_time_seconds histogram
+agent_runtime_failover_time_seconds_sum{agent="runtime"} 8
+agent_runtime_failover_time_seconds_count{agent="runtime"} 2
+"""
+    metrics = parse_reliability_metrics(payload)
+    assert metrics["runtime_event_lag"] == 12
+    assert metrics["runtime_delivery_retry_rate"] == 0.125
+    assert metrics["scheduler_leadership_churn_total"] == 3
+    assert metrics["runtime_failover_time_seconds_sum"] == 8
+    assert metrics["runtime_failover_time_seconds_count"] == 2

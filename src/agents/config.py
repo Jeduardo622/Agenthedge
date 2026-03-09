@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import List, Mapping
+
+from infra.governance import RuntimeGovernanceConfig
 
 
 def _get_float(env: Mapping[str, str], key: str, default: float) -> float:
@@ -58,10 +60,11 @@ class AgentRuntimeConfig:
     break_glass_enabled: bool = False
     break_glass_default_ttl_seconds: int = 900
     break_glass_max_ttl_seconds: int = 86_400
+    governance: RuntimeGovernanceConfig = field(default_factory=RuntimeGovernanceConfig.from_env)
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "AgentRuntimeConfig":
-        source = env or os.environ
+        source = env if env is not None else os.environ
         runtime_name = (source.get("RUNTIME_NAME") or "default").strip() or "default"
         return cls(
             tick_interval_seconds=_get_float(source, "AGENT_TICK_INTERVAL", 5.0),
@@ -82,4 +85,5 @@ class AgentRuntimeConfig:
                 "BREAK_GLASS_MAX_TTL_SECONDS",
                 86_400,
             ),
+            governance=RuntimeGovernanceConfig.from_env(source),
         )

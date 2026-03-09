@@ -14,7 +14,12 @@ from agents.impl import register_builtin_agents
 from agents.registry import AgentRegistry
 from agents.runtime import AgentRuntime
 from data.ingestion import DataIngestionService
-from observability.dashboard_helpers import parse_agent_metrics, prometheus_url, provider_frame
+from observability.dashboard_helpers import (
+    parse_agent_metrics,
+    parse_reliability_metrics,
+    prometheus_url,
+    provider_frame,
+)
 
 load_dotenv()
 st.set_page_config(page_title="Agenthedge Observability", layout="wide")
@@ -51,12 +56,14 @@ audit_obs = observability.get("audit", {})
 strategy_obs = observability.get("strategies", {})
 prometheus_rows: List[Dict[str, Any]] = []
 prom_bus_depth: float | None = None
+reliability_metrics: Mapping[str, float | None] = {}
 prometheus_scrape_url = prometheus_url()
 with st.spinner("Fetching Prometheus metrics..."):
     try:
         response = requests.get(prometheus_scrape_url, timeout=3.0)
         response.raise_for_status()
         prometheus_rows, prom_bus_depth = parse_agent_metrics(response.text)
+        reliability_metrics = parse_reliability_metrics(response.text)
     except Exception as exc:  # pragma: no cover - UI feedback path
         st.warning(f"Failed to pull Prometheus metrics: {exc}")
 
@@ -138,6 +145,25 @@ if prometheus_rows:
     st.dataframe(metrics_df, use_container_width=True, hide_index=True)
 else:
     st.info("No Prometheus samples available yet.")
+
+st.subheader("Reliability SLO Signals")
+failover_count = reliability_metrics.get("runtime_failover_time_seconds_count")
+failover_sum = reliability_metrics.get("runtime_failover_time_seconds_sum")
+avg_failover = None
+if isinstance(failover_count, (int, float)) and isinstance(failover_sum, (int, float)):
+    if failover_count > 0:
+        avg_failover = float(failover_sum) / float(failover_count)
+slo_cols = st.columns(4)
+slo_cols[0].metric("Event Lag", f"{(reliability_metrics.get('runtime_event_lag') or 0):.2f}")
+slo_cols[1].metric(
+    "Retry Rate",
+    f"{(reliability_metrics.get('runtime_delivery_retry_rate') or 0) * 100:.2f}%",
+)
+slo_cols[2].metric(
+    "Leadership Churn",
+    f"{int(reliability_metrics.get('scheduler_leadership_churn_total') or 0)}",
+)
+slo_cols[3].metric("Avg Failover (s)", "n/a" if avg_failover is None else f"{avg_failover:.2f}")
 
 st.divider()
 

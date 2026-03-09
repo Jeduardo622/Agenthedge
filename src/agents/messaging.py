@@ -230,15 +230,12 @@ class MessageBus:
         with self._lock:
             return len(self._history)
 
-    def caught_up_checkpoint(self) -> int:
+    def high_watermark(self) -> int:
         with self._lock:
-            if not self._history:
-                return 0
-            latest = self._history[-1]
-            try:
-                return int(latest.id)
-            except ValueError:
-                return len(self._history)
+            return len(self._history)
+
+    def caught_up_checkpoint(self) -> int:
+        return self.high_watermark()
 
     def pending_deliveries(self) -> Dict[str, int]:
         with self._lock:
@@ -260,6 +257,19 @@ class MessageBus:
             if time.monotonic() >= deadline:
                 return False
             time.sleep(0.01)
+
+    def wait_until_caught_up(
+        self,
+        target_event_id: int,
+        timeout_seconds: float,
+        subscription_scope: Sequence[str] | None = None,
+    ) -> bool:
+        _ = subscription_scope
+        if target_event_id < 0:
+            raise ValueError("target_event_id must be non-negative")
+        if self.high_watermark() < target_event_id:
+            return False
+        return self.drain(timeout_seconds)
 
     def close(self, *, wait: bool = True) -> None:
         workers: List[_SubscriptionWorker] = []

@@ -45,6 +45,20 @@ Escalation steps follow `GOVERNANCE.md` matrix; severe incidents require manual 
    - Runtime halts ticks automatically; confirm all agents in safe state.
    - Review payload (reason + metrics), produce incident ticket, and capture forensic snapshot.
    - Reset requires human approval plus `runtime resume` command with documented sign-off.
+7. **Queue Backlog Growth (`runtime_event_lag`)**
+   - Confirm `agent_runtime_event_lag` and `runtime_bus_depth` trends in Prometheus/Grafana.
+   - If lag persists above threshold, reduce tick cadence and inspect slow subscribers via bus delivery table.
+   - Trigger failover drill if lag correlates with lease churn or stuck runtime instance.
+8. **Lock Contention / Leadership Churn**
+   - Inspect scheduler run history (`ah_scheduler_runs`) for frequent leader transitions.
+   - Validate Postgres advisory lock health and runtime lease renewals.
+   - If churn exceeds threshold, hold scheduled jobs and run canary + failover diagnostics.
+9. **Failover Degradation**
+   - Measure failover recovery via `agent_runtime_failover_time_seconds`.
+   - If threshold breached, isolate the stale leader, validate checkpoint fence ownership, and replay pending bus deliveries.
+10. **Migration Rollback Incident**
+   - Execute `scripts/migration_rollback_simulation.py` against staging DSN.
+   - Confirm reconcile status returns `ok` after rollback + re-migration before resuming promotions.
 
 ## Maintenance Windows
 - Weekly (Saturday 10:00-14:00 local): dependency updates, model retraining, prompt refresh.
@@ -63,6 +77,16 @@ Escalation steps follow `GOVERNANCE.md` matrix; severe incidents require manual 
 - Network allowlist controls: set `NETWORK_ALLOWLIST_ENABLED=true`, `NETWORK_ALLOWLIST_DOMAINS=<csv>`, and optionally `NETWORK_ALLOWLIST_ENFORCE=true` to block disallowed outbound requests.
 - Runtime heartbeat + anomaly controls: `HEARTBEAT_MONITOR_ENABLED`, `HEARTBEAT_TIMEOUT_SECONDS`, `ANOMALY_DETECTION_ENABLED`, `ANOMALY_THRESHOLD_ZSCORE`, `ANOMALY_CRITICAL_ZSCORE`.
 - Runtime async bus drain control: `RUNTIME_BUS_DRAIN_TIMEOUT_SECONDS` (runtime kill-switches if delivery cannot drain within timeout).
+- Reliability SLO metrics:
+  - `agent_runtime_event_lag`
+  - `agent_runtime_delivery_retry_rate`
+  - `agent_scheduler_leadership_churn_total`
+  - `agent_runtime_failover_time_seconds`
+- Reliability alert thresholds:
+  - `RUNTIME_EVENT_LAG_ALERT_THRESHOLD`
+  - `RUNTIME_DELIVERY_RETRY_RATE_ALERT_THRESHOLD`
+  - `SCHEDULER_LEADERSHIP_CHURN_ALERT_THRESHOLD`
+  - `RUNTIME_FAILOVER_TIME_ALERT_THRESHOLD_SECONDS`
 - Runtime profile/backend controls:
   - `RUNTIME_PROFILE=dev|staging|prod` (default `dev`)
   - `RUNTIME_BACKEND=in_memory|postgres` (defaults by profile)
@@ -100,12 +124,19 @@ Escalation steps follow `GOVERNANCE.md` matrix; severe incidents require manual 
 - Durable-state cutover and reconciliation:
   - `poetry run python scripts/migrate_runtime_state_to_postgres.py --dsn <POSTGRES_DSN> --portfolio-path storage/strategy_state/portfolio.json --audit-path storage/audit/runtime_events.jsonl`
   - `poetry run python scripts/reconcile_postgres_state.py --dsn <POSTGRES_DSN> --portfolio-path storage/strategy_state/portfolio.json --audit-path storage/audit/runtime_events.jsonl`
+  - `poetry run python scripts/migration_rollback_simulation.py --dsn <POSTGRES_DSN>`
 - Staged release drills:
   - `poetry run python scripts/canary_postgres_runtime.py --dsn <POSTGRES_DSN>`
   - `poetry run python scripts/failover_drill.py --dsn <POSTGRES_DSN>`
 - Troubleshooting local auth failures:
   - If you see `password authentication failed for user "postgres"` while using `localhost:5432`, verify you are hitting the Docker container and not a host Postgres service.
   - Preferred local command: `docker run --name agenthedge-pg -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=agenthedge -p 55432:5432 -d postgres:16`
+
+## Staged Gate Evidence Checklist
+- Signature proof: attach `cosign verify-blob` output for the promoted wheel.
+- Migration evidence: attach dry-run migrate/reconcile output plus rollback simulation JSON report.
+- Reliability evidence: attach failover drill output and latest SLO metric snapshot.
+- Governance evidence: attach break-glass lifecycle test output and runtime startup governance summary log line.
 
 ### Bootstrap Procedure
 1. `poetry install && poetry shell`

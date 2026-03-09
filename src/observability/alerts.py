@@ -163,7 +163,7 @@ class AlertNotifier:
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "AlertNotifier":
-        source = env or os.environ
+        source = env if env is not None else os.environ
         transports: list[AlertTransport] = []
         webhook_url = source.get("ALERT_WEBHOOK_URL", "").strip()
         if webhook_url and not _is_placeholder_webhook(webhook_url):

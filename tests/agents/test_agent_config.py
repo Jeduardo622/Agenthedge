@@ -14,6 +14,7 @@ def test_agent_runtime_config_defaults() -> None:
     assert config.runtime_name == "default"
     assert config.runtime_lease_seconds == 30
     assert config.break_glass_enabled is False
+    assert config.governance.profile == "dev"
 
 
 def test_agent_runtime_config_parses_lists_and_limits() -> None:
@@ -29,6 +30,7 @@ def test_agent_runtime_config_parses_lists_and_limits() -> None:
             "BREAK_GLASS_ENABLED": "true",
             "BREAK_GLASS_DEFAULT_TTL_SECONDS": "600",
             "BREAK_GLASS_MAX_TTL_SECONDS": "3600",
+            "RUNTIME_PROFILE": "staging",
         }
     )
     assert config.tick_interval_seconds == 2.5
@@ -41,6 +43,7 @@ def test_agent_runtime_config_parses_lists_and_limits() -> None:
     assert config.break_glass_enabled is True
     assert config.break_glass_default_ttl_seconds == 600
     assert config.break_glass_max_ttl_seconds == 3600
+    assert config.governance.profile == "staging"
 
 
 def test_agent_runtime_config_rejects_non_positive_values() -> None:

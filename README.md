@@ -31,6 +31,14 @@ Provider health checks now use live lightweight probes (cached by TTL) instead o
 Runtime async message delivery is drained per tick; tune drain timeout with:
 - `RUNTIME_BUS_DRAIN_TIMEOUT_SECONDS` (default `2.0`)
 
+Runtime governance defaults are profile-driven (`RUNTIME_PROFILE`) and emit a redacted startup summary:
+- ACL + allowlist defaults: non-blocking in `staging`, strict in `prod`
+- Reliability thresholds:
+  - `RUNTIME_EVENT_LAG_ALERT_THRESHOLD` (default `50`)
+  - `RUNTIME_DELIVERY_RETRY_RATE_ALERT_THRESHOLD` (default `0.01`)
+  - `SCHEDULER_LEADERSHIP_CHURN_ALERT_THRESHOLD` (default `2`)
+  - `RUNTIME_FAILOVER_TIME_ALERT_THRESHOLD_SECONDS` (default `10`)
+
 Runtime backend selection (Postgres durable control plane):
 - `RUNTIME_PROFILE` (`dev|staging|prod`, default `dev`)
 - `RUNTIME_BACKEND` (`in_memory|postgres`, defaults to `postgres` in `staging/prod`)
@@ -51,6 +59,7 @@ Break-glass commands (Postgres backend only):
 Cutover tooling:
 - `poetry run python scripts/migrate_runtime_state_to_postgres.py --dsn <POSTGRES_DSN>`
 - `poetry run python scripts/reconcile_postgres_state.py --dsn <POSTGRES_DSN>`
+- `poetry run python scripts/migration_rollback_simulation.py --dsn <POSTGRES_DSN>`
 
 Local Docker Postgres (recommended):
 - Use host port `55432` to avoid collisions with local Windows/Postgres services on `5432`.

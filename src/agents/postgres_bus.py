@@ -270,6 +270,13 @@ class PostgresMessageBus(MessageBus):
                 row = cur.fetchone()
                 return _as_int(row[0]) if row else 0
 
+    def high_watermark(self) -> int:
+        with postgres_connection(self._dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT COALESCE(MAX(event_id), 0) FROM ah_bus_events")
+                row = cur.fetchone()
+                return _as_int(row[0]) if row else 0
+
     def pending_deliveries(self) -> Dict[str, int]:
         sub_ids = list(self._subs.keys())
         if not sub_ids:
@@ -315,6 +322,65 @@ class PostgresMessageBus(MessageBus):
                     return max_event_id
                 min_pending = _as_int(pending_row[0])
                 return max(0, min_pending - 1)
+
+    def wait_until_caught_up(
+        self,
+        target_event_id: int,
+        timeout_seconds: float,
+        subscription_scope: Sequence[str] | None = None,
+    ) -> bool:
+        if target_event_id < 0:
+            raise ValueError("target_event_id must be non-negative")
+        if timeout_seconds < 0:
+            raise ValueError("timeout_seconds must be non-negative")
+        deadline = time.monotonic() + timeout_seconds
+        while True:
+            if self._subscriptions_caught_up(
+                target_event_id=target_event_id,
+                subscription_scope=subscription_scope,
+            ):
+                return True
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(self._poll_interval_seconds)
+
+    def delivery_retry_rate(self, window_seconds: float = 300.0) -> float:
+        if window_seconds <= 0:
+            raise ValueError("window_seconds must be positive")
+        with postgres_connection(self._dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT
+                        COALESCE(
+                            SUM(
+                                CASE WHEN d.attempts > 1
+                                THEN d.attempts - 1
+                                ELSE 0
+                                END
+                            ), 0
+                        ) AS retries,
+                        COALESCE(
+                            SUM(
+                                CASE WHEN d.attempts > 0
+                                THEN d.attempts ELSE 0 END
+                            ), 0
+                        ) AS attempted
+                    FROM ah_bus_deliveries d
+                    JOIN ah_bus_subscriptions s ON s.subscription_id = d.subscription_id
+                    WHERE s.instance_id = %s
+                      AND d.updated_at >= NOW() - (%s * INTERVAL '1 second')
+                    """,
+                    (self._instance_id, window_seconds),
+                )
+                row = cur.fetchone()
+                if not row:
+                    return 0.0
+                retries = _as_int(row[0])
+                attempted = _as_int(row[1])
+                if attempted <= 0:
+                    return 0.0
+                return float(retries) / float(attempted)
 
     def drain(self, timeout_seconds: float) -> bool:
         if timeout_seconds < 0:
@@ -581,6 +647,76 @@ class PostgresMessageBus(MessageBus):
             """,
             (subscription_id,),
         )
+
+    def _subscriptions_caught_up(
+        self,
+        *,
+        target_event_id: int,
+        subscription_scope: Sequence[str] | None,
+    ) -> bool:
+        if target_event_id == 0:
+            return True
+        scope_ids = [sid for sid in (subscription_scope or []) if sid]
+        with postgres_connection(self._dsn) as conn:
+            with conn.cursor() as cur:
+                if scope_ids:
+                    cur.execute(
+                        """
+                        SELECT subscription_id, cursor_event_id
+                        FROM ah_bus_subscriptions
+                        WHERE active = TRUE
+                          AND instance_id = %s
+                          AND subscription_id IN (
+                              SELECT UNNEST(%s::text[])
+                          )
+                        """,
+                        (self._instance_id, scope_ids),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        SELECT subscription_id, cursor_event_id
+                        FROM ah_bus_subscriptions
+                        WHERE active = TRUE
+                          AND instance_id = %s
+                        """,
+                        (self._instance_id,),
+                    )
+                rows = cur.fetchall()
+                if not rows:
+                    return True
+                if scope_ids:
+                    cur.execute(
+                        """
+                        SELECT COUNT(*)
+                        FROM ah_bus_deliveries d
+                        JOIN ah_bus_subscriptions s ON s.subscription_id = d.subscription_id
+                        WHERE s.instance_id = %s
+                          AND s.active = TRUE
+                          AND s.subscription_id IN (
+                              SELECT UNNEST(%s::text[])
+                          )
+                          AND d.status IN ('pending', 'processing', 'retry')
+                          AND d.event_id <= %s
+                        """,
+                        (self._instance_id, scope_ids, target_event_id),
+                    )
+                else:
+                    cur.execute(
+                        """
+                        SELECT COUNT(*)
+                        FROM ah_bus_deliveries d
+                        JOIN ah_bus_subscriptions s ON s.subscription_id = d.subscription_id
+                        WHERE s.instance_id = %s
+                          AND s.active = TRUE
+                          AND d.status IN ('pending', 'processing', 'retry')
+                          AND d.event_id <= %s
+                        """,
+                        (self._instance_id, target_event_id),
+                    )
+                pending_row = cur.fetchone()
+                pending = _as_int(pending_row[0]) if pending_row else 0
+                return pending == 0
 
 
 def _encode_topics(topics: Sequence[str] | None) -> str:

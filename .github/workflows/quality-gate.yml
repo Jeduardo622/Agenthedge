@@ -10,6 +10,9 @@ on:
 jobs:
   checks:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v4
 
@@ -40,6 +43,19 @@ jobs:
           poetry build
           poetry run python scripts/package_smoke.py
 
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3.7.0
+
+      - name: Sign and verify wheel artifact
+        run: |
+          wheel_path=$(ls dist/*.whl | head -n 1)
+          cosign sign-blob --yes "$wheel_path" --output-signature "${wheel_path}.sig" --output-certificate "${wheel_path}.pem"
+          cosign verify-blob "$wheel_path" \
+            --signature "${wheel_path}.sig" \
+            --certificate "${wheel_path}.pem" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            --certificate-identity-regexp "^https://github.com/${{ github.repository }}/.github/workflows/quality-gate.yml@.*$"
+
       - name: Dependency vulnerability audit
         run: poetry run pip-audit
 
@@ -51,6 +67,7 @@ jobs:
           - durable-bus
           - failover-e2e
           - break-glass-e2e
+          - migration-rollback
           - failover-drill
     services:
       postgres:
@@ -90,11 +107,13 @@ jobs:
       - name: Run integration matrix target
         run: |
           if [ "${{ matrix.suite }}" = "durable-bus" ]; then
-            poetry run pytest tests/integration/test_postgres_bus_integration.py -k "delivery_isolated_and_ordered or slow_subscriber_does_not_block_others" -q
+            poetry run pytest tests/integration/test_postgres_bus_integration.py -k "delivery_isolated_and_ordered or slow_subscriber_does_not_block_others or wait_until_caught_up_respects_target_event or reports_non_zero_retry_rate_on_handler_failure" -q
           elif [ "${{ matrix.suite }}" = "failover-e2e" ]; then
             poetry run pytest tests/integration/test_postgres_bus_integration.py -k "checkpoint_rejects_stale_owner_after_failover or durable_subscription_takeover_recovers_processing_delivery or runtime_failover_preserves_dedupe_at_storage_boundary" -q
           elif [ "${{ matrix.suite }}" = "break-glass-e2e" ]; then
             poetry run pytest tests/integration/test_break_glass_integration.py -q
+          elif [ "${{ matrix.suite }}" = "migration-rollback" ]; then
+            poetry run python scripts/migration_rollback_simulation.py --dsn "$POSTGRES_DSN"
           else
             poetry run python scripts/failover_drill.py --dsn "$POSTGRES_DSN"
           fi

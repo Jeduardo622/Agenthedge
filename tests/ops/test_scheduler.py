@@ -37,6 +37,14 @@ class FakeRuntime:
         self.stopped = True
 
 
+class CaptureMetricSink:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, float, dict[str, object] | None]] = []
+
+    def __call__(self, name: str, value: float, tags=None) -> None:
+        self.calls.append((name, value, tags))
+
+
 def _build_scheduler(
     *,
     tmp_path: Path,
@@ -176,3 +184,49 @@ def test_scheduler_executes_job_and_releases_lock(tmp_path, monkeypatch) -> None
     assert runtime.run_once_called is True
     assert snapshot["scheduler"]["run_daily_trade"]["status"] == "completed"
     assert unlock_calls, "expected advisory lock release call"
+
+
+def test_scheduler_records_leadership_churn_metric(tmp_path, monkeypatch) -> None:
+    runtime = FakeRuntime()
+    state = ObservabilityState()
+    metrics = CaptureMetricSink()
+
+    @contextmanager
+    def _fake_connection(_dsn: str):
+        yield object()
+
+    monkeypatch.setattr("ops.scheduler.resolve_runtime_backend", lambda _env=None: "postgres")
+    monkeypatch.setattr(
+        "ops.scheduler.get_postgres_dsn",
+        lambda _env=None, required=False: "postgresql://localhost/agenthedge",
+    )
+    monkeypatch.setattr("ops.scheduler.postgres_connection", _fake_connection)
+    monkeypatch.setattr("ops.scheduler.try_advisory_lock", lambda _conn, key: True)
+    monkeypatch.setattr("ops.scheduler.unlock_advisory_lock", lambda _conn, key: None)
+    monkeypatch.setattr(
+        "ops.scheduler.RuntimeGovernanceConfig.from_env",
+        staticmethod(
+            lambda _env=None: type(
+                "_Cfg",
+                (),
+                {"scheduler_leadership_churn_alert_threshold": 0.0},
+            )()
+        ),
+    )
+
+    service = SchedulerService(
+        state=state,
+        calendar=StaticCalendar(True),
+        snapshot_dir=tmp_path,
+        runtime_builder=lambda: runtime,
+        state_sink=NullRuntimeStateSink(),
+        metric_sink=metrics,  # type: ignore[arg-type]
+    )
+    monkeypatch.setattr(service, "_latest_leader_instance", lambda _job: "scheduler-other")
+    monkeypatch.setattr(service, "_leadership_churn_last_24h", lambda _job: 3)
+
+    service.run_daily_trade()
+
+    assert any(call[0] == "scheduler_leadership_churn_total" for call in metrics.calls)
+    recent_alerts = state.snapshot()["alerts"]["recent"]
+    assert recent_alerts and recent_alerts[0]["action"] == "scheduler_leadership_churn_slo_breach"

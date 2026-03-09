@@ -189,7 +189,7 @@ def test_runtime_enforces_acl_outside_development(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.delenv("BUS_ACL_ENFORCE", raising=False)
-    monkeypatch.setenv("ENVIRONMENT", "staging")
+    monkeypatch.setenv("RUNTIME_PROFILE", "prod")
     registry = AgentRegistry()
     register_builtin_agents(registry)
     config = AgentRuntimeConfig(

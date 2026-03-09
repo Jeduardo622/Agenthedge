@@ -16,6 +16,16 @@ _TICK_ERRORS = Counter(
     "Number of agent tick exceptions",
     ["agent"],
 )
+_SCHEDULER_LEADERSHIP_CHURN = Counter(
+    "agent_scheduler_leadership_churn_total",
+    "Number of scheduler leadership transitions",
+    ["agent"],
+)
+_RUNTIME_FAILOVER_SECONDS = Histogram(
+    "agent_runtime_failover_time_seconds",
+    "Runtime failover recovery duration in seconds",
+    ["agent"],
+)
 _GENERIC_GAUGES: dict[str, Gauge] = {}
 _SERVER_STARTED = False
 
@@ -31,6 +41,12 @@ class PrometheusMetricSink:
             return
         if name == "tick_error":
             _TICK_ERRORS.labels(agent=agent).inc(value)
+            return
+        if name == "scheduler_leadership_churn_total":
+            _SCHEDULER_LEADERSHIP_CHURN.labels(agent=agent).inc(value)
+            return
+        if name == "runtime_failover_time_seconds":
+            _RUNTIME_FAILOVER_SECONDS.labels(agent=agent).observe(value)
             return
         gauge = _GENERIC_GAUGES.get(name)
         if gauge is None:

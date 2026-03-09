@@ -119,6 +119,9 @@ class NullRuntimeStateSink:
     ) -> None:
         return
 
+    def last_failover_seconds(self) -> float | None:
+        return None
+
 
 class PostgresRuntimeStateSink:
     def __init__(
@@ -133,6 +136,7 @@ class PostgresRuntimeStateSink:
         self._instance_id = instance_id
         self._profile = profile
         self._backend = backend
+        self._last_failover_seconds: float | None = None
         ensure_postgres_schema(dsn)
 
     def mark_started(self) -> None:
@@ -235,47 +239,84 @@ class PostgresRuntimeStateSink:
                 cur.execute(
                     """
                     INSERT INTO ah_runtime_leases (
-                        runtime_name,
-                        owner_instance_id,
-                        fence_token,
-                        lease_expires_at,
-                        updated_at
+                        runtime_name, owner_instance_id, fence_token, lease_expires_at, updated_at
                     ) VALUES (%s, %s, 1, NOW() + (%s * INTERVAL '1 second'), NOW())
-                    ON CONFLICT (runtime_name) DO UPDATE
-                    SET owner_instance_id = CASE
-                            WHEN ah_runtime_leases.lease_expires_at <= NOW()
-                              OR ah_runtime_leases.owner_instance_id = EXCLUDED.owner_instance_id
-                            THEN EXCLUDED.owner_instance_id
-                            ELSE ah_runtime_leases.owner_instance_id
-                        END,
-                        fence_token = CASE
-                            WHEN ah_runtime_leases.lease_expires_at <= NOW()
-                              OR ah_runtime_leases.owner_instance_id = EXCLUDED.owner_instance_id
-                            THEN ah_runtime_leases.fence_token + 1
-                            ELSE ah_runtime_leases.fence_token
-                        END,
-                        lease_expires_at = CASE
-                            WHEN ah_runtime_leases.lease_expires_at <= NOW()
-                              OR ah_runtime_leases.owner_instance_id = EXCLUDED.owner_instance_id
-                            THEN NOW() + (%s * INTERVAL '1 second')
-                            ELSE ah_runtime_leases.lease_expires_at
-                        END,
-                        updated_at = NOW()
-                    RETURNING owner_instance_id, fence_token
+                    ON CONFLICT (runtime_name) DO NOTHING
                     """,
                     (
                         runtime_name,
                         self._instance_id,
                         int(lease_seconds),
-                        int(lease_seconds),
                     ),
+                )
+                if int(cur.rowcount) > 0:
+                    self._last_failover_seconds = 0.0
+                    return (True, 1)
+                cur.execute(
+                    """
+                    SELECT owner_instance_id, fence_token, lease_expires_at
+                    FROM ah_runtime_leases
+                    WHERE runtime_name = %s
+                    FOR UPDATE
+                    """,
+                    (runtime_name,),
                 )
                 row = cur.fetchone()
                 if not row:
+                    self._last_failover_seconds = None
                     return (False, 0)
                 owner = str(row[0])
                 token = _as_int(row[1])
-                return (owner == self._instance_id, token)
+                lease_expires_at = row[2]
+                if owner == self._instance_id:
+                    next_token = token + 1
+                    cur.execute(
+                        """
+                        UPDATE ah_runtime_leases
+                        SET owner_instance_id = %s,
+                            fence_token = %s,
+                            lease_expires_at = NOW() + (%s * INTERVAL '1 second'),
+                            updated_at = NOW()
+                        WHERE runtime_name = %s
+                        """,
+                        (
+                            self._instance_id,
+                            next_token,
+                            int(lease_seconds),
+                            runtime_name,
+                        ),
+                    )
+                    self._last_failover_seconds = 0.0
+                    return (True, next_token)
+                now = datetime.now(timezone.utc)
+                expires = lease_expires_at
+                if isinstance(expires, datetime) and expires.tzinfo is None:
+                    expires = expires.replace(tzinfo=timezone.utc)
+                if isinstance(expires, datetime) and expires <= now:
+                    next_token = token + 1
+                    cur.execute(
+                        """
+                        UPDATE ah_runtime_leases
+                        SET owner_instance_id = %s,
+                            fence_token = %s,
+                            lease_expires_at = NOW() + (%s * INTERVAL '1 second'),
+                            updated_at = NOW()
+                        WHERE runtime_name = %s
+                        """,
+                        (
+                            self._instance_id,
+                            next_token,
+                            int(lease_seconds),
+                            runtime_name,
+                        ),
+                    )
+                    self._last_failover_seconds = max(0.0, (now - expires).total_seconds())
+                    return (True, next_token)
+                self._last_failover_seconds = None
+                return (False, token)
+
+    def last_failover_seconds(self) -> float | None:
+        return self._last_failover_seconds
 
     def renew_lease(
         self,

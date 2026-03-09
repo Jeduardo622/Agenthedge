@@ -27,6 +27,12 @@ def test_allowlist_policy_blocks_unknown_domains() -> None:
     assert reason is not None and reason.startswith("host_not_allowed")
 
 
+def test_allowlist_policy_uses_profile_defaults() -> None:
+    policy = NetworkAllowlistPolicy.from_env({"RUNTIME_PROFILE": "staging"})
+    assert policy.enabled is True
+    assert policy.enforce is False
+
+
 def test_requests_patch_blocks_disallowed_domain(monkeypatch: pytest.MonkeyPatch) -> None:
     reset_network_allowlist_policy_cache()
     if hasattr(requests, "_agenthedge_timeout_patched"):

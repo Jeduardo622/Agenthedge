@@ -93,3 +93,14 @@ def test_drain_times_out_when_handlers_are_still_running() -> None:
     assert bus.drain(0.05) is False
     unblock.set()
     assert bus.drain(1.0) is True
+
+
+def test_wait_until_caught_up_uses_checkpoint_target() -> None:
+    bus = MessageBus()
+    received: list[int] = []
+    bus.subscribe(lambda env: received.append(int(env.message.payload["value"])), topics=["alpha"])
+    bus.publish("alpha", {"value": 1})
+    target = bus.high_watermark()
+
+    assert bus.wait_until_caught_up(target, 1.0) is True
+    assert received == [1]

@@ -59,13 +59,15 @@ Use this checklist before enabling a full daily trading cycle. It consolidates r
   - Evidence: Phase 4 entry now reads “✅ Post-phase readiness complete (2025-11-29)…”; no new risks identified beyond existing `docs/RISK_MANAGEMENT.md` items.
 
 ## 8. Live-Capital Go/No-Go Gate (Post-Phase Hardening)
-- [ ] Execution verifies complete approval chain (`risk`, `compliance`, `director`) plus replay/idempotency guard.
-- [ ] Runtime kill-switch + execution fill-block behavior validated in automated tests.
-- [ ] Message bus ACL enforcement verified for non-development environments.
-- [ ] Network allowlist enforced for outbound provider/webhook domains (`NETWORK_ALLOWLIST_ENFORCE=true`) with passing tests.
-- [ ] Heartbeat timeout + behavior anomaly controls validated (alerts + runtime escalation paths).
-- [ ] Data quality checks/quarantine workflow validated and reviewed with `scripts/review_quarantine.py`.
-- [ ] `poetry run pytest -q`, `poetry run mypy src`, and `poetry run flake8` all green on the release commit.
+- [ ] Execution verifies complete approval chain (`risk`, `compliance`, `director`) plus replay/idempotency guard. (attach CI run link)
+- [ ] Runtime kill-switch + execution fill-block behavior validated in automated tests. (attach CI run link)
+- [ ] Message bus ACL enforcement verified for non-development environments. (attach CI run link)
+- [ ] Network allowlist enforced for outbound provider/webhook domains (`NETWORK_ALLOWLIST_ENFORCE=true`) with passing tests. (attach CI run link)
+- [ ] Heartbeat timeout + behavior anomaly controls validated (alerts + runtime escalation paths). (attach CI run link)
+- [ ] Data quality checks/quarantine workflow validated and reviewed with `scripts/review_quarantine.py`. (attach review artifact)
+- [ ] `poetry run pytest -q`, `poetry run mypy src`, and `poetry run flake8` all green on the release commit. (attach CI run link)
+- [ ] Artifact signing verification passes (`cosign verify-blob`) for release wheel. (attach verification output)
+- [ ] Migration rollback simulation passes (`scripts/migration_rollback_simulation.py`). (attach JSON output artifact)
 - [ ] Audit-chain cutover completed for legacy logs (if needed): archive path recorded from `scripts/cutover_audit_chain.py`.
 - [ ] Active chained audit file path recorded (default `storage/audit/runtime_events.jsonl`).
 - [ ] Audit-chain verification passes with report artifact:

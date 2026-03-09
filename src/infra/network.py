@@ -8,6 +8,8 @@ from functools import lru_cache
 from typing import Mapping
 from urllib.parse import urlparse
 
+from .governance import RuntimeGovernanceConfig
+
 
 @dataclass(frozen=True)
 class NetworkAllowlistPolicy:
@@ -19,19 +21,28 @@ class NetworkAllowlistPolicy:
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "NetworkAllowlistPolicy":
-        source = env or os.environ
-        enabled = _as_bool(source.get("NETWORK_ALLOWLIST_ENABLED"), default=False)
-        enforce = _as_bool(source.get("NETWORK_ALLOWLIST_ENFORCE"), default=False)
-        raw_domains = source.get("NETWORK_ALLOWLIST_DOMAINS", "")
-        domains = tuple(
-            sorted(
-                {
-                    token.strip().lower()
-                    for token in raw_domains.split(",")
-                    if token and token.strip()
-                }
-            )
+        source = env if env is not None else os.environ
+        governance = RuntimeGovernanceConfig.from_env(source)
+        enabled = _as_bool(
+            source.get("NETWORK_ALLOWLIST_ENABLED"),
+            default=governance.network_allowlist_enabled,
         )
+        enforce = _as_bool(
+            source.get("NETWORK_ALLOWLIST_ENFORCE"),
+            default=governance.network_allowlist_enforce,
+        )
+        raw_domains = source.get("NETWORK_ALLOWLIST_DOMAINS", "")
+        domains = governance.network_allowlist_domains
+        if raw_domains.strip():
+            domains = tuple(
+                sorted(
+                    {
+                        token.strip().lower()
+                        for token in raw_domains.split(",")
+                        if token and token.strip()
+                    }
+                )
+            )
         return cls(enabled=enabled, enforce=enforce, domains=domains)
 
     def validate(self, url: str) -> tuple[bool, str | None]:
