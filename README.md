@@ -100,3 +100,10 @@ poetry build && poetry run python scripts/package_smoke.py
 | `tests/` | Unit tests across agents, data stack, and portfolio store. |
 
 See `docs/ROADMAP.md` for implementation phases, `docs/READINESS_CHECKLIST.md` for go-live gating, and `docs/OPS_RUNBOOK.md` for operational procedures.
+
+## Autonomous Delivery Playbooks
+
+For autonomous engineering workflows and stage-gated subagent collaboration:
+
+- `docs/SUBAGENT_OPERATING_MODEL.md`
+- `docs/SUBAGENT_TASK_TEMPLATES.md`
