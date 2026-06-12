@@ -22,6 +22,7 @@ def _packet(
     signal_confidence: float = 0.7,
     signal_value: float = 0.04,
     catalyst_event_date: date = date(2026, 7, 15),
+    catalyst_expires_at: date = date(2026, 7, 16),
     signal_expires_at: date = date(2026, 7, 16),
 ) -> CatalystCalendarPacket:
     return CatalystCalendarPacket(
@@ -46,7 +47,7 @@ def _packet(
                 type="company_event",
                 expected_impact="updated long-term margin targets",
                 confidence=0.6,
-                expires_at=date(2026, 7, 16),
+                expires_at=catalyst_expires_at,
             ),
         ),
         signals=(
@@ -69,11 +70,19 @@ def _packet(
     )
 
 
-def _payload(packet: CatalystCalendarPacket, *, symbol: str = "SPY") -> StrategyPayload:
+def _payload(
+    packet: CatalystCalendarPacket,
+    *,
+    symbol: str = "SPY",
+    timestamp: str = "2026-06-12T12:00:00+00:00",
+) -> StrategyPayload:
     return StrategyPayload(
         symbol=symbol,
         price=100.0,
-        directive={"research_inputs": {"catalyst_calendar": packet}},
+        directive={
+            "timestamp": timestamp,
+            "research_inputs": {"catalyst_calendar": packet},
+        },
         portfolio=PortfolioSnapshot(
             cash=100000.0,
             realized_pnl=0.0,
@@ -105,6 +114,17 @@ def test_catalyst_strategy_ignores_research_only_packet() -> None:
 
 def test_catalyst_strategy_ignores_stale_catalyst_packet() -> None:
     decision = CatalystStrategy().generate(_payload(_packet(catalyst_event_date=date(2026, 6, 1))))
+
+    assert decision is None
+
+
+def test_catalyst_strategy_uses_directive_timestamp_for_expiry() -> None:
+    packet = _packet(
+        catalyst_expires_at=date(2026, 6, 13),
+        signal_expires_at=date(2026, 6, 13),
+    )
+
+    decision = CatalystStrategy().generate(_payload(packet, timestamp="2026-06-14T00:00:00+00:00"))
 
     assert decision is None
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -12,8 +13,7 @@ FIXTURE_PATH = (
 )
 
 
-def _dataset() -> dict[str, list[BacktestBar]]:
-    base = date(2026, 6, 12)
+def _dataset(*, base: date = date(2026, 6, 12), days: int = 2) -> dict[str, list[BacktestBar]]:
     return {
         "SPY": [
             BacktestBar(
@@ -24,7 +24,7 @@ def _dataset() -> dict[str, list[BacktestBar]]:
                 close=100.0,
                 volume=1_000_000,
             )
-            for idx in range(2)
+            for idx in range(days)
         ]
     }
 
@@ -68,6 +68,28 @@ def test_backtest_engine_does_not_run_catalyst_without_explicit_research_input(
         data_loader=InMemoryDataLoader(dataset),
         storage_dir=tmp_path,
         strategies=[CatalystStrategy()],
+    )
+
+    result = engine.run(_config(dataset))
+
+    assert result.trades == 0
+    assert result.fills == []
+
+
+def test_backtest_engine_uses_replay_date_for_catalyst_expiry(tmp_path: Path) -> None:
+    packet_path = tmp_path / "expired_for_replay.json"
+    payload = json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
+    payload["catalysts"][0]["expires_at"] = "2026-06-13"
+    payload["signals"][0]["expires_at"] = "2026-06-13"
+    packet_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    dataset = _dataset(base=date(2026, 6, 14), days=2)
+    packet = load_catalyst_calendar(packet_path)
+    engine = BacktestEngine(
+        data_loader=InMemoryDataLoader(dataset),
+        storage_dir=tmp_path,
+        strategies=[CatalystStrategy()],
+        research_inputs={"SPY": {"catalyst_calendar": packet}},
     )
 
     result = engine.run(_config(dataset))
