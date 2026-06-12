@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Mapping, Sequence, cast
 import yfinance as yf
 
 from agents.base import BaseAgent
+from agents.config import AgentRuntimeConfig
 from agents.context import AgentContext
 from agents.impl.compliance import ComplianceAgent
 from agents.impl.director import DirectorAgent
@@ -23,7 +24,11 @@ from data.ingestion.service import DataIngestionService
 from learning import PerformanceTracker
 from observability.state import ObservabilityState
 from portfolio.store import PortfolioStore
-from strategies import MacroStrategy, MomentumStrategy, Strategy, ValueStrategy
+from research_inputs.catalyst_calendar import (
+    CatalystCalendarValidationError,
+    load_catalyst_calendar,
+)
+from strategies import CatalystStrategy, MacroStrategy, MomentumStrategy, Strategy, ValueStrategy
 
 
 @dataclass(frozen=True)
@@ -134,6 +139,17 @@ class InMemoryDataLoader:
         return BacktestDataset(filtered)
 
 
+def _record_scalar(record: Any, primary: str, fallback: str | None = None) -> Any:
+    value = record.get(primary)
+    if value is None and fallback:
+        value = record.get(fallback)
+    if hasattr(value, "iloc"):
+        if len(value) == 0:
+            return None
+        return value.iloc[0]
+    return value
+
+
 class YFinanceDataLoader:
     """Fetches daily bars via yfinance."""
 
@@ -157,14 +173,15 @@ class YFinanceDataLoader:
                     bar_date = idx.to_pydatetime().date()
                 except AttributeError:
                     continue
+                volume = _record_scalar(record, "Volume")
                 rows.append(
                     BacktestBar(
                         date=bar_date,
-                        open=float(record.get("Open", record.get("open", 0.0))),
-                        high=float(record.get("High", record.get("high", 0.0))),
-                        low=float(record.get("Low", record.get("low", 0.0))),
-                        close=float(record.get("Close", record.get("close", 0.0))),
-                        volume=float(record.get("Volume", 0.0)) if "Volume" in record else None,
+                        open=float(_record_scalar(record, "Open", "open") or 0.0),
+                        high=float(_record_scalar(record, "High", "high") or 0.0),
+                        low=float(_record_scalar(record, "Low", "low") or 0.0),
+                        close=float(_record_scalar(record, "Close", "close") or 0.0),
+                        volume=float(volume) if volume is not None else None,
                     )
                 )
             payload[symbol] = rows
@@ -180,6 +197,7 @@ class BacktestEngine:
         data_loader: YFinanceDataLoader | InMemoryDataLoader | None = None,
         storage_dir: str | Path = "storage/backtests",
         strategies: Sequence[Strategy] | None = None,
+        research_inputs: Mapping[str, Mapping[str, Any]] | None = None,
     ) -> None:
         self.data_loader = data_loader or YFinanceDataLoader()
         self.storage_dir = Path(storage_dir)
@@ -193,6 +211,9 @@ class BacktestEngine:
                 MacroStrategy(),
             ]
         )
+        self.research_inputs = {
+            symbol.upper(): dict(inputs) for symbol, inputs in (research_inputs or {}).items()
+        }
 
     def run(self, config: BacktestRunConfig) -> BacktestResult:
         dataset = self.data_loader.load(config.symbols, config.start, config.end)
@@ -254,6 +275,9 @@ class BacktestEngine:
                             current_date, datetime.min.time(), tzinfo=timezone.utc
                         ).isoformat(),
                     }
+                    symbol_research_inputs = self.research_inputs.get(symbol.upper())
+                    if symbol_research_inputs:
+                        directive["research_inputs"] = dict(symbol_research_inputs)
                     bus.publish("director.directive", payload=directive, publisher="director")
                     last_prices[symbol] = bar.close
                 if not bus.drain(2.0):
@@ -364,3 +388,36 @@ def _estimate_nav(store: PortfolioStore, last_prices: Mapping[str, float]) -> fl
         price = last_prices.get(symbol, position.average_cost)
         nav += position.quantity * price
     return nav
+
+
+def build_backtest_engine_from_config(
+    config: AgentRuntimeConfig,
+    *,
+    data_loader: YFinanceDataLoader | InMemoryDataLoader | None = None,
+    storage_dir: str | Path = "storage/backtests",
+) -> BacktestEngine:
+    """Build a backtest engine with explicitly enabled experimental strategies."""
+
+    strategies: List[Strategy] = [
+        MomentumStrategy(),
+        ValueStrategy(),
+        MacroStrategy(),
+    ]
+    research_inputs: Dict[str, Dict[str, Any]] = {}
+    experimental = set(config.experimental_strategies or [])
+    if "catalyst" in experimental:
+        path = config.catalyst_research_input_path
+        if not path:
+            raise ValueError("CATALYST_RESEARCH_INPUT_PATH is required when catalyst is enabled")
+        try:
+            packet = load_catalyst_calendar(path)
+        except (OSError, CatalystCalendarValidationError, ValueError) as exc:
+            raise ValueError(f"Invalid catalyst research input: {path}") from exc
+        strategies.append(CatalystStrategy())
+        research_inputs.setdefault(packet.symbol.upper(), {})["catalyst_calendar"] = packet
+    return BacktestEngine(
+        data_loader=data_loader,
+        storage_dir=storage_dir,
+        strategies=strategies,
+        research_inputs=research_inputs,
+    )

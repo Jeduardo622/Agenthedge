@@ -1,0 +1,43 @@
+{
+  "artifact_id": "research-20260612-spy-catalysts",
+  "created_at": "2026-06-12T12:00:00Z",
+  "plugin": "public-equity-investing",
+  "workflow": "catalyst-calendar",
+  "symbol": "SPY",
+  "as_of": "2026-06-12",
+  "summary": "Source-labeled catalyst packet for strategy research.",
+  "source_labels": [
+    {
+      "source": "company_filing",
+      "timestamp": "2026-06-10",
+      "citation": "10-Q, page 12"
+    }
+  ],
+  "catalysts": [
+    {
+      "name": "Investor day",
+      "event_date": "2026-07-15",
+      "type": "company_event",
+      "expected_impact": "updated long-term margin targets",
+      "confidence": 0.6,
+      "expires_at": "2026-07-16"
+    }
+  ],
+  "signals": [
+    {
+      "name": "catalyst_expected_return",
+      "value": 0.04,
+      "unit": "price_pct",
+      "confidence": 0.7,
+      "expires_at": "2026-07-16"
+    }
+  ],
+  "risks": [
+    {
+      "name": "source_staleness",
+      "severity": "medium",
+      "mitigation": "Refresh before promotion."
+    }
+  ],
+  "promotion_status": "experiment_ready"
+}

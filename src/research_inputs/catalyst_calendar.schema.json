@@ -1,0 +1,101 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Agenthedge Catalyst Calendar Research Input",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "artifact_id",
+    "created_at",
+    "plugin",
+    "workflow",
+    "symbol",
+    "as_of",
+    "summary",
+    "source_labels",
+    "catalysts",
+    "promotion_status"
+  ],
+  "properties": {
+    "artifact_id": { "type": "string", "minLength": 1 },
+    "created_at": { "type": "string", "format": "date-time" },
+    "plugin": { "const": "public-equity-investing" },
+    "workflow": { "const": "catalyst-calendar" },
+    "symbol": { "type": "string", "minLength": 1 },
+    "as_of": { "type": "string", "format": "date" },
+    "summary": { "type": "string", "minLength": 1 },
+    "source_labels": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["source", "timestamp", "citation"],
+        "properties": {
+          "source": { "type": "string", "minLength": 1 },
+          "timestamp": { "type": "string", "format": "date" },
+          "citation": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "catalysts": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "name",
+          "event_date",
+          "type",
+          "expected_impact",
+          "confidence",
+          "expires_at"
+        ],
+        "properties": {
+          "name": { "type": "string", "minLength": 1 },
+          "event_date": { "type": "string", "format": "date" },
+          "type": { "type": "string", "minLength": 1 },
+          "expected_impact": { "type": "string", "minLength": 1 },
+          "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+          "expires_at": { "type": "string", "format": "date" }
+        }
+      }
+    },
+    "signals": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "value", "unit", "confidence", "expires_at"],
+        "properties": {
+          "name": { "type": "string", "minLength": 1 },
+          "value": { "type": "number" },
+          "unit": { "type": "string", "minLength": 1 },
+          "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+          "expires_at": { "type": "string", "format": "date" }
+        }
+      }
+    },
+    "risks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "severity", "mitigation"],
+        "properties": {
+          "name": { "type": "string", "minLength": 1 },
+          "severity": { "type": "string", "minLength": 1 },
+          "mitigation": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "promotion_status": {
+      "enum": [
+        "research_only",
+        "experiment_ready",
+        "strategy_candidate",
+        "approved_for_strategy"
+      ]
+    }
+  }
+}

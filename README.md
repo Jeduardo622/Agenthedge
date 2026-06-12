@@ -50,6 +50,8 @@ Runtime backend selection (Postgres durable control plane):
 - `BREAK_GLASS_ENABLED` (default `false`)
 - `BREAK_GLASS_DEFAULT_TTL_SECONDS` (default `900`)
 - `BREAK_GLASS_MAX_TTL_SECONDS` (default `86400`)
+- `EXPERIMENTAL_STRATEGIES` (empty by default; set to `catalyst` only for local research/backtest experiments)
+- `CATALYST_RESEARCH_INPUT_PATH` (required only when `EXPERIMENTAL_STRATEGIES` includes `catalyst`)
 
 Break-glass commands (Postgres backend only):
 - `poetry run python -m cli.runtime break-glass-activate --control runtime.kill_switch --reason "incident" --created-by ops`
@@ -67,12 +69,16 @@ Local Docker Postgres (recommended):
   - `docker run --name agenthedge-pg -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=agenthedge -p 55432:5432 -d postgres:16`
 - Example DSN:
   - `postgresql://postgres:postgres@localhost:55432/agenthedge`
+- Run the Postgres integration suite:
+  - PowerShell: `$env:POSTGRES_DSN="postgresql://postgres:postgres@localhost:55432/agenthedge"; poetry run pytest tests/integration -q`
 
 ## Strategy Council & Backtests
 
 - **Strategy plug-ins:** Live under `src/strategies/` and are orchestrated by the Strategy Council agent (`src/agents/impl/quant.py`). Additions must include docs + tests before being enabled.
 - **Adaptive weighting:** `src/learning/performance.py` tracks per-strategy hit rates, PnL, and penalties; weights show up in the Streamlit dashboard’s “Strategy Council” panel.
 - **Backtest harness:** `src/backtest/engine.py` and `src/cli/backtest.py` replay historical data against the real agent loop. Run `poetry run python scripts/backtest_strategy.py --symbol SPY --start 2024-01-02 --end 2024-01-31 --capital 1000000` and review the artifacts under `storage/backtests/<run_id>/` before enabling new mixes.
+- **Live data smoke:** Run `poetry run python -m cli.backtest --symbol SPY --start 2024-01-02 --end 2024-01-05 --capital 100000 --storage-dir .cache/yfinance-cli-smoke`, then remove `.cache/yfinance-cli-smoke` after reviewing the output.
+- **Catalyst experiment:** Keep catalyst disabled by default. For local experiments only, set `EXPERIMENTAL_STRATEGIES=catalyst` and `CATALYST_RESEARCH_INPUT_PATH=tests/fixtures/research_inputs/catalyst_calendar_spy.json`; invalid or missing catalyst input fails closed.
 - **Readiness checklist:** See [`docs/READINESS_CHECKLIST.md`](docs/READINESS_CHECKLIST.md) for the go-live gate (env, tests, backtests, observability).
 
 ## Testing & Linting

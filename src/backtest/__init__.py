@@ -7,6 +7,7 @@ from .engine import (
     BacktestRunConfig,
     InMemoryDataLoader,
     YFinanceDataLoader,
+    build_backtest_engine_from_config,
 )
 
 __all__ = [
@@ -16,4 +17,5 @@ __all__ = [
     "BacktestRunConfig",
     "InMemoryDataLoader",
     "YFinanceDataLoader",
+    "build_backtest_engine_from_config",
 ]

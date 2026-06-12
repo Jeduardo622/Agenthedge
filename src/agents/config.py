@@ -36,6 +36,18 @@ def _get_list(env: Mapping[str, str], key: str) -> List[str] | None:
     return [token.strip() for token in raw.split(",") if token.strip()]
 
 
+def _get_experimental_strategies(env: Mapping[str, str]) -> List[str] | None:
+    values = _get_list(env, "EXPERIMENTAL_STRATEGIES")
+    if not values:
+        return None
+    allowed = {"catalyst"}
+    normalized = [value.lower() for value in values]
+    unknown = sorted(set(normalized) - allowed)
+    if unknown:
+        raise ValueError(f"EXPERIMENTAL_STRATEGIES contains unsupported values: {unknown}")
+    return normalized
+
+
 def _get_bool(env: Mapping[str, str], key: str, default: bool) -> bool:
     raw = env.get(key)
     if raw is None or raw == "":
@@ -60,6 +72,8 @@ class AgentRuntimeConfig:
     break_glass_enabled: bool = False
     break_glass_default_ttl_seconds: int = 900
     break_glass_max_ttl_seconds: int = 86_400
+    experimental_strategies: List[str] | None = None
+    catalyst_research_input_path: str | None = None
     governance: RuntimeGovernanceConfig = field(default_factory=RuntimeGovernanceConfig.from_env)
 
     @classmethod
@@ -85,5 +99,7 @@ class AgentRuntimeConfig:
                 "BREAK_GLASS_MAX_TTL_SECONDS",
                 86_400,
             ),
+            experimental_strategies=_get_experimental_strategies(source),
+            catalyst_research_input_path=(source.get("CATALYST_RESEARCH_INPUT_PATH") or None),
             governance=RuntimeGovernanceConfig.from_env(source),
         )

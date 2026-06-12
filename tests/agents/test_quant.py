@@ -93,3 +93,10 @@ def test_strategy_council_requires_alignment(tmp_path):
 
     assert consensus_messages == []
     agent.teardown()
+
+
+def test_strategy_council_default_strategies_remain_core_set(tmp_path):
+    context, _, _ = _build_context(tmp_path, strategies=None)
+    agent = StrategyCouncilAgent(context)
+
+    assert [strategy.name for strategy in agent.strategies] == ["momentum", "value", "macro"]
