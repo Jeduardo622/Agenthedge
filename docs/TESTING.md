@@ -50,6 +50,9 @@ Informed by the Technical Implementation Plan (CI/CD, sanity checks) and the arc
 - `scripts/backtest_strategy.py` validates strategy before enabling live cycle.
 - `poetry build && poetry run python scripts/package_smoke.py` validates the wheel contains/imports critical runtime modules.
 - `poetry run python scripts/backtest_strategy.py --symbol SPY --start 2024-01-02 --end 2024-01-05 --capital 100000` should complete within CI budget and attach the resulting `storage/backtests/<run_id>/result.json` as an artifact for code review.
+- Catalyst fixture smoke without YFinance/network:
+  - PowerShell: `$env:EXPERIMENTAL_STRATEGIES="catalyst"; $env:CATALYST_RESEARCH_INPUT_PATH="tests/fixtures/research_inputs/catalyst_calendar_spy.json"; poetry run python -m cli.backtest --symbol SPY --start 2026-06-12 --end 2026-06-13 --capital 100000 --price-fixture tests/fixtures/backtest/catalyst_spy_prices.json --storage-dir .cache/catalyst-fixture-smoke`
+  - Remove `.cache/catalyst-fixture-smoke` after reviewing the artifact.
 - Postgres cutover checks:
   - `poetry run python scripts/migrate_runtime_state_to_postgres.py --dsn <POSTGRES_DSN>`
   - `poetry run python scripts/reconcile_postgres_state.py --dsn <POSTGRES_DSN>`

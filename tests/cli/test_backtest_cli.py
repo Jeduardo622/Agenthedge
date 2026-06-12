@@ -1,9 +1,19 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 from typer.testing import CliRunner
 
 from cli import backtest as backtest_cli
+
+CATALYST_FIXTURE_PATH = (
+    Path(__file__).parents[1] / "fixtures" / "research_inputs" / "catalyst_calendar_spy.json"
+)
+CATALYST_PRICE_FIXTURE_PATH = (
+    Path(__file__).parents[1] / "fixtures" / "backtest" / "catalyst_spy_prices.json"
+)
 
 
 def test_parse_date_invalid() -> None:
@@ -69,3 +79,43 @@ def test_run_success_prints_summary(monkeypatch, tmp_path) -> None:
     assert result.exit_code == 0
     assert "run-123" in result.output
     assert "Artifacts saved under:" in result.output
+
+
+def test_run_can_use_price_fixture_for_catalyst_smoke(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(backtest_cli, "load_dotenv", lambda: None)
+    monkeypatch.setenv("EXPERIMENTAL_STRATEGIES", "catalyst")
+    monkeypatch.setenv("CATALYST_RESEARCH_INPUT_PATH", str(CATALYST_FIXTURE_PATH))
+
+    class _FailingYFinanceLoader:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("YFinanceDataLoader should not be used with --price-fixture")
+
+    monkeypatch.setattr(backtest_cli, "YFinanceDataLoader", _FailingYFinanceLoader)
+
+    result = CliRunner().invoke(
+        backtest_cli.app,
+        [
+            "--symbol",
+            "SPY",
+            "--start",
+            "2026-06-12",
+            "--end",
+            "2026-06-13",
+            "--capital",
+            "100000",
+            "--storage-dir",
+            str(tmp_path / "runs"),
+            "--price-fixture",
+            str(CATALYST_PRICE_FIXTURE_PATH),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    result_files = list((tmp_path / "runs").glob("bt-*/result.json"))
+    assert len(result_files) == 1
+    payload = json.loads(result_files[0].read_text(encoding="utf-8"))
+    assert payload["trades"] >= 1
+    assert any(
+        any(strategy.get("strategy") == "catalyst" for strategy in fill.get("strategies", []))
+        for fill in payload["fills"]
+    )
