@@ -43,15 +43,17 @@ def test_run_success_prints_summary(monkeypatch, tmp_path) -> None:
             return path
 
     class _Engine:
-        def __init__(self, data_loader, storage_dir):
-            self.data_loader = data_loader
-            self.storage_dir = storage_dir
-
         def run(self, config):
             assert config.symbols == ["SPY"]
             return _Result()
 
-    monkeypatch.setattr(backtest_cli, "BacktestEngine", _Engine)
+    def _factory(runtime_config, *, data_loader, storage_dir):
+        assert runtime_config.experimental_strategies is None
+        assert data_loader is not None
+        assert storage_dir == "storage/backtests"
+        return _Engine()
+
+    monkeypatch.setattr(backtest_cli, "build_backtest_engine_from_config", _factory)
     result = CliRunner().invoke(
         backtest_cli.app,
         [

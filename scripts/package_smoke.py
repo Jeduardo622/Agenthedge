@@ -9,8 +9,22 @@ import sys
 from pathlib import Path
 from zipfile import ZipFile
 
-REQUIRED_PREFIXES = ("ops/", "observability/")
-REQUIRED_IMPORTS = ("ops.scheduler", "observability.state", "cli.runtime")
+REQUIRED_PREFIXES = ("ops/", "observability/", "research_inputs/", "strategies/")
+REQUIRED_PATHS = (
+    "research_inputs/catalyst_calendar.py",
+    "research_inputs/catalyst_calendar.schema.json",
+    "strategies/catalyst.py",
+)
+REQUIRED_IMPORTS = (
+    "ops.scheduler",
+    "observability.state",
+    "cli.runtime",
+    "research_inputs.catalyst_calendar",
+)
+REQUIRED_ATTRIBUTES = (
+    ("strategies", "CatalystStrategy"),
+    ("backtest", "build_backtest_engine_from_config"),
+)
 
 
 def _resolve_wheel(explicit: str | None) -> Path:
@@ -31,6 +45,9 @@ def _verify_contents(wheel: Path) -> None:
     for prefix in REQUIRED_PREFIXES:
         if not any(name.startswith(prefix) for name in names):
             raise RuntimeError(f"wheel missing package prefix: {prefix}")
+    for path in REQUIRED_PATHS:
+        if path not in names:
+            raise RuntimeError(f"wheel missing required path: {path}")
 
 
 def _verify_imports(wheel: Path) -> None:
@@ -38,6 +55,10 @@ def _verify_imports(wheel: Path) -> None:
     try:
         for module_name in REQUIRED_IMPORTS:
             importlib.import_module(module_name)
+        for module_name, attr_name in REQUIRED_ATTRIBUTES:
+            module = importlib.import_module(module_name)
+            if not hasattr(module, attr_name):
+                raise RuntimeError(f"wheel import missing attribute: {module_name}.{attr_name}")
     finally:
         if sys.path and sys.path[0] == str(wheel.resolve()):
             sys.path.pop(0)

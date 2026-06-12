@@ -1,8 +1,17 @@
 from __future__ import annotations
 
+import warnings
 from datetime import date, timedelta
 
-from backtest.engine import BacktestBar, BacktestEngine, BacktestRunConfig, InMemoryDataLoader
+import pandas as pd
+
+from backtest.engine import (
+    BacktestBar,
+    BacktestEngine,
+    BacktestRunConfig,
+    InMemoryDataLoader,
+    YFinanceDataLoader,
+)
 
 
 def _build_dataset() -> dict[str, list[BacktestBar]]:
@@ -40,3 +49,36 @@ def test_backtest_engine_runs_with_in_memory_loader(tmp_path):
     assert result.trades >= 1
     assert len(result.nav_series) == len(dataset["SPY"])
     assert (tmp_path / result.run_id / "result.json").exists()
+
+
+def test_yfinance_loader_handles_single_symbol_multiindex_without_future_warning(monkeypatch):
+    frame = pd.DataFrame(
+        {
+            ("Open", "SPY"): [100.0],
+            ("High", "SPY"): [101.0],
+            ("Low", "SPY"): [99.0],
+            ("Close", "SPY"): [100.5],
+            ("Volume", "SPY"): [1_000_000],
+        },
+        index=pd.to_datetime(["2024-01-02"]),
+    )
+
+    def _download(*args, **kwargs):
+        return frame
+
+    monkeypatch.setattr("backtest.engine.yf.download", _download)
+    loader = YFinanceDataLoader()
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", FutureWarning)
+        dataset = loader.load(["SPY"], date(2024, 1, 2), date(2024, 1, 2))
+
+    bar = dataset.get_bar("SPY", date(2024, 1, 2))
+    assert bar == BacktestBar(
+        date=date(2024, 1, 2),
+        open=100.0,
+        high=101.0,
+        low=99.0,
+        close=100.5,
+        volume=1_000_000.0,
+    )

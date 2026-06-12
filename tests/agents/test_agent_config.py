@@ -14,6 +14,8 @@ def test_agent_runtime_config_defaults() -> None:
     assert config.runtime_name == "default"
     assert config.runtime_lease_seconds == 30
     assert config.break_glass_enabled is False
+    assert config.experimental_strategies is None
+    assert config.catalyst_research_input_path is None
     assert config.governance.profile == "dev"
 
 
@@ -30,6 +32,8 @@ def test_agent_runtime_config_parses_lists_and_limits() -> None:
             "BREAK_GLASS_ENABLED": "true",
             "BREAK_GLASS_DEFAULT_TTL_SECONDS": "600",
             "BREAK_GLASS_MAX_TTL_SECONDS": "3600",
+            "EXPERIMENTAL_STRATEGIES": "catalyst",
+            "CATALYST_RESEARCH_INPUT_PATH": "tests/fixtures/research_inputs/catalyst.json",
             "RUNTIME_PROFILE": "staging",
         }
     )
@@ -43,6 +47,8 @@ def test_agent_runtime_config_parses_lists_and_limits() -> None:
     assert config.break_glass_enabled is True
     assert config.break_glass_default_ttl_seconds == 600
     assert config.break_glass_max_ttl_seconds == 3600
+    assert config.experimental_strategies == ["catalyst"]
+    assert config.catalyst_research_input_path == "tests/fixtures/research_inputs/catalyst.json"
     assert config.governance.profile == "staging"
 
 
@@ -53,3 +59,8 @@ def test_agent_runtime_config_rejects_non_positive_values() -> None:
         AgentRuntimeConfig.from_env({"AGENT_CONCURRENCY": "-1"})
     with pytest.raises(ValueError):
         AgentRuntimeConfig.from_env({"BREAK_GLASS_ENABLED": "maybe"})
+
+
+def test_agent_runtime_config_rejects_unknown_experimental_strategy() -> None:
+    with pytest.raises(ValueError, match="EXPERIMENTAL_STRATEGIES"):
+        AgentRuntimeConfig.from_env({"EXPERIMENTAL_STRATEGIES": "catalyst,unknown"})

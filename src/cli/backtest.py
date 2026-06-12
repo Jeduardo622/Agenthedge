@@ -8,7 +8,8 @@ from typing import List
 import typer
 from dotenv import load_dotenv
 
-from backtest import BacktestEngine, BacktestRunConfig, YFinanceDataLoader
+from agents.config import AgentRuntimeConfig
+from backtest import BacktestRunConfig, YFinanceDataLoader, build_backtest_engine_from_config
 
 app = typer.Typer(help="Backtesting utilities for the strategy council")
 
@@ -43,7 +44,12 @@ def run(
     if start_date > end_date:
         raise typer.BadParameter("start date must be on/before end date")
 
-    engine = BacktestEngine(data_loader=YFinanceDataLoader(), storage_dir=storage_dir)
+    runtime_config = AgentRuntimeConfig.from_env()
+    engine = build_backtest_engine_from_config(
+        runtime_config,
+        data_loader=YFinanceDataLoader(),
+        storage_dir=storage_dir,
+    )
     config = BacktestRunConfig(symbols=symbol, start=start_date, end=end_date, initial_cash=capital)
     result = engine.run(config)
     result_path = result.save()

@@ -16,6 +16,7 @@ packages = [
   { include = "portfolio", from = "src" },
   { include = "risk", from = "src" },
   { include = "learning", from = "src" },
+  { include = "research_inputs", from = "src" },
   { include = "strategies", from = "src" },
 ]
 
