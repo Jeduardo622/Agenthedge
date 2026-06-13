@@ -15,6 +15,11 @@ app = typer.Typer(help="Evaluate promotion_report.json artifacts")
 @app.command()
 def main(
     report: str = typer.Option(..., "--report", help="Path to promotion_report.json"),
+    profile: str | None = typer.Option(
+        None,
+        "--profile",
+        help="JSON threshold profile to apply before CLI overrides",
+    ),
     min_trades: int | None = typer.Option(None, "--min-trades", help="Minimum total trades"),
     min_catalyst_trades: int | None = typer.Option(
         None,
@@ -60,18 +65,31 @@ def main(
     """Read a promotion report and fail if any explicit gate condition is unmet."""
 
     payload = _load_report(report)
+    profile_config = _load_profile(profile) if profile else {}
+    profile_flags = _profile_validation_flags(profile_config)
     failures = evaluate_promotion_report(
         payload,
-        min_trades=min_trades,
-        min_catalyst_trades=min_catalyst_trades,
-        min_return_pct=min_return_pct,
-        required_promotion_status=required_promotion_status,
+        min_trades=_profile_int(profile_config, "min_trades", override=min_trades),
+        min_catalyst_trades=_profile_int(
+            profile_config,
+            "min_catalyst_trades",
+            override=min_catalyst_trades,
+        ),
+        min_return_pct=_profile_float(profile_config, "min_return_pct", override=min_return_pct),
+        required_promotion_status=_profile_str(
+            profile_config,
+            "required_promotion_status",
+            override=required_promotion_status,
+        ),
         required_validation_flags={
-            "fixture_backed": require_fixture_backed,
-            "no_live_network": require_no_live_network,
-            "catalyst_opt_in": require_catalyst_opt_in,
-            "packet_loaded": require_packet_loaded,
-            "no_stale_catalyst_trades": require_no_stale_catalyst_trades,
+            "fixture_backed": require_fixture_backed or profile_flags.get("fixture_backed", False),
+            "no_live_network": require_no_live_network
+            or profile_flags.get("no_live_network", False),
+            "catalyst_opt_in": require_catalyst_opt_in
+            or profile_flags.get("catalyst_opt_in", False),
+            "packet_loaded": require_packet_loaded or profile_flags.get("packet_loaded", False),
+            "no_stale_catalyst_trades": require_no_stale_catalyst_trades
+            or profile_flags.get("no_stale_catalyst_trades", False),
         },
     )
     run_id = str(payload.get("run_id", "<unknown>"))
@@ -139,6 +157,69 @@ def _load_report(path: str) -> Mapping[str, Any]:
     if not isinstance(payload, Mapping):
         raise typer.BadParameter("promotion report must be a JSON object")
     return payload
+
+
+def _load_profile(path: str) -> Mapping[str, Any]:
+    target = Path(path)
+    try:
+        payload = json.loads(target.read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise typer.BadParameter(f"Unable to read threshold profile: {target}") from exc
+    except json.JSONDecodeError as exc:
+        raise typer.BadParameter(f"Invalid threshold profile JSON: {target}") from exc
+    if not isinstance(payload, Mapping):
+        raise typer.BadParameter("threshold profile must be a JSON object")
+    return payload
+
+
+def _profile_int(profile: Mapping[str, Any], field: str, *, override: int | None) -> int | None:
+    if override is not None:
+        return override
+    value = profile.get(field)
+    if value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    raise typer.BadParameter(f"profile field must be an integer: {field}")
+
+
+def _profile_float(
+    profile: Mapping[str, Any],
+    field: str,
+    *,
+    override: float | None,
+) -> float | None:
+    if override is not None:
+        return override
+    value = profile.get(field)
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    raise typer.BadParameter(f"profile field must be numeric: {field}")
+
+
+def _profile_str(profile: Mapping[str, Any], field: str, *, override: str | None) -> str | None:
+    if override is not None:
+        return override
+    value = profile.get(field)
+    if value is None:
+        return None
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    raise typer.BadParameter(f"profile field must be a non-empty string: {field}")
+
+
+def _profile_validation_flags(profile: Mapping[str, Any]) -> Mapping[str, bool]:
+    flags = profile.get("required_validation_flags", {})
+    if not isinstance(flags, Mapping):
+        raise typer.BadParameter("profile field must be an object: required_validation_flags")
+    parsed: dict[str, bool] = {}
+    for key, value in flags.items():
+        if not isinstance(key, str) or not isinstance(value, bool):
+            raise typer.BadParameter("profile validation flags must map strings to booleans")
+        parsed[key] = value
+    return parsed
 
 
 def _number(report: Mapping[str, Any], field: str) -> float | None:

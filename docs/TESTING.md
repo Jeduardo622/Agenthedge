@@ -53,7 +53,7 @@ Informed by the Technical Implementation Plan (CI/CD, sanity checks) and the arc
 - Catalyst fixture smoke without YFinance/network:
   - PowerShell: `$env:EXPERIMENTAL_STRATEGIES="catalyst"; $env:CATALYST_RESEARCH_INPUT_PATH="tests/fixtures/research_inputs/catalyst_calendar_spy.json"; poetry run python -m cli.backtest --symbol SPY --start 2026-06-12 --end 2026-06-13 --capital 100000 --price-fixture tests/fixtures/backtest/catalyst_spy_prices.json --promotion-report --storage-dir .cache/catalyst-fixture-smoke`
   - Review `result.json` and `promotion_report.json`.
-  - Gate the report with explicit thresholds: `poetry run python -m cli.promotion_gate --report .cache/catalyst-fixture-smoke/<run_id>/promotion_report.json --min-trades 1 --min-catalyst-trades 1 --min-return-pct 0 --required-promotion-status experiment_ready --require-fixture-backed --require-no-live-network --require-catalyst-opt-in --require-packet-loaded --require-no-stale-catalyst-trades`
+  - Gate the report with the sample threshold profile: `poetry run python -m cli.promotion_gate --report .cache/catalyst-fixture-smoke/<run_id>/promotion_report.json --profile config/promotion-gates/catalyst_fixture_experiment.json`
   - Remove `.cache/catalyst-fixture-smoke` after reviewing the artifacts.
 - Postgres cutover checks:
   - `poetry run python scripts/migrate_runtime_state_to_postgres.py --dsn <POSTGRES_DSN>`

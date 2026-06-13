@@ -107,3 +107,72 @@ def test_gate_fails_with_all_threshold_violations(tmp_path) -> None:
     assert "validation.no_live_network is not true" in result.output
     assert "validation.catalyst_opt_in is not true" in result.output
     assert "validation.no_stale_catalyst_trades is not true" in result.output
+
+
+def test_gate_uses_threshold_profile(tmp_path) -> None:
+    report_path = tmp_path / "promotion_report.json"
+    profile_path = tmp_path / "profile.json"
+    report_path.write_text(json.dumps(_promotion_report()), encoding="utf-8")
+    profile_path.write_text(
+        json.dumps(
+            {
+                "min_trades": 2,
+                "min_catalyst_trades": 1,
+                "min_return_pct": 0,
+                "required_promotion_status": "experiment_ready",
+                "required_validation_flags": {
+                    "fixture_backed": True,
+                    "no_live_network": True,
+                    "catalyst_opt_in": True,
+                    "packet_loaded": True,
+                    "no_stale_catalyst_trades": True,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(
+        promotion_gate.app,
+        [
+            "--report",
+            str(report_path),
+            "--profile",
+            str(profile_path),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "PROMOTION_GATE_PASS bt-test" in result.output
+
+
+def test_gate_cli_flags_override_profile_thresholds(tmp_path) -> None:
+    report_path = tmp_path / "promotion_report.json"
+    profile_path = tmp_path / "profile.json"
+    report_path.write_text(json.dumps(_promotion_report(trades=2)), encoding="utf-8")
+    profile_path.write_text(
+        json.dumps(
+            {
+                "min_trades": 3,
+                "required_validation_flags": {
+                    "packet_loaded": True,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = CliRunner().invoke(
+        promotion_gate.app,
+        [
+            "--report",
+            str(report_path),
+            "--profile",
+            str(profile_path),
+            "--min-trades",
+            "2",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "PROMOTION_GATE_PASS bt-test" in result.output
