@@ -66,30 +66,19 @@ def main(
 
     payload = _load_report(report)
     profile_config = _load_profile(profile) if profile else {}
-    profile_flags = _profile_validation_flags(profile_config)
-    failures = evaluate_promotion_report(
+    failures = evaluate_with_profile(
         payload,
-        min_trades=_profile_int(profile_config, "min_trades", override=min_trades),
-        min_catalyst_trades=_profile_int(
-            profile_config,
-            "min_catalyst_trades",
-            override=min_catalyst_trades,
-        ),
-        min_return_pct=_profile_float(profile_config, "min_return_pct", override=min_return_pct),
-        required_promotion_status=_profile_str(
-            profile_config,
-            "required_promotion_status",
-            override=required_promotion_status,
-        ),
+        profile_config,
+        min_trades=min_trades,
+        min_catalyst_trades=min_catalyst_trades,
+        min_return_pct=min_return_pct,
+        required_promotion_status=required_promotion_status,
         required_validation_flags={
-            "fixture_backed": require_fixture_backed or profile_flags.get("fixture_backed", False),
-            "no_live_network": require_no_live_network
-            or profile_flags.get("no_live_network", False),
-            "catalyst_opt_in": require_catalyst_opt_in
-            or profile_flags.get("catalyst_opt_in", False),
-            "packet_loaded": require_packet_loaded or profile_flags.get("packet_loaded", False),
-            "no_stale_catalyst_trades": require_no_stale_catalyst_trades
-            or profile_flags.get("no_stale_catalyst_trades", False),
+            "fixture_backed": require_fixture_backed,
+            "no_live_network": require_no_live_network,
+            "catalyst_opt_in": require_catalyst_opt_in,
+            "packet_loaded": require_packet_loaded,
+            "no_stale_catalyst_trades": require_no_stale_catalyst_trades,
         },
     )
     run_id = str(payload.get("run_id", "<unknown>"))
@@ -144,6 +133,64 @@ def evaluate_promotion_report(
         if required and validation_map.get(field) is not True:
             failures.append(f"validation.{field} is not true")
     return failures
+
+
+def evaluate_with_profile(
+    report: Mapping[str, Any],
+    profile: Mapping[str, Any],
+    *,
+    min_trades: int | None = None,
+    min_catalyst_trades: int | None = None,
+    min_return_pct: float | None = None,
+    required_promotion_status: str | None = None,
+    required_validation_flags: Mapping[str, bool] | None = None,
+) -> list[str]:
+    """Evaluate a report using a threshold profile plus explicit overrides."""
+
+    profile_flags = _profile_validation_flags(profile)
+    override_flags = required_validation_flags or {}
+    return evaluate_promotion_report(
+        report,
+        min_trades=_profile_int(profile, "min_trades", override=min_trades),
+        min_catalyst_trades=_profile_int(
+            profile,
+            "min_catalyst_trades",
+            override=min_catalyst_trades,
+        ),
+        min_return_pct=_profile_float(profile, "min_return_pct", override=min_return_pct),
+        required_promotion_status=_profile_str(
+            profile,
+            "required_promotion_status",
+            override=required_promotion_status,
+        ),
+        required_validation_flags={
+            "fixture_backed": override_flags.get("fixture_backed", False)
+            or profile_flags.get("fixture_backed", False),
+            "no_live_network": override_flags.get("no_live_network", False)
+            or profile_flags.get("no_live_network", False),
+            "catalyst_opt_in": override_flags.get("catalyst_opt_in", False)
+            or profile_flags.get("catalyst_opt_in", False),
+            "packet_loaded": override_flags.get("packet_loaded", False)
+            or profile_flags.get("packet_loaded", False),
+            "no_stale_catalyst_trades": override_flags.get(
+                "no_stale_catalyst_trades",
+                False,
+            )
+            or profile_flags.get("no_stale_catalyst_trades", False),
+        },
+    )
+
+
+def load_report(path: str) -> Mapping[str, Any]:
+    """Load a promotion report from JSON."""
+
+    return _load_report(path)
+
+
+def load_profile(path: str) -> Mapping[str, Any]:
+    """Load a threshold profile from JSON."""
+
+    return _load_profile(path)
 
 
 def _load_report(path: str) -> Mapping[str, Any]:

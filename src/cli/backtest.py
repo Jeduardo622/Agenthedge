@@ -21,6 +21,7 @@ from backtest import (
     YFinanceDataLoader,
     build_backtest_engine_from_config,
 )
+from cli import promotion_gate
 from research_inputs.catalyst_calendar import CatalystCalendarPacket
 
 app = typer.Typer(help="Backtesting utilities for the strategy council")
@@ -157,6 +158,22 @@ def _write_promotion_report(
     path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
+def _run_gate_profile(report_path: Path, profile_path: str) -> None:
+    report = promotion_gate.load_report(str(report_path))
+    profile = promotion_gate.load_profile(profile_path)
+    failures = promotion_gate.evaluate_with_profile(
+        report,
+        profile,
+    )
+    run_id = str(report.get("run_id", "<unknown>"))
+    if failures:
+        typer.echo(f"PROMOTION_GATE_FAIL {run_id}")
+        for failure in failures:
+            typer.echo(f"- {failure}")
+        raise typer.Exit(1)
+    typer.echo(f"PROMOTION_GATE_PASS {run_id}")
+
+
 def _find_catalyst_packet(engine: BacktestEngine) -> CatalystCalendarPacket | None:
     research_inputs = getattr(engine, "research_inputs", {})
     if not isinstance(research_inputs, Mapping):
@@ -252,6 +269,11 @@ def run(
         "--promotion-report",
         help="Write promotion_report.json alongside backtest artifacts for experiment review",
     ),
+    gate_profile: str | None = typer.Option(
+        None,
+        "--gate-profile",
+        help="Write promotion_report.json and evaluate it with a promotion gate profile",
+    ),
 ) -> None:
     """Run a backtest over the requested window using default strategies."""
 
@@ -279,7 +301,7 @@ def run(
     )
     if result_path:
         typer.echo(f"Artifacts saved under: {result_path.parent}")
-        if promotion_report:
+        if promotion_report or gate_profile:
             report_path = result_path.parent / "promotion_report.json"
             _write_promotion_report(
                 report_path,
@@ -290,6 +312,8 @@ def run(
                 price_fixture=price_fixture,
             )
             typer.echo(f"Promotion report saved under: {report_path}")
+            if gate_profile:
+                _run_gate_profile(report_path, gate_profile)
 
 
 if __name__ == "__main__":
