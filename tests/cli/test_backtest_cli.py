@@ -17,6 +17,9 @@ CATALYST_PRICE_FIXTURE_PATH = (
 CATALYST_GATE_PROFILE_PATH = (
     Path(__file__).parents[2] / "config" / "promotion-gates" / "catalyst_fixture_experiment.json"
 )
+CATALYST_GATE_FAILURE_PROFILE_PATH = (
+    Path(__file__).parents[2] / "config" / "promotion-gates" / "catalyst_fixture_failure.json"
+)
 
 
 def test_parse_date_invalid() -> None:
@@ -223,3 +226,46 @@ def test_run_gate_profile_writes_and_evaluates_promotion_report(monkeypatch, tmp
     result_files = list((tmp_path / "runs").glob("bt-*/result.json"))
     assert len(result_files) == 1
     assert (result_files[0].parent / "promotion_report.json").exists()
+
+
+def test_run_gate_profile_failure_preserves_promotion_report(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(backtest_cli, "load_dotenv", lambda: None)
+    monkeypatch.setenv("EXPERIMENTAL_STRATEGIES", "catalyst")
+    monkeypatch.setenv("CATALYST_RESEARCH_INPUT_PATH", str(CATALYST_FIXTURE_PATH))
+
+    class _FailingYFinanceLoader:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("YFinanceDataLoader should not be used with --price-fixture")
+
+    monkeypatch.setattr(backtest_cli, "YFinanceDataLoader", _FailingYFinanceLoader)
+
+    result = CliRunner().invoke(
+        backtest_cli.app,
+        [
+            "--symbol",
+            "SPY",
+            "--start",
+            "2026-06-12",
+            "--end",
+            "2026-06-13",
+            "--capital",
+            "100000",
+            "--storage-dir",
+            str(tmp_path / "runs"),
+            "--price-fixture",
+            str(CATALYST_PRICE_FIXTURE_PATH),
+            "--gate-profile",
+            str(CATALYST_GATE_FAILURE_PROFILE_PATH),
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "Promotion report saved under:" in result.output
+    assert "PROMOTION_GATE_FAIL " in result.output
+    assert "catalyst_trade_count 2 < required 999" in result.output
+    result_files = list((tmp_path / "runs").glob("bt-*/result.json"))
+    assert len(result_files) == 1
+    report_path = result_files[0].parent / "promotion_report.json"
+    assert report_path.exists()
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["catalyst_trade_count"] == 2

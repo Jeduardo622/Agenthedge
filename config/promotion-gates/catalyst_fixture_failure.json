@@ -1,0 +1,14 @@
+{
+  "description": "Intentional failure profile for smoke-testing gate rejection and artifact preservation.",
+  "min_trades": 1,
+  "min_catalyst_trades": 999,
+  "min_return_pct": 0,
+  "required_promotion_status": "experiment_ready",
+  "required_validation_flags": {
+    "fixture_backed": true,
+    "no_live_network": true,
+    "catalyst_opt_in": true,
+    "packet_loaded": true,
+    "no_stale_catalyst_trades": true
+  }
+}
