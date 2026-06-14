@@ -54,6 +54,7 @@ Informed by the Technical Implementation Plan (CI/CD, sanity checks) and the arc
   - PowerShell: `$env:EXPERIMENTAL_STRATEGIES="catalyst"; $env:CATALYST_RESEARCH_INPUT_PATH="tests/fixtures/research_inputs/catalyst_calendar_spy.json"; poetry run python -m cli.backtest --symbol SPY --start 2026-06-12 --end 2026-06-13 --capital 100000 --price-fixture tests/fixtures/backtest/catalyst_spy_prices.json --gate-profile config/promotion-gates/catalyst_fixture_experiment.json --storage-dir .cache/catalyst-fixture-smoke`
   - Review `result.json` and `promotion_report.json`.
   - To re-check the report after review, run: `poetry run python -m cli.promotion_gate --report .cache/catalyst-fixture-smoke/<run_id>/promotion_report.json --profile config/promotion-gates/catalyst_fixture_experiment.json`
+  - Failure-path smoke: swap `--gate-profile config/promotion-gates/catalyst_fixture_failure.json`; the command should exit non-zero, print `PROMOTION_GATE_FAIL`, and still leave `promotion_report.json` in the run directory for review.
   - Remove `.cache/catalyst-fixture-smoke` after reviewing the artifacts.
 - Postgres cutover checks:
   - `poetry run python scripts/migrate_runtime_state_to_postgres.py --dsn <POSTGRES_DSN>`
