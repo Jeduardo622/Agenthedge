@@ -63,6 +63,24 @@ Reviewer evidence checklist:
 - Attach either the passing `PROMOTION_GATE_PASS` output or the preserved failure `promotion_report.json` before discussing catalyst promotion.
 - If the preserved failure report is attached, defer promotion discussion to remediation unless the governance record explicitly scopes the review to threshold changes.
 
+Review evidence examples:
+
+```text
+Catalyst gate evidence: pass
+Command: poetry run python -m cli.backtest ... --gate-profile config/promotion-gates/<profile>.json
+Output: PROMOTION_GATE_PASS <run_id>
+Report: <storage_dir>/<run_id>/promotion_report.json
+Profile: config/promotion-gates/<profile>.json
+```
+
+```text
+Catalyst gate evidence: preserved failure
+Command: poetry run python -m cli.backtest ... --gate-profile config/promotion-gates/<profile>.json
+Output: PROMOTION_GATE_FAIL <run_id>
+Preserved report: <storage_dir>/<run_id>/promotion_report.json
+Failed blockers: <copy blocker names from promotion_report.json>
+```
+
 Hard blockers:
 
 - `required_promotion_status` must be at least the reviewer-approved promotion stage for the slice under review.
