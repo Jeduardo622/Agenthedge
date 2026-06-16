@@ -81,6 +81,8 @@ def load_catalyst_calendar(path: str | Path) -> CatalystCalendarPacket:
 def parse_catalyst_calendar(payload: Mapping[str, Any]) -> CatalystCalendarPacket:
     """Validate a plugin-generated catalyst calendar packet."""
 
+    payload = _coerce_catalyst_calendar_payload(payload)
+
     as_of = _parse_date(_required(payload, "as_of"), "as_of")
     promotion_status = _required_str(payload, "promotion_status")
     if promotion_status not in ALLOWED_PROMOTION_STATUSES:
@@ -122,6 +124,64 @@ def parse_catalyst_calendar(payload: Mapping[str, Any]) -> CatalystCalendarPacke
         risks=risks,
         promotion_status=promotion_status,
     )
+
+
+def _coerce_catalyst_calendar_payload(payload: Mapping[str, Any]) -> dict[str, Any]:
+    normalized = dict(payload)
+
+    for container_key in ("artifact", "result", "data", "payload"):
+        container = normalized.get(container_key)
+        if isinstance(container, Mapping):
+            nested = dict(container)
+            for inherited_key in (
+                "artifact_id",
+                "created_at",
+                "plugin",
+                "workflow",
+                "symbol",
+                "as_of",
+                "asOf",
+                "summary",
+                "source_labels",
+                "sources",
+                "catalysts",
+                "events",
+                "signals",
+                "signal",
+                "risks",
+                "promotion_status",
+            ):
+                if inherited_key in normalized and inherited_key not in nested:
+                    nested[inherited_key] = normalized[inherited_key]
+            normalized = nested
+            break
+
+    if "as_of" not in normalized:
+        as_of = normalized.get("asOf")
+        if as_of is not None:
+            normalized["as_of"] = as_of
+    if "plugin" not in normalized and "plugin_name" in normalized:
+        normalized["plugin"] = normalized["plugin_name"]
+    if "workflow" not in normalized and "workflow_name" in normalized:
+        normalized["workflow"] = normalized["workflow_name"]
+    if "symbol" not in normalized and "ticker" in normalized:
+        normalized["symbol"] = normalized["ticker"]
+    if "source_labels" not in normalized and "sources" in normalized:
+        normalized["source_labels"] = normalized["sources"]
+    if "catalysts" not in normalized and "events" in normalized:
+        normalized["catalysts"] = normalized["events"]
+    if "signals" not in normalized and "signal" in normalized:
+        raw_signal = normalized["signal"]
+        normalized["signals"] = raw_signal if isinstance(raw_signal, list) else [raw_signal]
+
+    plugin = normalized.get("plugin")
+    if isinstance(plugin, str):
+        normalized["plugin"] = plugin.strip().replace("_", "-")
+
+    workflow = normalized.get("workflow")
+    if workflow == "catalyst_calendar":
+        normalized["workflow"] = "catalyst-calendar"
+    return normalized
 
 
 def _parse_source_label(payload: object) -> SourceLabel:

@@ -72,6 +72,18 @@ def test_parse_catalyst_calendar_accepts_source_labeled_public_packet() -> None:
     assert packet.signals[0].confidence == 0.6
 
 
+def test_parse_catalyst_calendar_accepts_public_equity_question_artifact_shape() -> None:
+    packet_payload = _valid_packet()
+    packet_payload["plugin"] = "public_equity_investing"
+    packet_payload["workflow"] = "catalyst_calendar"
+    wrapper = {"artifact": packet_payload}
+
+    packet = parse_catalyst_calendar(wrapper)
+
+    assert packet.plugin == "public-equity-investing"
+    assert packet.workflow == "catalyst-calendar"
+
+
 def test_parse_catalyst_calendar_rejects_missing_source_labels() -> None:
     payload = _valid_packet()
     payload["source_labels"] = []
