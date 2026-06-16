@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
+from pathlib import Path
 
 from typer.testing import CliRunner
 
@@ -26,6 +30,23 @@ def _promotion_report(**overrides):
     }
     report.update(overrides)
     return report
+
+
+def _run_cli_module(args: list[str]) -> subprocess.CompletedProcess[str]:
+    repo_root = Path(__file__).resolve().parents[2]
+    src_path = str(repo_root / "src")
+    env = os.environ.copy()
+    previous_pythonpath = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = (
+        os.pathsep.join([src_path, previous_pythonpath]) if previous_pythonpath else src_path
+    )
+    return subprocess.run(
+        [sys.executable, "-m", "cli.promotion_gate", *args],
+        text=True,
+        capture_output=True,
+        env=env,
+        check=False,
+    )
 
 
 def test_gate_passes_report_that_meets_explicit_thresholds(tmp_path) -> None:
@@ -176,3 +197,32 @@ def test_gate_cli_flags_override_profile_thresholds(tmp_path) -> None:
 
     assert result.exit_code == 0, result.output
     assert "PROMOTION_GATE_PASS bt-test" in result.output
+
+
+def test_gate_module_entrypoint_evaluates_pass_path(tmp_path) -> None:
+    report_path = tmp_path / "promotion_report.json"
+    report_path.write_text(json.dumps(_promotion_report()), encoding="utf-8")
+
+    result = _run_cli_module(
+        ["--report", str(report_path), "--min-trades", "2", "--min-catalyst-trades", "2"]
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "PROMOTION_GATE_PASS bt-test" in (result.stdout + result.stderr)
+
+
+def test_gate_module_entrypoint_evaluates_fail_path(tmp_path) -> None:
+    report_path = tmp_path / "promotion_report.json"
+    report_path.write_text(
+        json.dumps(_promotion_report(trades=1, catalyst_trade_count=0)),
+        encoding="utf-8",
+    )
+
+    result = _run_cli_module(
+        ["--report", str(report_path), "--min-trades", "2", "--min-catalyst-trades", "1"]
+    )
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    output = result.stdout + result.stderr
+    assert "PROMOTION_GATE_FAIL bt-test" in output
+    assert "trades 1 < required 2" in output

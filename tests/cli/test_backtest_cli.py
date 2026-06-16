@@ -14,6 +14,12 @@ CATALYST_FIXTURE_PATH = (
 CATALYST_PRICE_FIXTURE_PATH = (
     Path(__file__).parents[1] / "fixtures" / "backtest" / "catalyst_spy_prices.json"
 )
+PLUGIN_QUESTION_FIXTURE_PATH = (
+    Path(__file__).parents[1]
+    / "fixtures"
+    / "research_inputs"
+    / "catalyst_calendar_spy_public_equity_question.json"
+)
 CATALYST_GATE_PROFILE_PATH = (
     Path(__file__).parents[2] / "config" / "promotion-gates" / "catalyst_fixture_experiment.json"
 )
@@ -187,6 +193,50 @@ def test_run_writes_promotion_report_for_fixture_backed_catalyst_smoke(
         "packet_loaded": True,
         "no_stale_catalyst_trades": True,
     }
+
+
+def test_run_accepts_public_equity_question_artifact_for_fixture_backed_smoke(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setattr(backtest_cli, "load_dotenv", lambda: None)
+    monkeypatch.setenv("EXPERIMENTAL_STRATEGIES", "catalyst")
+    monkeypatch.setenv("CATALYST_RESEARCH_INPUT_PATH", str(PLUGIN_QUESTION_FIXTURE_PATH))
+
+    class _FailingYFinanceLoader:
+        def __init__(self, *args, **kwargs):
+            raise AssertionError("YFinanceDataLoader should not be used with --price-fixture")
+
+    monkeypatch.setattr(backtest_cli, "YFinanceDataLoader", _FailingYFinanceLoader)
+
+    result = CliRunner().invoke(
+        backtest_cli.app,
+        [
+            "--symbol",
+            "SPY",
+            "--start",
+            "2026-06-12",
+            "--end",
+            "2026-06-13",
+            "--capital",
+            "100000",
+            "--storage-dir",
+            str(tmp_path / "runs"),
+            "--price-fixture",
+            str(CATALYST_PRICE_FIXTURE_PATH),
+            "--promotion-report",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    result_files = list((tmp_path / "runs").glob("bt-*/promotion_report.json"))
+    assert len(result_files) == 1
+    report = json.loads(result_files[0].read_text(encoding="utf-8"))
+    assert (
+        report["catalyst"]["artifact_id"]
+        == "research-20260612-spy-catalysts-public-equity-question"
+    )
+    assert report["catalyst"]["plugin"] == "public-equity-investing"
+    assert report["validation"]["packet_loaded"] is True
 
 
 def test_run_gate_profile_writes_and_evaluates_promotion_report(monkeypatch, tmp_path) -> None:

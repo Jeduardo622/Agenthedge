@@ -56,6 +56,11 @@ Informed by the Technical Implementation Plan (CI/CD, sanity checks) and the arc
   - To re-check the report after review, run: `poetry run python -m cli.promotion_gate --report .cache/catalyst-fixture-smoke/<run_id>/promotion_report.json --profile config/promotion-gates/catalyst_fixture_experiment.json`
   - Failure-path smoke: swap `--gate-profile config/promotion-gates/catalyst_fixture_failure.json`; the command should exit non-zero, print `PROMOTION_GATE_FAIL`, and still leave `promotion_report.json` in the run directory for review.
   - Remove `.cache/catalyst-fixture-smoke` after reviewing the artifacts.
+- Public-equity catalyst bridge one-shot:
+  - PowerShell (default): `poetry run python scripts/run_catalyst_public_equity_question_gatecheck.py`
+  - The command runs a fixture-backed backtest using `tests/fixtures/research_inputs/catalyst_calendar_spy_public_equity_question.json`, executes the `python -m cli.promotion_gate` module entrypoint against the emitted `promotion_report.json`, and prints `PROMOTION_GATE_PASS/FAIL`.
+  - Override all paths for local reuse: `poetry run python scripts/run_catalyst_public_equity_question_gatecheck.py --storage-dir .cache/catalyst-public-equity-question-smoke --research-input tests/fixtures/research_inputs/catalyst_calendar_spy_public_equity_question.json --price-fixture tests/fixtures/backtest/catalyst_spy_prices.json --profile config/promotion-gates/catalyst_fixture_experiment.json`
+  - Remove `.cache/catalyst-public-equity-question-smoke*` after review to keep local workspace clean.
 - Postgres cutover checks:
   - `poetry run python scripts/migrate_runtime_state_to_postgres.py --dsn <POSTGRES_DSN>`
   - `poetry run python scripts/reconcile_postgres_state.py --dsn <POSTGRES_DSN>`

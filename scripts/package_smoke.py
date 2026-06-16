@@ -9,13 +9,16 @@ import sys
 from pathlib import Path
 from zipfile import ZipFile
 
-REQUIRED_PREFIXES = ("ops/", "observability/", "research_inputs/", "strategies/")
+REQUIRED_PREFIXES = ("cli/", "ops/", "observability/", "research_inputs/", "strategies/")
 REQUIRED_PATHS = (
+    "cli/promotion_gate.py",
+    "cli/__init__.py",
     "research_inputs/catalyst_calendar.py",
     "research_inputs/catalyst_calendar.schema.json",
     "strategies/catalyst.py",
 )
 REQUIRED_IMPORTS = (
+    "cli.promotion_gate",
     "ops.scheduler",
     "observability.state",
     "cli.runtime",
