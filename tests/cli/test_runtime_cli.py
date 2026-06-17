@@ -8,11 +8,13 @@ from cli import runtime as runtime_cli
 
 
 class _FakeRuntime:
-    def __init__(self) -> None:
+    def __init__(self, *, reconciliation_mismatches=None) -> None:
         self.run_once_called = False
         self.start_called = False
         self.stop_called = False
         self.bootstrap_called = False
+        self.reconcile_execution_called = False
+        self._reconciliation_mismatches = reconciliation_mismatches or []
 
     def run_once(self) -> None:
         self.run_once_called = True
@@ -28,6 +30,15 @@ class _FakeRuntime:
 
     def health(self):
         return {"tick_count": 1}
+
+    def reconcile_execution(self):
+        self.reconcile_execution_called = True
+        return {
+            "broker_positions": {"SPY": 1.0},
+            "portfolio_positions": {"SPY": 1.0},
+            "mismatches": self._reconciliation_mismatches,
+            "reconciled_at": "2026-06-17T00:00:00+00:00",
+        }
 
 
 def test_run_once_command(monkeypatch) -> None:
@@ -52,6 +63,35 @@ def test_health_command_raw(monkeypatch) -> None:
     assert result.exit_code == 0
     assert fake_runtime.bootstrap_called is True
     assert json.loads(result.stdout) == {"tick_count": 1}
+
+
+def test_reconcile_execution_command_succeeds_without_mismatches(monkeypatch) -> None:
+    fake_runtime = _FakeRuntime()
+    monkeypatch.setattr(runtime_cli, "_configure_environment", lambda: None)
+    monkeypatch.setattr(runtime_cli, "build_runtime_from_env", lambda load_env=False: fake_runtime)
+
+    result = CliRunner().invoke(runtime_cli.app, ["reconcile-execution", "--raw"])
+
+    assert result.exit_code == 0
+    assert fake_runtime.bootstrap_called is True
+    assert fake_runtime.reconcile_execution_called is True
+    assert json.loads(result.stdout)["mismatches"] == []
+
+
+def test_reconcile_execution_command_fails_closed_on_mismatch(monkeypatch) -> None:
+    fake_runtime = _FakeRuntime(
+        reconciliation_mismatches=[
+            {"symbol": "SPY", "broker_quantity": 1.0, "portfolio_quantity": 0.0}
+        ]
+    )
+    monkeypatch.setattr(runtime_cli, "_configure_environment", lambda: None)
+    monkeypatch.setattr(runtime_cli, "build_runtime_from_env", lambda load_env=False: fake_runtime)
+
+    result = CliRunner().invoke(runtime_cli.app, ["reconcile-execution", "--raw"])
+
+    assert result.exit_code != 0
+    assert fake_runtime.reconcile_execution_called is True
+    assert "execution reconciliation mismatch" in result.stderr
 
 
 def test_run_loop_stops_on_keyboard_interrupt(monkeypatch) -> None:

@@ -64,6 +64,23 @@ def health(pretty: bool = typer.Option(True, "--pretty/--raw", help="Pretty-prin
     typer.echo(json.dumps(runtime.health(), indent=2 if pretty else None))
 
 
+@app.command("reconcile-execution")
+def reconcile_execution(
+    pretty: bool = typer.Option(True, "--pretty/--raw", help="Pretty-print JSON")
+) -> None:
+    """Reconcile broker and portfolio positions, failing closed on mismatch."""
+
+    _configure_environment()
+    runtime = build_runtime_from_env(load_env=False)
+    runtime.bootstrap()
+    payload = runtime.reconcile_execution()
+    typer.echo(json.dumps(payload, indent=2 if pretty else None))
+    mismatches = payload.get("mismatches")
+    if isinstance(mismatches, list) and mismatches:
+        typer.echo("execution reconciliation mismatch", err=True)
+        raise typer.Exit(code=2)
+
+
 @app.command("break-glass-activate")
 def break_glass_activate(
     control: str = typer.Option(..., help="Control name (e.g., runtime.kill_switch)"),

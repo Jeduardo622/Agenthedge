@@ -20,6 +20,7 @@ from learning.performance import PerformanceTracker
 from observability.alerts import AlertNotifier
 from observability.anomaly import BehaviorAnomalyDetector
 from observability.state import ObservabilityState
+from portfolio.broker import BrokerAdapter, SimulatedBrokerAdapter
 from portfolio.store import PortfolioStore
 
 from .base import BaseAgent
@@ -65,6 +66,7 @@ class AgentRuntime:
         state_sink: RuntimeStateSink | None = None,
         break_glass_store: BreakGlassStore | None = None,
         observability_state: ObservabilityState | None = None,
+        broker_adapter: BrokerAdapter | None = None,
     ) -> None:
         self.logger = logging.getLogger("agenthedge.runtime")
         self.registry = registry
@@ -95,6 +97,7 @@ class AgentRuntime:
         self.audit_sink = audit_sink or JsonlAuditSink(DEFAULT_AUDIT_PATH)
         self._audit_path = getattr(self.audit_sink, "path", DEFAULT_AUDIT_PATH)
         self.portfolio_store = portfolio_store or PortfolioStore(DEFAULT_PORTFOLIO_PATH)
+        self.broker_adapter = broker_adapter or SimulatedBrokerAdapter(self.portfolio_store)
         self.alert_notifier = alert_notifier or AlertNotifier.from_env()
         self._alert_sink = self.alert_notifier.notify if self.alert_notifier else None
         self._audit_report_dir = Path(os.environ.get("AUDIT_REPORT_DIR", "storage/audit/reports"))
@@ -161,6 +164,8 @@ class AgentRuntime:
                 audit_sink=self.audit_sink,
                 extras={
                     "portfolio_store": self.portfolio_store,
+                    "broker_adapter": self.broker_adapter,
+                    "execution_safety_config": self.config.execution_safety,
                     "message_bus": self.bus,
                     "observability_state": self._observability_state,
                     "audit_path": self._audit_path,
@@ -320,6 +325,22 @@ class AgentRuntime:
                 self._observability_state.snapshot() if self._observability_state else {}
             ),
         }
+
+    def reconcile_execution(self) -> Mapping[str, object]:
+        result = self.broker_adapter.reconcile_fills(self.portfolio_store)
+        action = (
+            "runtime_execution_reconciliation_mismatch"
+            if result.mismatches
+            else "runtime_execution_reconciliation_ok"
+        )
+        self._audit_runtime(action, result.to_dict())
+        if result.mismatches:
+            self._engage_kill_switch(
+                trigger="runtime.execution_reconciliation",
+                reason="execution_reconciliation_mismatch",
+                payload=result.to_dict(),
+            )
+        return result.to_dict()
 
     def set_observability_state(self, state: ObservabilityState) -> None:
         self._observability_state = state

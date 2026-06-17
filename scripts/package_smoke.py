@@ -11,6 +11,8 @@ from zipfile import ZipFile
 
 REQUIRED_PREFIXES = ("cli/", "ops/", "observability/", "research_inputs/", "strategies/")
 REQUIRED_PATHS = (
+    "cli/broker_canary.py",
+    "cli/paper_rollout_rehearsal.py",
     "cli/promotion_gate.py",
     "cli/__init__.py",
     "research_inputs/catalyst_calendar.py",
@@ -18,6 +20,8 @@ REQUIRED_PATHS = (
     "strategies/catalyst.py",
 )
 REQUIRED_IMPORTS = (
+    "cli.broker_canary",
+    "cli.paper_rollout_rehearsal",
     "cli.promotion_gate",
     "ops.scheduler",
     "observability.state",
