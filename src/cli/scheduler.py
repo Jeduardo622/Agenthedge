@@ -46,7 +46,13 @@ def run_once(job: str = typer.Argument(...)) -> None:
     """Execute a single scheduler job and exit."""
 
     _configure_environment()
-    valid_jobs = {"run_daily_trade", "midday_check", "eod_closure"}
+    valid_jobs = {
+        "run_daily_trade",
+        "midday_check",
+        "heartbeat_check",
+        "reconciliation_check",
+        "eod_closure",
+    }
     if job not in valid_jobs:
         valid = ", ".join(sorted(valid_jobs))
         raise typer.BadParameter(f"Unknown job '{job}'. Valid options: {valid}")

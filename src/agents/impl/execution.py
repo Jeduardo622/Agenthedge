@@ -69,7 +69,6 @@ class ExecutionAgent(BaseAgent):
             raise RuntimeError("ExecutionAgent requires a message bus")
         self.bus: MessageBus = bus
         self._subscription: Subscription | None = None
-        self._kill_subscription: Subscription | None = None
         self._kill_switch_engaged = False
         self._kill_switch_reason: str | None = None
         self._kill_switch_trigger: str | None = None
@@ -80,11 +79,13 @@ class ExecutionAgent(BaseAgent):
 
     def setup(self) -> None:
         self._subscription = self.bus.subscribe(
-            self._handle_approval, topics=["director.approval"], replay_last=0
-        )
-        self._kill_subscription = self.bus.subscribe(
-            self._handle_kill_switch,
-            topics=["risk.kill_switch", "compliance.kill_switch", "runtime.kill_switch"],
+            self._handle_control_message,
+            topics=[
+                "director.approval",
+                "risk.kill_switch",
+                "compliance.kill_switch",
+                "runtime.kill_switch",
+            ],
             replay_last=0,
         )
 
@@ -92,9 +93,6 @@ class ExecutionAgent(BaseAgent):
         if self._subscription:
             self.bus.unsubscribe(self._subscription.id)
             self._subscription = None
-        if self._kill_subscription:
-            self.bus.unsubscribe(self._kill_subscription.id)
-            self._kill_subscription = None
         self._kill_switch_engaged = False
         self._kill_switch_reason = None
         self._kill_switch_trigger = None
@@ -103,6 +101,12 @@ class ExecutionAgent(BaseAgent):
     def tick(self) -> None:
         self.reconcile_pending_orders()
         self.publish_metric("execution_active", 1.0)
+
+    def _handle_control_message(self, envelope: Envelope) -> None:
+        if envelope.message.topic == "director.approval":
+            self._handle_approval(envelope)
+            return
+        self._handle_kill_switch(envelope)
 
     def _handle_approval(self, envelope: Envelope) -> None:
         payload: Dict[str, Any] = dict(envelope.message.payload or {})

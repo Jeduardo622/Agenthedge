@@ -21,8 +21,15 @@ class FakeRuntime:
     def __init__(self) -> None:
         self.run_once_called = False
         self.bootstrap_called = False
+        self.reconcile_execution_called = False
         self.stopped = False
         self._health = {"tick_count": 1, "runtime_controls": {"stale_heartbeats": []}}
+        self._reconciliation = {
+            "broker_positions": {"SPY": 1.0},
+            "portfolio_positions": {"SPY": 1.0},
+            "mismatches": [],
+            "reconciled_at": "2026-06-17T00:00:00+00:00",
+        }
 
     def run_once(self) -> None:
         self.run_once_called = True
@@ -32,6 +39,10 @@ class FakeRuntime:
 
     def health(self):
         return self._health
+
+    def reconcile_execution(self):
+        self.reconcile_execution_called = True
+        return self._reconciliation
 
     def stop(self, wait: bool = True) -> None:
         self.stopped = True
@@ -113,6 +124,45 @@ def test_heartbeat_check_records_state(tmp_path) -> None:
     snapshot = state.snapshot()
     assert snapshot["scheduler"]["heartbeat_check"]["status"] == "completed"
     assert snapshot["scheduler"]["heartbeat_check"]["details"]["stale_heartbeats"] == ["risk"]
+
+
+def test_reconciliation_check_records_clean_status(tmp_path) -> None:
+    service, runtime, state = _build_scheduler(tmp_path=tmp_path, trading_day=True)
+
+    service.reconciliation_check()
+
+    snapshot = state.snapshot()
+    assert runtime.bootstrap_called is True
+    assert runtime.reconcile_execution_called is True
+    assert runtime.stopped is True
+    assert snapshot["scheduler"]["reconciliation_check"]["status"] == "completed"
+    assert snapshot["execution_reconciliation"]["status"] == "clean"
+    assert snapshot["execution_reconciliation"]["mismatch_count"] == 0
+
+
+def test_reconciliation_check_fails_closed_on_mismatch(tmp_path) -> None:
+    service, runtime, state = _build_scheduler(tmp_path=tmp_path, trading_day=True)
+    runtime._reconciliation = {
+        "broker_positions": {"SPY": 1.0},
+        "portfolio_positions": {"SPY": 0.0},
+        "mismatches": [{"symbol": "SPY", "broker_quantity": 1.0, "portfolio_quantity": 0.0}],
+        "reconciled_at": "2026-06-17T00:00:00+00:00",
+    }
+
+    try:
+        service.reconciliation_check()
+    except RuntimeError as exc:
+        assert "execution reconciliation mismatch" in str(exc)
+    else:
+        raise AssertionError("expected reconciliation mismatch to fail closed")
+
+    snapshot = state.snapshot()
+    assert runtime.reconcile_execution_called is True
+    assert runtime.stopped is True
+    assert snapshot["scheduler"]["reconciliation_check"]["status"] == "failed"
+    assert snapshot["scheduler"]["reconciliation_check"]["details"]["mismatch_count"] == 1
+    assert snapshot["execution_reconciliation"]["status"] == "mismatch"
+    assert snapshot["alerts"]["recent"][0]["action"] == "execution_reconciliation_mismatch"
 
 
 def test_scheduler_skips_job_when_leader_lock_not_acquired(tmp_path, monkeypatch) -> None:

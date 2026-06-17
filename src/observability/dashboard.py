@@ -54,6 +54,7 @@ alerts_obs = observability.get("alerts", {})
 schedulers_obs = observability.get("scheduler", {})
 audit_obs = observability.get("audit", {})
 strategy_obs = observability.get("strategies", {})
+execution_reconciliation_obs = observability.get("execution_reconciliation", {})
 prometheus_rows: List[Dict[str, Any]] = []
 prom_bus_depth: float | None = None
 reliability_metrics: Mapping[str, float | None] = {}
@@ -136,6 +137,26 @@ if strategy_obs:
     st.dataframe(strategy_df, use_container_width=True, hide_index=True)
 else:
     st.info("No strategy telemetry available yet.")
+
+st.divider()
+
+st.subheader("Execution Reconciliation")
+if execution_reconciliation_obs:
+    recon_cols = st.columns(3)
+    recon_cols[0].metric(
+        "Status",
+        str(execution_reconciliation_obs.get("status", "unknown")).upper(),
+    )
+    recon_cols[1].metric(
+        "Mismatches",
+        f"{int(execution_reconciliation_obs.get('mismatch_count') or 0)}",
+    )
+    recon_cols[2].metric(
+        "Last Checked",
+        execution_reconciliation_obs.get("timestamp", "unknown"),
+    )
+else:
+    st.info("No execution reconciliation check recorded yet.")
 
 st.divider()
 

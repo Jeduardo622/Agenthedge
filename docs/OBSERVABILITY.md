@@ -50,6 +50,8 @@ Tweak the Prometheus target if running Agenthedge on Linux by pointing to the ho
 
 - `run_daily_trade` (06:00 PT, trading days only)
 - `midday_check` (09:00 PT)
+- `reconciliation_check` (hourly at :05 PT)
+- `heartbeat_check` (hourly at :30 PT)
 - `eod_closure` (13:30 PT)
 
 For verification or CI, `poetry run python -m cli.scheduler run-once <job>` executes a single job and exits, and is backed by tests (`tests/ops/test_scheduler.py`, `tests/cli/test_scheduler_cli.py`) to prove the workflows.

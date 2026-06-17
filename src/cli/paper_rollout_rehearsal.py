@@ -60,8 +60,8 @@ def run_rehearsal(
     canary_runner: CanaryRunner = run_canary,
     reconciliation_runner: ReconciliationRunner | None = None,
     symbol: str = "SPY",
-    quantity: float = 0.0001,
-    limit_price: float = 0.01,
+    quantity: float = 1.0,
+    limit_price: float = 1.0,
 ) -> Dict[str, Any]:
     source_env = env if env is not None else os.environ
     resolved_mode = _resolve_mode(mode, source_env)
@@ -108,6 +108,7 @@ def run_rehearsal(
                 "status": _phase_status_from_canary(canary),
                 "mode": canary.get("mode"),
                 "order_status": canary.get("order_status"),
+                "cancellation": canary.get("cancellation"),
                 "reconciliation": canary.get("reconciliation"),
             },
             "reconciliation": {
@@ -211,6 +212,9 @@ def _phase_status_from_canary(payload: Mapping[str, Any]) -> str:
     order_status = payload.get("order_status")
     if isinstance(order_status, Mapping) and order_status.get("status") == "rejected":
         return "failed"
+    cancellation = payload.get("cancellation")
+    if isinstance(cancellation, Mapping) and cancellation.get("status") == "failed":
+        return "failed"
     reconciliation = payload.get("reconciliation")
     if isinstance(reconciliation, Mapping) and reconciliation.get("mismatches"):
         return "failed"
@@ -241,8 +245,10 @@ def main(
     ),
     mode: str = typer.Option("auto", "--mode", help="Use 'auto', 'mock', or 'paper'."),
     symbol: str = typer.Option("SPY", "--symbol", help="Canary symbol."),
-    quantity: float = typer.Option(0.0001, "--quantity", help="Tiny canary quantity."),
-    limit_price: float = typer.Option(0.01, "--limit-price", help="Canary limit price."),
+    quantity: float = typer.Option(1.0, "--quantity", help="Canary quantity."),
+    limit_price: float = typer.Option(
+        1.0, "--limit-price", help="Nonmarketable canary limit price."
+    ),
 ) -> None:
     load_dotenv()
     normalized_mode = mode.strip().lower()

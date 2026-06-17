@@ -13,6 +13,13 @@ def test_observability_state_tracks_sections() -> None:
     state.record_audit_report({"week": "2025-W48"})
     state.record_heartbeat("risk", {"stale": False})
     state.record_anomaly("execution.fill", {"severity": "warning"})
+    state.record_execution_reconciliation(
+        {
+            "broker_positions": {"SPY": 1.0},
+            "portfolio_positions": {"SPY": 1.0},
+            "mismatches": [],
+        }
+    )
 
     snapshot = state.snapshot()
     assert snapshot["risk"]["nav"] == 1_000_000
@@ -23,3 +30,5 @@ def test_observability_state_tracks_sections() -> None:
     assert snapshot["audit"]["week"] == "2025-W48"
     assert snapshot["heartbeats"]["risk"]["stale"] is False
     assert snapshot["anomalies"]["execution.fill"]["severity"] == "warning"
+    assert snapshot["execution_reconciliation"]["status"] == "clean"
+    assert snapshot["execution_reconciliation"]["mismatch_count"] == 0

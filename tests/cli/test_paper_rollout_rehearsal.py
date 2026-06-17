@@ -39,6 +39,8 @@ def test_rollout_rehearsal_writes_redacted_signed_pass_artifact(tmp_path: Path) 
     assert payload["mode"] == "mock"
     assert payload["phases"]["preflight"]["status"] == "passed"
     assert payload["phases"]["canary"]["status"] == "passed"
+    assert payload["phases"]["canary"]["cancellation"]["status"] == "skipped"
+    assert payload["phases"]["canary"]["cancellation"]["reason"] == "order_filled"
     assert payload["phases"]["reconciliation"]["status"] == "passed"
     assert payload["environment"]["EXECUTION_MODE"] == "paper_broker"
     assert payload["environment"]["EXECUTION_MAX_ORDER_NOTIONAL"] == "10"
@@ -73,6 +75,37 @@ def test_rollout_rehearsal_fails_artifact_on_reconciliation_mismatch(
     assert payload["status"] == "failed"
     assert payload["phases"]["reconciliation"]["status"] == "failed"
     assert payload["phases"]["reconciliation"]["mismatches"][0]["symbol"] == "SPY"
+    assert payload["signature"]["digest"] == _expected_signature(payload)
+
+
+def test_rollout_rehearsal_fails_artifact_on_canary_cancellation_failure(
+    tmp_path: Path,
+) -> None:
+    from cli import paper_rollout_rehearsal
+
+    def canary_with_failed_cancellation(**_: Any) -> Mapping[str, Any]:
+        return {
+            "mode": "mock",
+            "order_status": {"status": "accepted"},
+            "cancellation": {
+                "status": "failed",
+                "cancel_order_status": {"status": "rejected"},
+                "post_cancel_order_status": {"status": "accepted"},
+            },
+            "reconciliation": {"mismatches": []},
+        }
+
+    payload = paper_rollout_rehearsal.run_rehearsal(
+        mode="mock",
+        artifact_path=tmp_path / "rollout-cancel-fail.json",
+        portfolio_path=tmp_path / "portfolio.json",
+        env={},
+        canary_runner=canary_with_failed_cancellation,
+    )
+
+    assert payload["status"] == "failed"
+    assert payload["phases"]["canary"]["status"] == "failed"
+    assert payload["phases"]["canary"]["cancellation"]["status"] == "failed"
     assert payload["signature"]["digest"] == _expected_signature(payload)
 
 
