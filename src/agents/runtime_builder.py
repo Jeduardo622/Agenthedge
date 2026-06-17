@@ -16,6 +16,7 @@ from infra.metrics import ensure_metrics_server
 from infra.postgres import get_postgres_dsn, resolve_runtime_backend, resolve_runtime_profile
 from infra.runtime_state import NullRuntimeStateSink, PostgresRuntimeStateSink, RuntimeStateSink
 from observability.state import get_observability_state
+from portfolio.broker import AlpacaPaperBrokerAdapter, BrokerAdapter, SimulatedBrokerAdapter
 from portfolio.postgres_store import PostgresPortfolioStore
 from portfolio.store import PortfolioStore
 
@@ -63,6 +64,7 @@ def build_runtime_from_env(*, load_env: bool = True) -> AgentRuntime:
     bus = MessageBus()
     audit_sink: AuditSink = JsonlAuditSink(audit_path)
     portfolio_store = PortfolioStore(portfolio_path)
+    broker_adapter: BrokerAdapter | None = None
     state_sink: RuntimeStateSink = NullRuntimeStateSink()
     break_glass_store: BreakGlassStore = NullBreakGlassStore()
     if backend == "postgres":
@@ -90,9 +92,17 @@ def build_runtime_from_env(*, load_env: bool = True) -> AgentRuntime:
                 dsn=dsn,
                 max_ttl_seconds=config.break_glass_max_ttl_seconds,
             )
+    if config.execution_mode == "simulated":
+        broker_adapter = SimulatedBrokerAdapter(portfolio_store)
+    elif config.execution_mode == "paper_broker":
+        broker_adapter = AlpacaPaperBrokerAdapter.from_env(env)
     logging.getLogger("agenthedge.runtime_builder").info(
         "runtime backend resolved",
-        extra={"runtime_backend": backend, "runtime_profile": profile},
+        extra={
+            "runtime_backend": backend,
+            "runtime_profile": profile,
+            "execution_mode": config.execution_mode,
+        },
     )
     runtime = AgentRuntime(
         registry=registry,
@@ -104,6 +114,7 @@ def build_runtime_from_env(*, load_env: bool = True) -> AgentRuntime:
         portfolio_store=portfolio_store,
         state_sink=state_sink,
         break_glass_store=break_glass_store,
+        broker_adapter=broker_adapter,
     )
     return runtime
 

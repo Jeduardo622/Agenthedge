@@ -47,6 +47,14 @@ Runtime backend selection (Postgres durable control plane):
 - `RUNTIME_LEASE_SECONDS` (lease heartbeat interval budget, default `30`)
 - `PORTFOLIO_ACCOUNT_ID` (default `default`)
 - `PORTFOLIO_INITIAL_CASH` (default `1000000`)
+- `EXECUTION_MODE` (`simulated|paper_broker`, default `simulated`)
+- `EXECUTION_ORDER_LEDGER_PATH` (default `storage/strategy_state/execution_orders.json`)
+- `EXECUTION_MAX_ORDER_NOTIONAL` (default `1000000`)
+- `EXECUTION_MAX_ORDER_SHARES` (default `1000000`)
+- `EXECUTION_MAX_SYMBOL_POSITION_SHARES` (default `1000000`)
+- `EXECUTION_MARKET_HOURS_GUARD` (default `false`)
+- `EXECUTION_REQUIRE_PAPER_ACCOUNT` (default `true`)
+- `ALPACA_API_KEY_ID`, `ALPACA_API_SECRET_KEY`, `ALPACA_PAPER_BASE_URL` (required only for `EXECUTION_MODE=paper_broker`)
 - `BREAK_GLASS_ENABLED` (default `false`)
 - `BREAK_GLASS_DEFAULT_TTL_SECONDS` (default `900`)
 - `BREAK_GLASS_MAX_TTL_SECONDS` (default `86400`)
@@ -57,6 +65,15 @@ Break-glass commands (Postgres backend only):
 - `poetry run python -m cli.runtime break-glass-activate --control runtime.kill_switch --reason "incident" --created-by ops`
 - `poetry run python -m cli.runtime break-glass-status`
 - `poetry run python -m cli.runtime break-glass-revoke <override_id> --revoked-by ops`
+
+Paper broker canary:
+- `poetry run python -m cli.broker_canary --mode auto --artifact-path storage/audit/broker_canary.json`
+
+Execution reconciliation:
+- `poetry run python -m cli.runtime reconcile-execution --raw`
+
+Paper rollout rehearsal:
+- `poetry run python -m cli.paper_rollout_rehearsal --mode auto --artifact-path storage/audit/paper_rollout_rehearsal.json`
 
 Cutover tooling:
 - `poetry run python scripts/migrate_runtime_state_to_postgres.py --dsn <POSTGRES_DSN>`
