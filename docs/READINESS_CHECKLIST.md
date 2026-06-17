@@ -59,19 +59,31 @@ Use this checklist before enabling a full daily trading cycle. It consolidates r
   - Evidence: Phase 4 entry now reads “✅ Post-phase readiness complete (2025-11-29)…”; no new risks identified beyond existing `docs/RISK_MANAGEMENT.md` items.
 
 ## 8. Live-Capital Go/No-Go Gate (Post-Phase Hardening)
-- [ ] Execution verifies complete approval chain (`risk`, `compliance`, `director`) plus replay/idempotency guard. (attach CI run link)
-- [ ] Runtime kill-switch + execution fill-block behavior validated in automated tests. (attach CI run link)
-- [ ] Message bus ACL enforcement verified for non-development environments. (attach CI run link)
-- [ ] Network allowlist enforced for outbound provider/webhook domains (`NETWORK_ALLOWLIST_ENFORCE=true`) with passing tests. (attach CI run link)
-- [ ] Heartbeat timeout + behavior anomaly controls validated (alerts + runtime escalation paths). (attach CI run link)
-- [ ] Data quality checks/quarantine workflow validated and reviewed with `scripts/review_quarantine.py`. (attach review artifact)
-- [ ] `poetry run pytest -q`, `poetry run mypy src`, and `poetry run flake8` all green on the release commit. (attach CI run link)
-- [ ] Artifact signing verification passes (`cosign verify-blob`) for release wheel. (attach verification output)
-- [ ] Migration rollback simulation passes (`scripts/migration_rollback_simulation.py`). (attach JSON output artifact)
-- [ ] Audit-chain cutover completed for legacy logs (if needed): archive path recorded from `scripts/cutover_audit_chain.py`.
-- [ ] Active chained audit file path recorded (default `storage/audit/runtime_events.jsonl`).
-- [ ] Audit-chain verification passes with report artifact:
+- [x] Execution verifies complete approval chain (`risk`, `compliance`, `director`) plus replay/idempotency guard. (attach CI run link)
+  - Evidence: `quality-gate` workflow dispatch on 2026-06-17 for release SHA `2edf5293ba1cf4ac76bfd4f25e26d01cf4b1c971` passed: <https://github.com/Jeduardo622/Agenthedge/actions/runs/27662780738>. The `checks` job ran the full pytest suite with coverage, including execution approval/replay tests.
+- [x] Runtime kill-switch + execution fill-block behavior validated in automated tests. (attach CI run link)
+  - Evidence: `quality-gate` workflow dispatch on 2026-06-17 passed at SHA `2edf5293ba1cf4ac76bfd4f25e26d01cf4b1c971`: <https://github.com/Jeduardo622/Agenthedge/actions/runs/27662780738>. The `checks` job ran runtime/execution kill-switch tests; the `postgres-integration (break-glass-e2e)` job also passed.
+- [x] Message bus ACL enforcement verified for non-development environments. (attach CI run link)
+  - Evidence: `quality-gate` workflow dispatch on 2026-06-17 passed at SHA `2edf5293ba1cf4ac76bfd4f25e26d01cf4b1c971`: <https://github.com/Jeduardo622/Agenthedge/actions/runs/27662780738>. The run includes `checks` plus passing Postgres matrix jobs `durable-bus`, `failover-e2e`, `break-glass-e2e`, `migration-rollback`, and `failover-drill` with `RUNTIME_PROFILE=staging`.
+- [x] Network allowlist enforced for outbound provider/webhook domains (`NETWORK_ALLOWLIST_ENFORCE=true`) with passing tests. (attach CI run link)
+  - Evidence: `quality-gate` workflow dispatch on 2026-06-17 passed at SHA `2edf5293ba1cf4ac76bfd4f25e26d01cf4b1c971`: <https://github.com/Jeduardo622/Agenthedge/actions/runs/27662780738>. The `checks` job ran network allowlist and webhook transport tests.
+- [x] Heartbeat timeout + behavior anomaly controls validated (alerts + runtime escalation paths). (attach CI run link)
+  - Evidence: `quality-gate` workflow dispatch on 2026-06-17 passed at SHA `2edf5293ba1cf4ac76bfd4f25e26d01cf4b1c971`: <https://github.com/Jeduardo622/Agenthedge/actions/runs/27662780738>. The `checks` job ran runtime heartbeat/anomaly escalation tests.
+- [x] Data quality checks/quarantine workflow validated and reviewed with `scripts/review_quarantine.py`. (attach review artifact)
+  - Evidence: quality/quarantine tests passed in `quality-gate` on 2026-06-17: <https://github.com/Jeduardo622/Agenthedge/actions/runs/27662780738>. Quarantine review artifact generated with `poetry run python scripts/review_quarantine.py --path storage/quarantine/quarantined_data.jsonl`: `storage/quarantine/reports/quarantine_review_20260617T030637Z.json` (`record_count: 0`).
+- [x] `poetry run pytest -q`, `poetry run mypy src`, and `poetry run flake8` all green on the release commit. (attach CI run link)
+  - Evidence: `quality-gate` workflow dispatch on 2026-06-17 passed at SHA `2edf5293ba1cf4ac76bfd4f25e26d01cf4b1c971`: <https://github.com/Jeduardo622/Agenthedge/actions/runs/27662780738>. The `checks` job passed tests with coverage, `poetry run mypy src`, and `poetry run flake8 src tests`.
+- [x] Artifact signing verification passes (`cosign verify-blob`) for release wheel. (attach verification output)
+  - Evidence: `quality-gate` passed its `Sign and verify wheel artifact` step: <https://github.com/Jeduardo622/Agenthedge/actions/runs/27662780738>. `staged-release-gates` also passed `Build and sign release artifact`, with `cosign verify-blob` output `Verified OK`: <https://github.com/Jeduardo622/Agenthedge/actions/runs/27662780740>.
+- [x] Migration rollback simulation passes (`scripts/migration_rollback_simulation.py`). (attach JSON output artifact)
+  - Evidence: `quality-gate` passed the `postgres-integration (migration-rollback)` matrix job: <https://github.com/Jeduardo622/Agenthedge/actions/runs/27662780738>. `staged-release-gates` passed `Migration rollback simulation` with JSON status `ok` and both first/second reconciliation statuses `ok`: <https://github.com/Jeduardo622/Agenthedge/actions/runs/27662780740>.
+- [x] Audit-chain cutover completed for legacy logs (if needed): archive path recorded from `scripts/cutover_audit_chain.py`.
+  - Evidence: prior legacy cutover archive is present under `storage/audit/archive/`: `legacy_unhashed_20260215T172556Z.jsonl`, `runtime_events_chained_20260215T172556Z.jsonl`, and `runtime_events_prehash_20260215T172549Z.jsonl`. No new cutover was required for the active chained audit file.
+- [x] Active chained audit file path recorded (default `storage/audit/runtime_events.jsonl`).
+  - Evidence: active chained audit file path recorded as `storage/audit/runtime_events.jsonl`.
+- [x] Audit-chain verification passes with report artifact:
   - `poetry run python scripts/verify_audit_chain.py --path storage/audit/runtime_events.jsonl --report-dir storage/audit/reports`
   - Latest `storage/audit/reports/audit_chain_report_*.json` attached to release evidence.
+  - Evidence: command passed on 2026-06-17 with `Audit chain valid: storage\audit\runtime_events.jsonl`. Report artifact: `storage/audit/reports/audit_chain_report_ok_20260617T030641Z.json` (`ok: true`, `error_count: 0`).
 
-When sections 1-7 are checked, the system is ready for Phase 4 operations and paper trading. Live capital requires section 8 sign-off plus governance approval on the exact release SHA.
+When sections 1-7 are checked, the system is ready for Phase 4 operations and paper trading. Live capital requires section 8 sign-off plus governance approval on the exact release SHA. Governance approval for release SHA `2edf5293ba1cf4ac76bfd4f25e26d01cf4b1c971` is recorded in `docs/GOVERNANCE.md` under “Section 8 Live-Capital Sign-off — 2026-06-17 UTC.”
