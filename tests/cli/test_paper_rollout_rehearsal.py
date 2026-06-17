@@ -41,6 +41,7 @@ def test_rollout_rehearsal_writes_redacted_signed_pass_artifact(tmp_path: Path) 
     assert payload["phases"]["canary"]["status"] == "passed"
     assert payload["phases"]["canary"]["cancellation"]["status"] == "skipped"
     assert payload["phases"]["canary"]["cancellation"]["reason"] == "order_filled"
+    assert payload["phases"]["canary"]["cancellation"]["open_canary_orders_after_cleanup"] == 0
     assert payload["phases"]["reconciliation"]["status"] == "passed"
     assert payload["environment"]["EXECUTION_MODE"] == "paper_broker"
     assert payload["environment"]["EXECUTION_MAX_ORDER_NOTIONAL"] == "10"
@@ -91,6 +92,11 @@ def test_rollout_rehearsal_fails_artifact_on_canary_cancellation_failure(
                 "status": "failed",
                 "cancel_order_status": {"status": "rejected"},
                 "post_cancel_order_status": {"status": "accepted"},
+                "open_canary_orders_after_cleanup": 1,
+                "alert": {
+                    "severity": "critical",
+                    "reason": "canary_cleanup_failed",
+                },
             },
             "reconciliation": {"mismatches": []},
         }
@@ -106,6 +112,7 @@ def test_rollout_rehearsal_fails_artifact_on_canary_cancellation_failure(
     assert payload["status"] == "failed"
     assert payload["phases"]["canary"]["status"] == "failed"
     assert payload["phases"]["canary"]["cancellation"]["status"] == "failed"
+    assert payload["phases"]["canary"]["cancellation"]["alert"]["severity"] == "critical"
     assert payload["signature"]["digest"] == _expected_signature(payload)
 
 

@@ -61,6 +61,7 @@ def run_canary(
         cancellation_payload = {
             "status": "skipped",
             "reason": "order_rejected",
+            "open_canary_orders_after_cleanup": 0,
         }
         reconciliation_payload: Dict[str, Any] = {
             "status": "skipped",
@@ -94,19 +95,34 @@ def _cleanup_order(*, broker: BrokerAdapter, order_status: BrokerOrderStatus) ->
         return {
             "status": "skipped",
             "reason": "order_filled",
+            "open_canary_orders_after_cleanup": 0,
         }
     if order_status.status not in _CANCELABLE_STATUSES:
         return {
             "status": "skipped",
             "reason": f"order_status_{order_status.status}",
+            "open_canary_orders_after_cleanup": _open_canary_order_count(order_status.status),
         }
     cancel_status = broker.cancel_order(order_status.broker_order_id)
     post_cancel_status = broker.get_order_status(order_status.broker_order_id)
-    return {
-        "status": "passed" if post_cancel_status.status == "canceled" else "failed",
+    status = "passed" if post_cancel_status.status == "canceled" else "failed"
+    payload: Dict[str, Any] = {
+        "status": status,
         "cancel_order_status": cancel_status.to_dict(),
         "post_cancel_order_status": post_cancel_status.to_dict(),
+        "open_canary_orders_after_cleanup": _open_canary_order_count(post_cancel_status.status),
     }
+    if status == "failed":
+        payload["alert"] = {
+            "severity": "critical",
+            "reason": "canary_cleanup_failed",
+            "message": "Canary order cleanup did not reach a closed broker status.",
+        }
+    return payload
+
+
+def _open_canary_order_count(status: str) -> int:
+    return 1 if status in _CANCELABLE_STATUSES else 0
 
 
 @app.command()

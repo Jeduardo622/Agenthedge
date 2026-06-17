@@ -74,6 +74,7 @@ Execution reconciliation:
 
 Paper rollout rehearsal:
 - `poetry run python -m cli.paper_rollout_rehearsal --mode auto --artifact-path storage/audit/paper_rollout_rehearsal.json`
+- `poetry run python -m cli.paper_rollout_evidence --artifact-dir storage/audit` validates the latest rehearsal artifact, paper-account and market-hours guardrails, canary cleanup state, and secret redaction; it writes `paper_rollout_evidence_<timestamp>.json` and prints a PR/release handoff summary.
 
 Cutover tooling:
 - `poetry run python scripts/migrate_runtime_state_to_postgres.py --dsn <POSTGRES_DSN>`
