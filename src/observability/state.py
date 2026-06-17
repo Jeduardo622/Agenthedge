@@ -25,6 +25,7 @@ class ObservabilityState:
         self._strategies: Dict[str, Any] = {}
         self._heartbeats: Dict[str, Any] = {}
         self._anomalies: Dict[str, Any] = {}
+        self._execution_reconciliation: Dict[str, Any] = {}
         self._last_updated: str | None = None
 
     def update_risk(self, payload: Mapping[str, Any]) -> None:
@@ -87,6 +88,18 @@ class ObservabilityState:
             self._anomalies[metric] = dict(payload)
             self._touch()
 
+    def record_execution_reconciliation(self, payload: Mapping[str, Any]) -> None:
+        mismatches = payload.get("mismatches", [])
+        mismatch_count = len(mismatches) if isinstance(mismatches, list) else 0
+        with self._lock:
+            self._execution_reconciliation = {
+                "status": "mismatch" if mismatch_count else "clean",
+                "mismatch_count": mismatch_count,
+                "payload": dict(payload),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+            self._touch()
+
     def snapshot(self) -> MutableMapping[str, Any]:
         with self._lock:
             recent_alerts = list(self._recent_alerts)
@@ -102,6 +115,7 @@ class ObservabilityState:
                 "strategies": dict(self._strategies),
                 "heartbeats": dict(self._heartbeats),
                 "anomalies": dict(self._anomalies),
+                "execution_reconciliation": dict(self._execution_reconciliation),
                 "last_updated": self._last_updated,
             }
 

@@ -34,6 +34,7 @@ class SchedulerRuntime(Protocol):
     def run_once(self) -> None: ...
     def bootstrap(self) -> None: ...
     def health(self) -> Mapping[str, object]: ...
+    def reconcile_execution(self) -> Mapping[str, object]: ...
     def stop(self, *, wait: bool = True) -> None: ...
 
 
@@ -101,6 +102,11 @@ class SchedulerService:
             name="heartbeat_check",
         )
         self._scheduler.add_job(
+            self.reconciliation_check,
+            CronTrigger(hour="*", minute=5, timezone=self._tz),
+            name="reconciliation_check",
+        )
+        self._scheduler.add_job(
             self.eod_closure,
             CronTrigger(hour=13, minute=30, timezone=self._tz),
             name="eod_closure",
@@ -154,6 +160,39 @@ class SchedulerService:
 
     def heartbeat_check(self) -> None:
         self._run_as_leader("heartbeat_check", self._run_heartbeat_check_impl)
+
+    def reconciliation_check(self) -> None:
+        self._run_as_leader("reconciliation_check", self._run_reconciliation_check_impl)
+
+    def _run_reconciliation_check_impl(self) -> None:
+        runtime = self._runtime_builder()
+        try:
+            runtime.bootstrap()
+            reconciliation = runtime.reconcile_execution()
+            mismatches = reconciliation.get("mismatches", [])
+            mismatch_count = len(mismatches) if isinstance(mismatches, list) else 0
+            self._state.record_execution_reconciliation(reconciliation)
+            self._metric_sink(
+                "execution_reconciliation_mismatch_count",
+                float(mismatch_count),
+                {"agent": "scheduler"},
+            )
+            details = {
+                "status": "mismatch" if mismatch_count else "clean",
+                "mismatch_count": mismatch_count,
+                "reconciled_at": reconciliation.get("reconciled_at"),
+            }
+            if mismatch_count:
+                self._record_job("reconciliation_check", status="failed", details=details)
+                self._state.record_alert(
+                    "execution_reconciliation_mismatch",
+                    "critical",
+                    {"mismatch_count": mismatch_count, "mismatches": mismatches},
+                )
+                raise RuntimeError("execution reconciliation mismatch")
+            self._record_job("reconciliation_check", status="completed", details=details)
+        finally:
+            runtime.stop(wait=False)
 
     def _run_heartbeat_check_impl(self) -> None:
         runtime = self._runtime_builder()

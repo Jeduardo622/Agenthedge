@@ -65,10 +65,10 @@ Escalation steps follow `GOVERNANCE.md` matrix; severe incidents require manual 
 - Monthly: backup validation, kill-switch drill, API key rotation rehearsal.
 
 ## Tooling & Automation
-- APScheduler for cron-like orchestration (`run_daily_trade`, `midday_check`, `eod_closure` jobs).
+- APScheduler for cron-like orchestration (`run_daily_trade`, `midday_check`, `reconciliation_check`, `heartbeat_check`, `eod_closure` jobs).
 - Runtime CLI (`poetry run python -m cli.runtime <cmd>`) for tick execution and health snapshots.
 - Observability stack (Prometheus + Grafana or Streamlit) for live monitoring; Prom metrics exposed via `infra.metrics`.
-- Scheduler service: `poetry run python -m cli.scheduler run` (Pacific Time, NYSE holiday-aware). Use `poetry run python -m cli.scheduler run-once <job>` during dry runs to trigger a specific job (`run_daily_trade`, `midday_check`, `eod_closure`) without keeping the daemon up.
+- Scheduler service: `poetry run python -m cli.scheduler run` (Pacific Time, NYSE holiday-aware). Use `poetry run python -m cli.scheduler run-once <job>` during dry runs to trigger a specific job (`run_daily_trade`, `midday_check`, `reconciliation_check`, `heartbeat_check`, `eod_closure`) without keeping the daemon up.
 - Streamlit telemetry dashboard: `poetry run streamlit run src/observability/dashboard.py` (shows runtime health, portfolio, provider status, Prometheus tick stats).
 - Grafana stack (optional): set `GRAFANA_ADMIN_USER` and `GRAFANA_ADMIN_PASSWORD`, then run `docker compose -f ops/observability/docker-compose.yml up -d`, import `ops/observability/grafana/dashboards/runtime.json`.
 - Alert notifier fan-out configured via `ALERT_*` env vars (webhook URL, min severity, per-action overrides); risk/compliance agents emit alerts on `risk_alert`, `risk_reject`, `risk_stop_loss`, `risk_stress_breach`, and `compliance_reject`.

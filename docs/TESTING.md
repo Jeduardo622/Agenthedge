@@ -47,6 +47,7 @@ Informed by the Technical Implementation Plan (CI/CD, sanity checks) and the arc
 ## Sanity Check Scripts
 - `poetry run python -m cli.runtime health --raw` ensures agents + providers are bootstrappable.
 - `poetry run python -m cli.scheduler run-once midday_check` runs a quick risk/compliance heartbeat.
+- `poetry run python -m cli.scheduler run-once reconciliation_check` runs execution reconciliation and fails closed on mismatches.
 - `scripts/backtest_strategy.py` validates strategy before enabling live cycle.
 - `poetry build && poetry run python scripts/package_smoke.py` validates the wheel contains/imports critical runtime modules.
 - `poetry run python scripts/backtest_strategy.py --symbol SPY --start 2024-01-02 --end 2024-01-05 --capital 100000` should complete within CI budget and attach the resulting `storage/backtests/<run_id>/result.json` as an artifact for code review.

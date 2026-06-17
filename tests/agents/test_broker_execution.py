@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, List, Mapping
@@ -302,6 +303,40 @@ def test_execution_kill_switch_blocks_before_broker_submit(tmp_path: Path) -> No
         )
     )
     execution = ExecutionAgent(_context(store, bus, broker=broker))
+    execution.setup()
+
+    bus.publish("risk.kill_switch", payload={"reason": "stop"}, publisher="risk")
+    bus.publish("director.approval", payload=_approval_payload(), publisher="director")
+    assert bus.drain(1.0) is True
+
+    assert broker.submitted == []
+    assert store.snapshot().positions == {}
+    execution.teardown()
+
+
+def test_execution_preserves_kill_switch_order_before_approval(tmp_path: Path) -> None:
+    store = PortfolioStore(tmp_path / "portfolio.json", initial_cash=1000.0)
+    bus = MessageBus()
+    broker = RecordingBroker(
+        submit_status=BrokerOrderStatus(
+            broker_order_id="broker-1",
+            client_order_id="a-1",
+            symbol="SPY",
+            quantity=2.0,
+            side="buy",
+            status="filled",
+            filled_quantity=2.0,
+            average_fill_price=100.0,
+        )
+    )
+    execution = ExecutionAgent(_context(store, bus, broker=broker))
+    original_kill_switch = execution._handle_kill_switch
+
+    def delayed_kill_switch(envelope) -> None:
+        time.sleep(0.05)
+        original_kill_switch(envelope)
+
+    execution._handle_kill_switch = delayed_kill_switch  # type: ignore[method-assign]
     execution.setup()
 
     bus.publish("risk.kill_switch", payload={"reason": "stop"}, publisher="risk")
@@ -770,7 +805,12 @@ def test_canary_uses_paper_adapter_when_execution_mode_is_paper(
     from cli import broker_canary
 
     class PaperCanaryBroker:
+        def __init__(self) -> None:
+            self.submitted: List[BrokerOrder] = []
+            self.cancelled: List[str] = []
+
         def submit_order(self, order: BrokerOrder) -> BrokerOrderStatus:
+            self.submitted.append(order)
             return BrokerOrderStatus(
                 broker_order_id="paper-1",
                 client_order_id=order.client_order_id,
@@ -783,10 +823,29 @@ def test_canary_uses_paper_adapter_when_execution_mode_is_paper(
             )
 
         def cancel_order(self, broker_order_id: str) -> BrokerOrderStatus:
-            raise AssertionError("cancel_order should not be called by canary")
+            self.cancelled.append(broker_order_id)
+            return BrokerOrderStatus(
+                broker_order_id=broker_order_id,
+                client_order_id=self.submitted[-1].client_order_id,
+                symbol="SPY",
+                quantity=1.0,
+                side="buy",
+                status="canceled",
+                filled_quantity=0.0,
+                average_fill_price=None,
+            )
 
         def get_order_status(self, broker_order_id: str) -> BrokerOrderStatus:
-            raise AssertionError("get_order_status should not be called by canary")
+            return BrokerOrderStatus(
+                broker_order_id=broker_order_id,
+                client_order_id=self.submitted[-1].client_order_id,
+                symbol="SPY",
+                quantity=1.0,
+                side="buy",
+                status="canceled",
+                filled_quantity=0.0,
+                average_fill_price=None,
+            )
 
         def reconcile_fills(self, portfolio_store: PortfolioStore) -> BrokerReconciliationResult:
             return BrokerReconciliationResult(
@@ -795,10 +854,11 @@ def test_canary_uses_paper_adapter_when_execution_mode_is_paper(
                 mismatches=[],
             )
 
+    broker = PaperCanaryBroker()
     monkeypatch.setattr(
         broker_canary.AlpacaPaperBrokerAdapter,
         "from_env",
-        classmethod(lambda cls, env=None: PaperCanaryBroker()),
+        classmethod(lambda cls, env=None: broker),
     )
 
     payload = broker_canary.run_canary(
@@ -808,7 +868,18 @@ def test_canary_uses_paper_adapter_when_execution_mode_is_paper(
     )
 
     assert payload["mode"] == "paper"
+    assert payload["order"] == {
+        "client_order_id": broker.submitted[0].client_order_id,
+        "symbol": "SPY",
+        "quantity": 1.0,
+        "side": "buy",
+        "limit_price": 1.0,
+    }
     assert payload["order_status"]["broker_order_id"] == "paper-1"
+    assert broker.cancelled == ["paper-1"]
+    assert payload["cancellation"]["status"] == "passed"
+    assert payload["cancellation"]["post_cancel_order_status"]["status"] == "canceled"
+    assert payload["reconciliation"]["mismatches"] == []
 
 
 def test_canary_writes_artifact_when_paper_submit_is_rejected(
@@ -854,7 +925,145 @@ def test_canary_writes_artifact_when_paper_submit_is_rejected(
     )
 
     assert payload["order_status"]["status"] == "rejected"
+    assert payload["cancellation"]["status"] == "skipped"
+    assert payload["cancellation"]["reason"] == "order_rejected"
     assert payload["reconciliation"]["status"] == "skipped"
+    assert json.loads(artifact.read_text()) == payload
+
+
+def test_canary_records_cancellation_failure_and_writes_artifact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from cli import broker_canary
+
+    class CancelRejectingPaperCanaryBroker:
+        def submit_order(self, order: BrokerOrder) -> BrokerOrderStatus:
+            return BrokerOrderStatus(
+                broker_order_id="paper-1",
+                client_order_id=order.client_order_id,
+                symbol=order.symbol,
+                quantity=order.quantity,
+                side=order.side,
+                status="accepted",
+                filled_quantity=0.0,
+                average_fill_price=None,
+            )
+
+        def cancel_order(self, broker_order_id: str) -> BrokerOrderStatus:
+            return BrokerOrderStatus(
+                broker_order_id=broker_order_id,
+                client_order_id="client-1",
+                symbol="SPY",
+                quantity=1.0,
+                side="buy",
+                status="rejected",
+                filled_quantity=0.0,
+                average_fill_price=None,
+                reason="order already routed",
+            )
+
+        def get_order_status(self, broker_order_id: str) -> BrokerOrderStatus:
+            return BrokerOrderStatus(
+                broker_order_id=broker_order_id,
+                client_order_id="client-1",
+                symbol="SPY",
+                quantity=1.0,
+                side="buy",
+                status="accepted",
+                filled_quantity=0.0,
+                average_fill_price=None,
+            )
+
+        def reconcile_fills(self, portfolio_store: PortfolioStore) -> BrokerReconciliationResult:
+            return BrokerReconciliationResult(
+                broker_positions={},
+                portfolio_positions={},
+                mismatches=[],
+            )
+
+    monkeypatch.setattr(
+        broker_canary.AlpacaPaperBrokerAdapter,
+        "from_env",
+        classmethod(lambda cls, env=None: CancelRejectingPaperCanaryBroker()),
+    )
+    artifact = tmp_path / "cancel-failed-paper-canary.json"
+
+    payload = broker_canary.run_canary(
+        artifact_path=artifact,
+        portfolio_path=tmp_path / "portfolio.json",
+        env={"EXECUTION_MODE": "paper_broker"},
+    )
+
+    assert payload["cancellation"]["status"] == "failed"
+    assert payload["cancellation"]["cancel_order_status"]["status"] == "rejected"
+    assert payload["cancellation"]["post_cancel_order_status"]["status"] == "accepted"
+    assert json.loads(artifact.read_text()) == payload
+
+
+def test_canary_fails_artifact_on_post_cancel_reconciliation_mismatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from cli import broker_canary
+
+    class MismatchingPaperCanaryBroker:
+        def submit_order(self, order: BrokerOrder) -> BrokerOrderStatus:
+            return BrokerOrderStatus(
+                broker_order_id="paper-1",
+                client_order_id=order.client_order_id,
+                symbol=order.symbol,
+                quantity=order.quantity,
+                side=order.side,
+                status="accepted",
+                filled_quantity=0.0,
+                average_fill_price=None,
+            )
+
+        def cancel_order(self, broker_order_id: str) -> BrokerOrderStatus:
+            return BrokerOrderStatus(
+                broker_order_id=broker_order_id,
+                client_order_id="client-1",
+                symbol="SPY",
+                quantity=1.0,
+                side="buy",
+                status="canceled",
+                filled_quantity=0.0,
+                average_fill_price=None,
+            )
+
+        def get_order_status(self, broker_order_id: str) -> BrokerOrderStatus:
+            return BrokerOrderStatus(
+                broker_order_id=broker_order_id,
+                client_order_id="client-1",
+                symbol="SPY",
+                quantity=1.0,
+                side="buy",
+                status="canceled",
+                filled_quantity=0.0,
+                average_fill_price=None,
+            )
+
+        def reconcile_fills(self, portfolio_store: PortfolioStore) -> BrokerReconciliationResult:
+            return BrokerReconciliationResult(
+                broker_positions={"SPY": 1.0},
+                portfolio_positions={"SPY": 0.0},
+                mismatches=[{"symbol": "SPY", "broker_quantity": 1.0, "portfolio_quantity": 0.0}],
+            )
+
+    monkeypatch.setattr(
+        broker_canary.AlpacaPaperBrokerAdapter,
+        "from_env",
+        classmethod(lambda cls, env=None: MismatchingPaperCanaryBroker()),
+    )
+    artifact = tmp_path / "reconcile-failed-paper-canary.json"
+
+    payload = broker_canary.run_canary(
+        artifact_path=artifact,
+        portfolio_path=tmp_path / "portfolio.json",
+        env={"EXECUTION_MODE": "paper_broker"},
+    )
+
+    assert payload["cancellation"]["status"] == "passed"
+    assert payload["reconciliation"]["mismatches"][0]["symbol"] == "SPY"
     assert json.loads(artifact.read_text()) == payload
 
 

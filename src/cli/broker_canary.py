@@ -11,10 +11,18 @@ from typing import Any, Dict, Literal, Mapping
 import typer
 from dotenv import load_dotenv
 
-from portfolio.broker import AlpacaPaperBrokerAdapter, BrokerOrder, SimulatedBrokerAdapter
+from portfolio.broker import (
+    AlpacaPaperBrokerAdapter,
+    BrokerAdapter,
+    BrokerOrder,
+    BrokerOrderStatus,
+    SimulatedBrokerAdapter,
+)
 from portfolio.store import PortfolioStore
 
 app = typer.Typer(help="Run a broker adapter canary and emit an artifact")
+
+_CANCELABLE_STATUSES = {"accepted", "partially_filled", "pending_cancel"}
 
 
 def run_canary(
@@ -24,8 +32,8 @@ def run_canary(
     portfolio_path: str | Path,
     env: Mapping[str, str] | None = None,
     symbol: str = "SPY",
-    quantity: float = 0.0001,
-    limit_price: float = 0.01,
+    quantity: float = 1.0,
+    limit_price: float = 1.0,
 ) -> Dict[str, Any]:
     source_env = env if env is not None else os.environ
     resolved_mode: Literal["mock", "paper"] = (
@@ -50,12 +58,17 @@ def run_canary(
     )
     order_status = broker.submit_order(order)
     if order_status.status == "rejected":
+        cancellation_payload = {
+            "status": "skipped",
+            "reason": "order_rejected",
+        }
         reconciliation_payload: Dict[str, Any] = {
             "status": "skipped",
             "reason": "order_rejected",
             "mismatches": [],
         }
     else:
+        cancellation_payload = _cleanup_order(broker=broker, order_status=order_status)
         reconciliation_payload = broker.reconcile_fills(store).to_dict()
     payload: Dict[str, Any] = {
         "mode": resolved_mode,
@@ -67,12 +80,33 @@ def run_canary(
             "limit_price": order.limit_price,
         },
         "order_status": order_status.to_dict(),
+        "cancellation": cancellation_payload,
         "reconciliation": reconciliation_payload,
     }
     target = Path(artifact_path)
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(json.dumps(payload, indent=2), encoding="utf-8")
     return payload
+
+
+def _cleanup_order(*, broker: BrokerAdapter, order_status: BrokerOrderStatus) -> Dict[str, Any]:
+    if order_status.status == "filled":
+        return {
+            "status": "skipped",
+            "reason": "order_filled",
+        }
+    if order_status.status not in _CANCELABLE_STATUSES:
+        return {
+            "status": "skipped",
+            "reason": f"order_status_{order_status.status}",
+        }
+    cancel_status = broker.cancel_order(order_status.broker_order_id)
+    post_cancel_status = broker.get_order_status(order_status.broker_order_id)
+    return {
+        "status": "passed" if post_cancel_status.status == "canceled" else "failed",
+        "cancel_order_status": cancel_status.to_dict(),
+        "post_cancel_order_status": post_cancel_status.to_dict(),
+    }
 
 
 @app.command()
@@ -93,8 +127,10 @@ def main(
         help="Use 'auto' to follow EXECUTION_MODE, 'mock', or 'paper'.",
     ),
     symbol: str = typer.Option("SPY", "--symbol", help="Canary symbol."),
-    quantity: float = typer.Option(0.0001, "--quantity", help="Tiny canary quantity."),
-    limit_price: float = typer.Option(0.01, "--limit-price", help="Low canary limit price."),
+    quantity: float = typer.Option(1.0, "--quantity", help="Canary quantity."),
+    limit_price: float = typer.Option(
+        1.0, "--limit-price", help="Nonmarketable canary limit price."
+    ),
 ) -> None:
     load_dotenv()
     normalized_mode = mode.strip().lower()
@@ -109,7 +145,7 @@ def main(
         limit_price=limit_price,
     )
     typer.echo(json.dumps(payload, indent=2))
-    if payload["reconciliation"]["mismatches"]:
+    if payload["cancellation"].get("status") == "failed" or payload["reconciliation"]["mismatches"]:
         raise typer.Exit(1)
 
 
