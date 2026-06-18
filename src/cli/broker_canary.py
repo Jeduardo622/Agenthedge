@@ -16,6 +16,7 @@ from portfolio.broker import (
     BrokerAdapter,
     BrokerOrder,
     BrokerOrderStatus,
+    BrokerOrderSubmitUnknown,
     SimulatedBrokerAdapter,
 )
 from portfolio.store import PortfolioStore
@@ -66,6 +67,63 @@ def run_canary(
     reconciliation_payload: Dict[str, Any]
     try:
         order_status = broker.submit_order(order)
+    except BrokerOrderSubmitUnknown as exc:
+        failure_artifact = _write_failure_artifact(
+            artifact_path=artifact_path,
+            phase="order",
+            severity="critical",
+            reason="canary_order_submit_unknown",
+            operator_next_action=(
+                "Inspect the Alpaca paper account for this canary client order id, "
+                "cancel it if present, then rerun the paper rollout packet command."
+            ),
+            context={
+                "client_order_id": exc.client_order_id,
+                "order": _order_context(order),
+                "exception": _exception_context(exc, source_env),
+                "open_canary_orders_after_exception": _open_canary_orders_context(
+                    broker, source_env
+                ),
+            },
+        )
+        failure_artifacts.append(str(failure_artifact))
+        order_status = BrokerOrderStatus(
+            broker_order_id="unknown",
+            client_order_id=order.client_order_id,
+            symbol=order.symbol,
+            quantity=order.quantity,
+            side=order.side,
+            status="rejected",
+            reason="canary_order_submit_unknown",
+        )
+        cancellation_payload = {
+            "status": "failed",
+            "reason": "canary_order_submit_unknown",
+            "open_canary_orders_after_cleanup": None,
+            "alert": {
+                "severity": "critical",
+                "reason": "canary_order_submit_unknown",
+                "operator_next_action": (
+                    "Check the paper broker for this canary client id before retrying."
+                ),
+                "failure_artifact": str(failure_artifact),
+            },
+        }
+        reconciliation_payload = {
+            "status": "skipped",
+            "reason": "order_submit_unknown",
+            "mismatches": [],
+        }
+        payload = _canary_payload(
+            resolved_mode=resolved_mode,
+            order=order,
+            order_status=order_status,
+            cancellation_payload=cancellation_payload,
+            reconciliation_payload=reconciliation_payload,
+            failure_artifacts=failure_artifacts,
+        )
+        _write_artifact(artifact_path, payload)
+        return payload
     except Exception as exc:  # pragma: no cover - exact provider exceptions vary
         failure_artifact = _write_failure_artifact(
             artifact_path=artifact_path,

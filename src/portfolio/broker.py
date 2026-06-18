@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import os
+import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Dict, Literal, Mapping, Protocol
+from typing import Any, Callable, Dict, Literal, Mapping, Protocol
 
 import requests
 
@@ -80,6 +81,14 @@ class BrokerOrderStatus:
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
+
+
+class BrokerOrderSubmitUnknown(RuntimeError):
+    """Raised when a broker submit may have reached Alpaca but cannot be confirmed."""
+
+    def __init__(self, *, client_order_id: str, message: str) -> None:
+        super().__init__(message)
+        self.client_order_id = client_order_id
 
 
 @dataclass(frozen=True)
@@ -263,6 +272,9 @@ class SimulatedBrokerAdapter:
 class AlpacaPaperBrokerAdapter:
     """Alpaca paper-trading adapter enabled only by explicit paper broker config."""
 
+    _SAFE_READ_RETRY_ATTEMPTS = 2
+    _SAFE_READ_RETRY_DELAY_SECONDS = 0.25
+
     def __init__(
         self,
         *,
@@ -270,6 +282,8 @@ class AlpacaPaperBrokerAdapter:
         api_secret_key: str,
         base_url: str = "https://paper-api.alpaca.markets",
         timeout_seconds: float = 10.0,
+        safe_read_retry_attempts: int = _SAFE_READ_RETRY_ATTEMPTS,
+        safe_read_retry_delay_seconds: float = _SAFE_READ_RETRY_DELAY_SECONDS,
     ) -> None:
         if not api_key_id or not api_secret_key:
             raise ValueError(
@@ -281,6 +295,8 @@ class AlpacaPaperBrokerAdapter:
         if "paper-api.alpaca.markets" not in self._base_url:
             raise ValueError("AlpacaPaperBrokerAdapter only accepts the Alpaca paper base URL")
         self._timeout_seconds = timeout_seconds
+        self._safe_read_retry_attempts = max(1, safe_read_retry_attempts)
+        self._safe_read_retry_delay_seconds = max(0.0, safe_read_retry_delay_seconds)
         self._headers = {
             "APCA-API-KEY-ID": api_key_id,
             "APCA-API-SECRET-KEY": api_secret_key,
@@ -292,7 +308,7 @@ class AlpacaPaperBrokerAdapter:
         return self._base_url
 
     def get_account(self) -> BrokerAccount:
-        response = requests.get(
+        response = self._safe_get(
             f"{self._base_url}/v2/account",
             headers=self._headers,
             timeout=self._timeout_seconds,
@@ -308,7 +324,7 @@ class AlpacaPaperBrokerAdapter:
         )
 
     def get_positions(self) -> list[BrokerPosition]:
-        response = requests.get(
+        response = self._safe_get(
             f"{self._base_url}/v2/positions",
             headers=self._headers,
             timeout=self._timeout_seconds,
@@ -323,7 +339,7 @@ class AlpacaPaperBrokerAdapter:
         return positions
 
     def get_market_clock(self) -> BrokerMarketClock:
-        response = requests.get(
+        response = self._safe_get(
             f"{self._base_url}/v2/clock",
             headers=self._headers,
             timeout=self._timeout_seconds,
@@ -340,7 +356,7 @@ class AlpacaPaperBrokerAdapter:
     def list_open_orders(
         self, client_order_id_prefix: str | None = None
     ) -> list[BrokerOrderStatus]:
-        response = requests.get(
+        response = self._safe_get(
             f"{self._base_url}/v2/orders",
             params={"status": "open", "nested": "true"},
             headers=self._headers,
@@ -382,12 +398,24 @@ class AlpacaPaperBrokerAdapter:
         }
         if order.limit_price:
             payload["limit_price"] = str(order.limit_price)
-        response = requests.post(
-            f"{self._base_url}/v2/orders",
-            json=payload,
-            headers=self._headers,
-            timeout=self._timeout_seconds,
-        )
+        try:
+            response = requests.post(
+                f"{self._base_url}/v2/orders",
+                json=payload,
+                headers=self._headers,
+                timeout=self._timeout_seconds,
+            )
+        except requests.exceptions.Timeout:
+            recovered = self.get_order_by_client_order_id(order.client_order_id)
+            if recovered is not None:
+                return recovered
+            raise BrokerOrderSubmitUnknown(
+                client_order_id=order.client_order_id,
+                message=(
+                    "Alpaca order submit timed out and client-order-id recovery "
+                    "did not find the order."
+                ),
+            )
         return self._status_from_response(response)
 
     def cancel_order(self, broker_order_id: str) -> BrokerOrderStatus:
@@ -409,11 +437,22 @@ class AlpacaPaperBrokerAdapter:
         return self._status_from_response(response)
 
     def get_order_status(self, broker_order_id: str) -> BrokerOrderStatus:
-        response = requests.get(
+        response = self._safe_get(
             f"{self._base_url}/v2/orders/{broker_order_id}",
             headers=self._headers,
             timeout=self._timeout_seconds,
         )
+        return self._status_from_response(response)
+
+    def get_order_by_client_order_id(self, client_order_id: str) -> BrokerOrderStatus | None:
+        response = self._safe_get(
+            f"{self._base_url}/v2/orders:by_client_order_id",
+            params={"client_order_id": client_order_id},
+            headers=self._headers,
+            timeout=self._timeout_seconds,
+        )
+        if response.status_code == 404:
+            return None
         return self._status_from_response(response)
 
     def reconcile_fills(self, portfolio_store: PortfolioStore) -> BrokerReconciliationResult:
@@ -423,6 +462,25 @@ class AlpacaPaperBrokerAdapter:
             for symbol, position in portfolio_store.snapshot().positions.items()
         }
         return _compare_positions(broker_positions, portfolio_positions)
+
+    def _safe_get(self, url: str, **kwargs: Any) -> requests.Response:
+        return self._request_with_retries(requests.get, url, **kwargs)
+
+    def _request_with_retries(
+        self,
+        request_fn: Callable[..., requests.Response],
+        url: str,
+        **kwargs: Any,
+    ) -> requests.Response:
+        for attempt in range(self._safe_read_retry_attempts):
+            try:
+                return request_fn(url, **kwargs)
+            except requests.exceptions.RequestException:
+                if attempt + 1 >= self._safe_read_retry_attempts:
+                    raise
+                if self._safe_read_retry_delay_seconds:
+                    time.sleep(self._safe_read_retry_delay_seconds)
+        raise RuntimeError("unreachable retry state")
 
     def _status_from_response(self, response: requests.Response) -> BrokerOrderStatus:
         try:

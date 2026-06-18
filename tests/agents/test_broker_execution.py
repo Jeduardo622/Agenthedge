@@ -17,6 +17,7 @@ from portfolio.broker import (
     BrokerMarketClock,
     BrokerOrder,
     BrokerOrderStatus,
+    BrokerOrderSubmitUnknown,
     BrokerPosition,
     BrokerReconciliationResult,
     SimulatedBrokerAdapter,
@@ -1025,6 +1026,55 @@ def test_canary_writes_redacted_failure_artifact_when_submit_raises(
     assert "secret-123" not in failure_artifact.read_text(encoding="utf-8")
 
 
+def test_canary_writes_submit_unknown_artifact_when_timeout_recovery_cannot_find_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from cli import broker_canary
+
+    class UnknownSubmitPaperCanaryBroker:
+        def submit_order(self, order: BrokerOrder) -> BrokerOrderStatus:
+            raise BrokerOrderSubmitUnknown(
+                client_order_id=order.client_order_id,
+                message="submit timed out and client order was not found",
+            )
+
+        def list_open_orders(
+            self, client_order_id_prefix: str | None = None
+        ) -> List[BrokerOrderStatus]:
+            return []
+
+        def cancel_order(self, broker_order_id: str) -> BrokerOrderStatus:
+            raise AssertionError("cancel_order should not be called after unknown submit")
+
+        def get_order_status(self, broker_order_id: str) -> BrokerOrderStatus:
+            raise AssertionError("get_order_status should not be called after unknown submit")
+
+        def reconcile_fills(self, portfolio_store: PortfolioStore) -> BrokerReconciliationResult:
+            raise AssertionError("reconcile_fills should not run after unknown submit")
+
+    monkeypatch.setattr(
+        broker_canary.AlpacaPaperBrokerAdapter,
+        "from_env",
+        classmethod(lambda cls, env=None: UnknownSubmitPaperCanaryBroker()),
+    )
+    artifact = tmp_path / "submit-unknown-canary.json"
+
+    payload = broker_canary.run_canary(
+        artifact_path=artifact,
+        portfolio_path=tmp_path / "portfolio.json",
+        env={"EXECUTION_MODE": "paper_broker"},
+    )
+
+    assert payload["order_status"]["status"] == "rejected"
+    assert payload["order_status"]["reason"] == "canary_order_submit_unknown"
+    assert payload["cancellation"]["status"] == "failed"
+    failure_artifact = Path(payload["failure_artifacts"][0])
+    failure_payload = json.loads(failure_artifact.read_text(encoding="utf-8"))
+    assert failure_payload["phase"] == "order"
+    assert failure_payload["reason"] == "canary_order_submit_unknown"
+    assert failure_payload["context"]["client_order_id"] == payload["order"]["client_order_id"]
+
+
 def test_canary_records_cancellation_failure_and_writes_artifact(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1363,3 +1413,143 @@ def test_alpaca_paper_adapter_normalizes_versioned_base_url(
     )
 
     assert called_urls == ["https://paper-api.alpaca.markets/v2/orders"]
+
+
+def test_alpaca_paper_adapter_retries_safe_account_reads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: List[str] = []
+
+    class Response:
+        status_code = 200
+        text = ""
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> Dict[str, object]:
+            return {
+                "id": "paper-1",
+                "status": "ACTIVE",
+                "trading_blocked": False,
+            }
+
+    def flaky_get(url: str, **kwargs: object) -> Response:
+        calls.append(url)
+        if len(calls) == 1:
+            import requests
+
+            raise requests.exceptions.ReadTimeout("temporary account timeout")
+        return Response()
+
+    monkeypatch.setattr("portfolio.broker.requests.get", flaky_get)
+    adapter = AlpacaPaperBrokerAdapter(
+        api_key_id="key",
+        api_secret_key="secret",
+        base_url="https://paper-api.alpaca.markets",
+    )
+
+    account = adapter.get_account()
+
+    assert account.account_id == "paper-1"
+    assert len(calls) == 2
+
+
+def test_alpaca_paper_adapter_recovers_submit_timeout_by_client_order_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    post_calls: List[str] = []
+    get_calls: List[Dict[str, object]] = []
+
+    class Response:
+        status_code = 200
+        text = ""
+
+        def json(self) -> Dict[str, object]:
+            return {
+                "id": "paper-1",
+                "client_order_id": "client-timeout-1",
+                "symbol": "SPY",
+                "qty": "1",
+                "side": "buy",
+                "status": "accepted",
+                "filled_qty": "0",
+            }
+
+    def timeout_post(url: str, **kwargs: object) -> Response:
+        post_calls.append(url)
+        import requests
+
+        raise requests.exceptions.ReadTimeout("submit timed out")
+
+    def recover_get(url: str, **kwargs: object) -> Response:
+        get_calls.append({"url": url, "params": kwargs.get("params")})
+        return Response()
+
+    monkeypatch.setattr("portfolio.broker.requests.post", timeout_post)
+    monkeypatch.setattr("portfolio.broker.requests.get", recover_get)
+    adapter = AlpacaPaperBrokerAdapter(
+        api_key_id="key",
+        api_secret_key="secret",
+        base_url="https://paper-api.alpaca.markets",
+    )
+
+    status = adapter.submit_order(
+        BrokerOrder(
+            client_order_id="client-timeout-1",
+            symbol="SPY",
+            quantity=1.0,
+            side="buy",
+            limit_price=1.0,
+        )
+    )
+
+    assert status.status == "accepted"
+    assert status.broker_order_id == "paper-1"
+    assert post_calls == ["https://paper-api.alpaca.markets/v2/orders"]
+    assert get_calls == [
+        {
+            "url": "https://paper-api.alpaca.markets/v2/orders:by_client_order_id",
+            "params": {"client_order_id": "client-timeout-1"},
+        }
+    ]
+
+
+def test_alpaca_paper_adapter_raises_submit_unknown_when_timeout_recovery_misses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Response:
+        status_code = 404
+        text = "not found"
+
+        def json(self) -> Dict[str, object]:
+            return {"message": "order not found"}
+
+    def timeout_post(url: str, **kwargs: object) -> Response:
+        import requests
+
+        raise requests.exceptions.ReadTimeout("submit timed out")
+
+    def missing_get(url: str, **kwargs: object) -> Response:
+        return Response()
+
+    monkeypatch.setattr("portfolio.broker.requests.post", timeout_post)
+    monkeypatch.setattr("portfolio.broker.requests.get", missing_get)
+    adapter = AlpacaPaperBrokerAdapter(
+        api_key_id="key",
+        api_secret_key="secret",
+        base_url="https://paper-api.alpaca.markets",
+    )
+
+    with pytest.raises(BrokerOrderSubmitUnknown) as exc:
+        adapter.submit_order(
+            BrokerOrder(
+                client_order_id="client-missing-1",
+                symbol="SPY",
+                quantity=1.0,
+                side="buy",
+                limit_price=1.0,
+            )
+        )
+
+    assert exc.value.client_order_id == "client-missing-1"
