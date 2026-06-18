@@ -76,6 +76,7 @@ Paper rollout rehearsal:
 - `poetry run python -m cli.paper_rollout_rehearsal --mode auto --artifact-path storage/audit/paper_rollout_rehearsal.json`
 - `poetry run python -m cli.paper_rollout_evidence --artifact-dir storage/audit` validates the latest rehearsal artifact, paper-account and market-hours guardrails, canary cleanup state, and secret redaction; it writes `paper_rollout_evidence_<timestamp>.json` and prints a PR/release handoff summary.
 - `poetry run python -m cli.paper_rollout_gate --evidence storage/audit/paper_rollout_evidence_<timestamp>.json --profile config/promotion-gates/paper_rollout.json` fails closed on stale or incomplete promotion evidence.
+- `poetry run python -m cli.paper_rollout_release_check --artifact-dir storage/audit --profile config/promotion-gates/paper_rollout.json` runs rehearsal, evidence bundling, and the gate in one operator handoff command. Pass `--rehearsal-artifact <path>` to re-check an already captured paper rehearsal artifact through the evidence and gate path without placing a new canary order.
 
 Cutover tooling:
 - `poetry run python scripts/migrate_runtime_state_to_postgres.py --dsn <POSTGRES_DSN>`
