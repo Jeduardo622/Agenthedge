@@ -138,6 +138,78 @@ Escalation steps follow `GOVERNANCE.md` matrix; severe incidents require manual 
 - Reliability evidence: attach failover drill output and latest SLO metric snapshot.
 - Governance evidence: attach break-glass lifecycle test output and runtime startup governance summary log line.
 
+## Paper Rollout Release Checklist
+Use this checklist before promoting broker-paper changes or attaching paper rollout proof to a PR/release packet. The command writes reviewer evidence under `storage/audit/` and prints a compact handoff summary.
+
+### Fresh Paper Rehearsal
+Run this when the release needs new broker-path proof and the environment is intentionally configured for Alpaca paper trading:
+
+```bash
+poetry run python -m cli.paper_rollout_release_check \
+  --artifact-dir storage/audit \
+  --profile config/promotion-gates/paper_rollout.json \
+  --mode paper
+```
+
+Pre-run checks:
+- Confirm `EXECUTION_MODE=paper_broker`.
+- Confirm `ALPACA_API_KEY_ID`, `ALPACA_API_SECRET_KEY`, and `ALPACA_PAPER_BASE_URL` are present in the operator environment or `.env`.
+- Confirm `EXECUTION_REQUIRE_PAPER_ACCOUNT=true`.
+- Confirm the canary symbol, quantity, and limit price are appropriate for a nonmarketable paper canary if overriding defaults.
+- Confirm no manual open canary orders are expected before starting the rehearsal.
+
+Expected pass output:
+- `PAPER_ROLLOUT_RELEASE_PASS <evidence_artifact>`
+- `rehearsal_artifact: storage/audit/paper_rollout_rehearsal_<timestamp>.json`
+- `evidence_artifact: storage/audit/paper_rollout_evidence_<timestamp>.json`
+- `profile: config/promotion-gates/paper_rollout.json`
+
+Attach or paste into the release packet:
+- the four-line pass summary,
+- the evidence artifact path,
+- the source rehearsal artifact path,
+- the commit SHA and operator environment name.
+
+### Existing Artifact Recheck
+Run this when a paper rehearsal already happened and the release only needs to rebuild reviewer evidence or re-apply the gate without placing another canary order:
+
+```bash
+poetry run python -m cli.paper_rollout_release_check \
+  --artifact-dir storage/audit \
+  --rehearsal-artifact storage/audit/paper_rollout_rehearsal_<timestamp>.json \
+  --profile config/promotion-gates/paper_rollout.json
+```
+
+Use `--rehearsal-artifact` for:
+- PR review handoff after an operator has already captured the paper rehearsal artifact,
+- release-note refreshes where the source artifact has not changed,
+- local smoke checks that must not touch broker APIs,
+- rechecking evidence age or required checks after a profile update.
+
+Do not use `--rehearsal-artifact` when the release requires fresh proof of broker acceptance, cancellation, cleanup, or reconciliation.
+
+### Required Evidence
+The gate must pass all required checks in `config/promotion-gates/paper_rollout.json`:
+- rehearsal status is `passed`,
+- canary order was accepted,
+- cancellation passed,
+- post-cancel order status is `canceled`,
+- canary reconciliation has zero mismatches,
+- final reconciliation has zero mismatches,
+- secrets are redacted,
+- account is confirmed as paper,
+- market-hours behavior is explicit,
+- open canary orders after cleanup is zero,
+- cleanup failures include an alert-worthy artifact.
+
+### Failure Handling
+If the helper prints `PAPER_ROLLOUT_RELEASE_FAIL`:
+- Do not promote the broker-paper change.
+- Attach the failure summary plus both artifact paths to the PR/release record.
+- Inspect failed `check.<name>` lines before rerunning.
+- If cleanup failed or open canary orders are nonzero, page the release owner and reconcile/cancel manually in the paper account before any retry.
+- If the failure is stale evidence, rerun with a fresh rehearsal instead of reusing the old artifact.
+
 ### Bootstrap Procedure
 1. `poetry install && poetry shell`
 2. Populate `.env` with API keys + runtime config (tick interval, enabled agents).
