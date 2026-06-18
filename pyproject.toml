@@ -24,7 +24,7 @@ packages = [
 python = "^3.12"
 openai = ">=1.52.0"
 python-dotenv = ">=1.0.1"
-pypdf = ">=6.7.5"
+pypdf = ">=6.13.3"
 requests = ">=2.32.3"
 urllib3 = ">=2.6.3"
 aiohttp = ">=3.13.3"
