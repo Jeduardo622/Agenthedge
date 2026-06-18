@@ -13,6 +13,7 @@ REQUIRED_PREFIXES = ("cli/", "ops/", "observability/", "research_inputs/", "stra
 REQUIRED_PATHS = (
     "cli/broker_canary.py",
     "cli/paper_rollout_evidence.py",
+    "cli/paper_rollout_gate.py",
     "cli/paper_rollout_rehearsal.py",
     "cli/promotion_gate.py",
     "cli/__init__.py",
@@ -23,6 +24,7 @@ REQUIRED_PATHS = (
 REQUIRED_IMPORTS = (
     "cli.broker_canary",
     "cli.paper_rollout_evidence",
+    "cli.paper_rollout_gate",
     "cli.paper_rollout_rehearsal",
     "cli.promotion_gate",
     "ops.scheduler",

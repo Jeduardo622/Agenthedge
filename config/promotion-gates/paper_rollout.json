@@ -1,0 +1,17 @@
+{
+  "description": "Gate profile for paper rollout evidence before broker promotion.",
+  "max_evidence_age_hours": 24,
+  "required_checks": [
+    "rehearsal_status_passed",
+    "canary_order_accepted",
+    "cancellation_passed",
+    "post_cancel_order_canceled",
+    "canary_reconciliation_clean",
+    "final_reconciliation_clean",
+    "secrets_redacted",
+    "paper_account_confirmed",
+    "market_hours_behavior_explicit",
+    "open_canary_orders_zero",
+    "cleanup_failure_alert_artifact"
+  ]
+}
