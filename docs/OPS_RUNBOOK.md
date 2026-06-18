@@ -141,6 +141,15 @@ Escalation steps follow `GOVERNANCE.md` matrix; severe incidents require manual 
 ## Paper Rollout Release Checklist
 Use this checklist before promoting broker-paper changes or attaching paper rollout proof to a PR/release packet. The command writes reviewer evidence under `storage/audit/` and prints a compact handoff summary.
 
+For release handoff, prefer the packet command because it runs the release check and writes copyable Markdown plus JSON packet artifacts:
+
+```bash
+poetry run python -m cli.paper_rollout_packet \
+  --artifact-dir storage/audit \
+  --profile config/promotion-gates/paper_rollout.json \
+  --mode paper
+```
+
 ### Fresh Paper Rehearsal
 Run this when the release needs new broker-path proof and the environment is intentionally configured for Alpaca paper trading:
 
