@@ -149,7 +149,16 @@ poetry run python -m cli.paper_rollout_packet \
   --profile config/promotion-gates/paper_rollout.json \
   --mode paper \
   --environment-name paper-staging \
-  --max-artifact-age-minutes 10
+  --max-artifact-age-minutes 10 \
+  --broker-health-artifact storage/audit/paper_broker_health_<timestamp>.json \
+  --max-broker-health-age-minutes 5
+```
+
+Before preflight or the full packet command, run the read-only paper broker health probe. This checks the Alpaca paper account, clock, positions, and open `broker-canary-` orders without submitting or canceling orders:
+
+```bash
+poetry run python -m cli.paper_broker_health \
+  --artifact-dir storage/audit
 ```
 
 Before the full packet command, run a no-order paper preflight. This validates the paper account, broker URL, market-hours policy, and open canary order state without submitting or canceling a canary:
@@ -178,6 +187,7 @@ poetry run python -m cli.paper_rollout_packet \
 ### Operator Decision Tree
 Can I run fresh paper mode?
 - Run fresh paper mode only when the account is confirmed paper, trading is not blocked, the Alpaca paper URL is configured, `EXECUTION_MODE=paper_broker`, `EXECUTION_REQUIRE_PAPER_ACCOUNT=true`, and no existing `broker-canary-` orders are open.
+- Run fresh paper mode only after `cli.paper_broker_health` passes and its artifact is inside the `--max-broker-health-age-minutes` window.
 - If market-hours guard is enabled and the market is closed, do not run fresh paper mode.
 - If market-hours guard is disabled, confirm the canary remains nonmarketable before running outside market hours.
 
@@ -207,6 +217,27 @@ Expected fail output:
 - `failure_artifact: storage/audit/paper_rollout_rehearsal_preflight_<timestamp>.preflight.failure.json`
 
 Only run the full packet command after preflight-only passes, and run it within the configured freshness window. Preflight-only intentionally skips canary submission, cancellation, and reconciliation, so it does not replace the final packet proof.
+
+### Read-Only Paper Broker Health
+Use `cli.paper_broker_health` before preflight-only and full packet execution. The health probe is read-only and writes `storage/audit/paper_broker_health_<timestamp>.json`.
+
+Expected pass output:
+- `PAPER_BROKER_HEALTH_PASS <health_artifact>`
+- `health_artifact: storage/audit/paper_broker_health_<timestamp>.json`
+
+Expected fail output:
+- `PAPER_BROKER_HEALTH_FAIL <health_artifact>`
+- `reason: <broker_health_reason>`
+- `failure_artifact: storage/audit/paper_broker_health_<timestamp>.broker_health.failure.json`
+
+If broker health fails:
+- Do not run the full packet.
+- Follow the failure artifact `operator_next_action`.
+- For `broker_read_timeout`, retry the health probe before retrying the paper packet.
+- For `broker_rate_limited`, wait for the Alpaca rate-limit window to reset.
+- For `broker_auth_failed`, verify the paper credentials.
+- For `broker_server_error`, wait for Alpaca paper API recovery.
+- For open canary orders, cancel all `broker-canary-` orders and rerun health.
 
 ### Fresh Paper Rehearsal
 Run this when the release needs new broker-path proof and the environment is intentionally configured for Alpaca paper trading:
@@ -240,6 +271,8 @@ Release-check options:
 - `--limit-price`: nonmarketable canary limit price.
 - `--preflight-only`: validate paper broker readiness without submitting a canary order.
 - `--max-artifact-age-minutes`: maximum allowed rehearsal artifact age for promotion evidence.
+- `--broker-health-artifact`: recent read-only paper broker health artifact required before full packet execution.
+- `--max-broker-health-age-minutes`: maximum allowed paper broker health artifact age.
 
 Expected pass output:
 - `PAPER_ROLLOUT_RELEASE_PASS <evidence_artifact>`
