@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -13,7 +14,7 @@ from typer.testing import CliRunner
 def _passing_rehearsal_payload() -> dict[str, Any]:
     return {
         "artifact_type": "paper_rollout_rehearsal",
-        "created_at": "2026-06-18T02:00:00+00:00",
+        "created_at": datetime.now(timezone.utc).isoformat(),
         "environment": {
             "EXECUTION_MODE": "paper_broker",
             "ALPACA_API_KEY_ID": "redacted",
@@ -205,6 +206,37 @@ def test_packet_cli_reports_failure_artifact_paths_when_blocked(tmp_path: Path) 
     assert result.exit_code == 1
     assert "PAPER_ROLLOUT_PACKET_FAIL" in result.output
     assert f"failure_artifact: {failure_path}" in result.output
+
+
+def test_packet_cli_blocks_stale_rehearsal_artifact_and_prints_failure_path(
+    tmp_path: Path,
+) -> None:
+    from cli import paper_rollout_packet
+
+    artifact_dir = tmp_path / "audit"
+    rehearsal_path = artifact_dir / "paper_rollout_rehearsal.json"
+    payload = _passing_rehearsal_payload()
+    payload["created_at"] = "2026-06-18T01:00:00+00:00"
+    _write_json(rehearsal_path, payload)
+
+    result = CliRunner().invoke(
+        paper_rollout_packet.app,
+        [
+            "--artifact-dir",
+            str(artifact_dir),
+            "--rehearsal-artifact",
+            str(rehearsal_path),
+            "--max-artifact-age-minutes",
+            "10",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "PAPER_ROLLOUT_PACKET_FAIL" in result.output
+    assert "rehearsal artifact is stale" in result.output
+    failure_paths = sorted(artifact_dir.glob("paper_rollout_rehearsal*.freshness.failure.json"))
+    assert len(failure_paths) == 1
+    assert f"failure_artifact: {failure_paths[0]}" in result.output
 
 
 def test_packet_cli_turns_startup_config_error_into_blocker_artifacts(

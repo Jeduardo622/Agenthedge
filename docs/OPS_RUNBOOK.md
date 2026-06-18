@@ -148,7 +148,8 @@ poetry run python -m cli.paper_rollout_packet \
   --artifact-dir storage/audit \
   --profile config/promotion-gates/paper_rollout.json \
   --mode paper \
-  --environment-name paper-staging
+  --environment-name paper-staging \
+  --max-artifact-age-minutes 10
 ```
 
 Before the full packet command, run a no-order paper preflight. This validates the paper account, broker URL, market-hours policy, and open canary order state without submitting or canceling a canary:
@@ -159,7 +160,8 @@ poetry run python -m cli.paper_rollout_packet \
   --profile config/promotion-gates/paper_rollout.json \
   --mode paper \
   --environment-name paper-staging \
-  --preflight-only
+  --preflight-only \
+  --max-artifact-age-minutes 10
 ```
 
 ### Paper Broker Operating Contract
@@ -181,6 +183,7 @@ Can I run fresh paper mode?
 
 Should I use `--rehearsal-artifact`?
 - Use `--rehearsal-artifact` when a paper rehearsal already exists and no new broker order should be placed.
+- Only reuse an artifact inside the configured freshness window, defaulting to `--max-artifact-age-minutes 10`.
 - Do not use `--rehearsal-artifact` when fresh proof of account, acceptance, cancellation, cleanup, and reconciliation is required.
 
 What do I do if cleanup fails?
@@ -203,7 +206,7 @@ Expected fail output:
 - `reason: <blocker_reason>`
 - `failure_artifact: storage/audit/paper_rollout_rehearsal_preflight_<timestamp>.preflight.failure.json`
 
-Only run the full packet command after preflight-only passes. Preflight-only intentionally skips canary submission, cancellation, and reconciliation, so it does not replace the final packet proof.
+Only run the full packet command after preflight-only passes, and run it within the configured freshness window. Preflight-only intentionally skips canary submission, cancellation, and reconciliation, so it does not replace the final packet proof.
 
 ### Fresh Paper Rehearsal
 Run this when the release needs new broker-path proof and the environment is intentionally configured for Alpaca paper trading:
@@ -212,7 +215,8 @@ Run this when the release needs new broker-path proof and the environment is int
 poetry run python -m cli.paper_rollout_release_check \
   --artifact-dir storage/audit \
   --profile config/promotion-gates/paper_rollout.json \
-  --mode paper
+  --mode paper \
+  --max-artifact-age-minutes 10
 ```
 
 Pre-run checks:
@@ -235,6 +239,7 @@ Release-check options:
 - `--quantity`: canary quantity.
 - `--limit-price`: nonmarketable canary limit price.
 - `--preflight-only`: validate paper broker readiness without submitting a canary order.
+- `--max-artifact-age-minutes`: maximum allowed rehearsal artifact age for promotion evidence.
 
 Expected pass output:
 - `PAPER_ROLLOUT_RELEASE_PASS <evidence_artifact>`
@@ -255,7 +260,8 @@ Run this when a paper rehearsal already happened and the release only needs to r
 poetry run python -m cli.paper_rollout_release_check \
   --artifact-dir storage/audit \
   --rehearsal-artifact storage/audit/paper_rollout_rehearsal_<timestamp>.json \
-  --profile config/promotion-gates/paper_rollout.json
+  --profile config/promotion-gates/paper_rollout.json \
+  --max-artifact-age-minutes 10
 ```
 
 Use `--rehearsal-artifact` for:
@@ -265,6 +271,8 @@ Use `--rehearsal-artifact` for:
 - rechecking evidence age or required checks after a profile update.
 
 Do not use `--rehearsal-artifact` when the release requires fresh proof of broker acceptance, cancellation, cleanup, or reconciliation.
+
+If a reused artifact is stale or missing `created_at`, the command blocks, writes a `*.freshness.failure.json` artifact under `storage/audit`, and prints the `failure_artifact:` path. Rerun the paper rollout preflight and full packet instead of promoting stale evidence.
 
 ### Required Evidence
 The gate must pass all required checks in `config/promotion-gates/paper_rollout.json`:

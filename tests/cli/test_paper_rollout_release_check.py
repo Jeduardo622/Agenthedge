@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -13,9 +14,11 @@ from typer.testing import CliRunner
 def _evidence_payload(tmp_path: Path, *, status: str = "passed") -> dict[str, Any]:
     evidence_path = tmp_path / "audit" / "paper_rollout_evidence_test.json"
     rehearsal_path = tmp_path / "audit" / "paper_rollout_rehearsal_test.json"
+    now = datetime.now(timezone.utc).isoformat()
     return {
         "artifact_type": "paper_rollout_evidence",
         "status": status,
+        "rehearsal_created_at": now,
         "source_artifact": str(rehearsal_path),
         "evidence_artifact": str(evidence_path),
         "checks": [{"name": "rehearsal_status_passed", "status": status}],
@@ -26,7 +29,7 @@ def _evidence_payload(tmp_path: Path, *, status: str = "passed") -> dict[str, An
 def _rehearsal_payload() -> dict[str, Any]:
     return {
         "artifact_type": "paper_rollout_rehearsal",
-        "created_at": "2026-06-18T02:00:00+00:00",
+        "created_at": datetime.now(timezone.utc).isoformat(),
         "environment": {
             "EXECUTION_MODE": "paper_broker",
             "ALPACA_API_KEY_ID": "redacted",
@@ -62,6 +65,12 @@ def _rehearsal_payload() -> dict[str, Any]:
         "signature": {"algorithm": "sha256", "digest": "abc123"},
         "status": "passed",
     }
+
+
+def _stale_rehearsal_payload() -> dict[str, Any]:
+    payload = _rehearsal_payload()
+    payload["created_at"] = "2026-06-18T01:00:00+00:00"
+    return payload
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -225,6 +234,58 @@ def test_release_check_exits_nonzero_when_gate_fails(tmp_path: Path, monkeypatch
     assert result.exit_code == 1
     assert "PAPER_ROLLOUT_RELEASE_FAIL" in result.output
     assert "- evidence status failed != passed" in result.output
+
+
+def test_release_check_blocks_stale_existing_rehearsal_artifact(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from cli import paper_rollout_release_check
+
+    rehearsal_path = tmp_path / "audit" / "paper_rollout_rehearsal.json"
+    _write_json(rehearsal_path, _stale_rehearsal_payload())
+
+    result = paper_rollout_release_check.run_release_check(
+        artifact_dir=tmp_path / "audit",
+        profile="config/promotion-gates/paper_rollout.json",
+        rehearsal_artifact=rehearsal_path,
+        portfolio_path=tmp_path / "portfolio.json",
+        max_artifact_age_minutes=10,
+        now=paper_rollout_release_check._parse_timestamp("2026-06-18T01:11:00+00:00"),
+    )
+
+    assert result["gate_failures"] == ["rehearsal artifact is stale"]
+    failure_artifacts = result["evidence"]["summary"]["failure_artifacts"]
+    assert len(failure_artifacts) == 1
+    failure_payload = json.loads(Path(failure_artifacts[0]).read_text(encoding="utf-8"))
+    assert failure_payload["reason"] == "rehearsal_artifact_stale"
+    assert failure_payload["severity"] == "critical"
+    assert "rerun the paper rollout" in failure_payload["operator_next_action"].lower()
+
+
+def test_release_check_blocks_existing_rehearsal_artifact_without_timestamp(
+    tmp_path: Path,
+) -> None:
+    from cli import paper_rollout_release_check
+
+    rehearsal_path = tmp_path / "audit" / "paper_rollout_rehearsal.json"
+    payload = _rehearsal_payload()
+    payload.pop("created_at")
+    _write_json(rehearsal_path, payload)
+
+    result = paper_rollout_release_check.run_release_check(
+        artifact_dir=tmp_path / "audit",
+        profile="config/promotion-gates/paper_rollout.json",
+        rehearsal_artifact=rehearsal_path,
+        portfolio_path=tmp_path / "portfolio.json",
+        max_artifact_age_minutes=10,
+        now=paper_rollout_release_check._parse_timestamp("2026-06-18T01:05:00+00:00"),
+    )
+
+    assert result["gate_failures"] == ["rehearsal artifact timestamp is missing or invalid"]
+    failure_payload = json.loads(
+        Path(result["evidence"]["summary"]["failure_artifacts"][0]).read_text(encoding="utf-8")
+    )
+    assert failure_payload["reason"] == "rehearsal_artifact_timestamp_missing"
 
 
 def test_release_check_module_entrypoint_runs_with_mock_mode(tmp_path: Path) -> None:
