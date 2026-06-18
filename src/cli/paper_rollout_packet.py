@@ -64,6 +64,11 @@ def main(
         "--preflight-only",
         help="Validate paper broker preflight without submitting a canary order.",
     ),
+    max_artifact_age_minutes: int = typer.Option(
+        paper_rollout_release_check.DEFAULT_MAX_ARTIFACT_AGE_MINUTES,
+        "--max-artifact-age-minutes",
+        help="Maximum allowed rehearsal artifact age for promotion evidence.",
+    ),
 ) -> None:
     load_dotenv()
     normalized_mode = mode.strip().lower()
@@ -93,6 +98,7 @@ def main(
         limit_price=limit_price,
         commit_sha=commit_sha,
         environment_name=environment_name,
+        max_artifact_age_minutes=max_artifact_age_minutes,
     )
     failures = result["gate_failures"]
     if failures:
@@ -117,6 +123,9 @@ def build_packet(
     limit_price: float = 1.0,
     commit_sha: str | None = None,
     environment_name: str = "unspecified",
+    max_artifact_age_minutes: int | None = (
+        paper_rollout_release_check.DEFAULT_MAX_ARTIFACT_AGE_MINUTES
+    ),
 ) -> dict[str, Any]:
     release = paper_rollout_release_check.run_release_check(
         artifact_dir=artifact_dir,
@@ -127,6 +136,7 @@ def build_packet(
         symbol=symbol,
         quantity=quantity,
         limit_price=limit_price,
+        max_artifact_age_minutes=max_artifact_age_minutes,
     )
     failures = release["gate_failures"]
     if failures:
