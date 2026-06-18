@@ -147,8 +147,63 @@ For release handoff, prefer the packet command because it runs the release check
 poetry run python -m cli.paper_rollout_packet \
   --artifact-dir storage/audit \
   --profile config/promotion-gates/paper_rollout.json \
-  --mode paper
+  --mode paper \
+  --environment-name paper-staging
 ```
+
+Before the full packet command, run a no-order paper preflight. This validates the paper account, broker URL, market-hours policy, and open canary order state without submitting or canceling a canary:
+
+```bash
+poetry run python -m cli.paper_rollout_packet \
+  --artifact-dir storage/audit \
+  --profile config/promotion-gates/paper_rollout.json \
+  --mode paper \
+  --environment-name paper-staging \
+  --preflight-only
+```
+
+### Paper Broker Operating Contract
+- Allowed command modes are `mock`, `paper`, and `auto`.
+- `mock` uses the simulated broker adapter and is valid for local smoke checks only.
+- `paper` must be used for promotion proof and requires `EXECUTION_MODE=paper_broker`.
+- `auto` follows `EXECUTION_MODE`; it resolves to paper only when `EXECUTION_MODE=paper_broker`.
+- Paper promotion requires `EXECUTION_REQUIRE_PAPER_ACCOUNT=true`.
+- Paper promotion requires `ALPACA_PAPER_BASE_URL=https://paper-api.alpaca.markets`.
+- Market-hours behavior must be explicit in the artifact:
+  - `EXECUTION_MARKET_HOURS_GUARD=true` blocks canary submission when the market is closed.
+  - `EXECUTION_MARKET_HOURS_GUARD=false` intentionally allows the default nonmarketable limit-order canary outside market hours.
+
+### Operator Decision Tree
+Can I run fresh paper mode?
+- Run fresh paper mode only when the account is confirmed paper, trading is not blocked, the Alpaca paper URL is configured, `EXECUTION_MODE=paper_broker`, `EXECUTION_REQUIRE_PAPER_ACCOUNT=true`, and no existing `broker-canary-` orders are open.
+- If market-hours guard is enabled and the market is closed, do not run fresh paper mode.
+- If market-hours guard is disabled, confirm the canary remains nonmarketable before running outside market hours.
+
+Should I use `--rehearsal-artifact`?
+- Use `--rehearsal-artifact` when a paper rehearsal already exists and no new broker order should be placed.
+- Do not use `--rehearsal-artifact` when fresh proof of account, acceptance, cancellation, cleanup, and reconciliation is required.
+
+What do I do if cleanup fails?
+- Do not promote the change.
+- Open the failure artifact path printed by the packet command.
+- In the Alpaca paper dashboard or API, find open orders with client order IDs beginning `broker-canary-`.
+- Cancel every remaining paper canary order.
+- Confirm the open canary order count is zero.
+- Rerun the packet command only after cleanup is verified.
+
+### No-Order Paper Preflight
+Use `--preflight-only` before a fresh paper packet when the operator needs to prove configuration and account readiness without placing an order.
+
+Expected pass output:
+- `PAPER_ROLLOUT_PREFLIGHT_PASS <rehearsal_artifact>`
+- `rehearsal_artifact: storage/audit/paper_rollout_rehearsal_preflight_<timestamp>.json`
+
+Expected fail output:
+- `PAPER_ROLLOUT_PREFLIGHT_FAIL <rehearsal_artifact>`
+- `reason: <blocker_reason>`
+- `failure_artifact: storage/audit/paper_rollout_rehearsal_preflight_<timestamp>.preflight.failure.json`
+
+Only run the full packet command after preflight-only passes. Preflight-only intentionally skips canary submission, cancellation, and reconciliation, so it does not replace the final packet proof.
 
 ### Fresh Paper Rehearsal
 Run this when the release needs new broker-path proof and the environment is intentionally configured for Alpaca paper trading:
@@ -164,8 +219,11 @@ Pre-run checks:
 - Confirm `EXECUTION_MODE=paper_broker`.
 - Confirm `ALPACA_API_KEY_ID`, `ALPACA_API_SECRET_KEY`, and `ALPACA_PAPER_BASE_URL` are present in the operator environment or `.env`.
 - Confirm `EXECUTION_REQUIRE_PAPER_ACCOUNT=true`.
+- Confirm `ALPACA_PAPER_BASE_URL=https://paper-api.alpaca.markets`.
+- Confirm the Alpaca account reports paper trading and is not trading-blocked.
 - Confirm the canary symbol, quantity, and limit price are appropriate for a nonmarketable paper canary if overriding defaults.
 - Confirm no manual open canary orders are expected before starting the rehearsal.
+- Confirm the intended market-hours policy: block when closed with `EXECUTION_MARKET_HOURS_GUARD=true`, or intentionally allow the default nonmarketable canary outside market hours with `EXECUTION_MARKET_HOURS_GUARD=false`.
 
 Release-check options:
 - `--artifact-dir`: directory receiving rehearsal and evidence artifacts.
@@ -176,6 +234,7 @@ Release-check options:
 - `--symbol`: canary symbol.
 - `--quantity`: canary quantity.
 - `--limit-price`: nonmarketable canary limit price.
+- `--preflight-only`: validate paper broker readiness without submitting a canary order.
 
 Expected pass output:
 - `PAPER_ROLLOUT_RELEASE_PASS <evidence_artifact>`
@@ -217,7 +276,11 @@ The gate must pass all required checks in `config/promotion-gates/paper_rollout.
 - final reconciliation has zero mismatches,
 - secrets are redacted,
 - account is confirmed as paper,
+- execution mode is confirmed as `paper_broker`,
+- Alpaca broker URL is confirmed as the paper URL,
+- open canary orders before run is zero,
 - market-hours behavior is explicit,
+- market-hours policy is recorded,
 - open canary orders after cleanup is zero,
 - cleanup failures include an alert-worthy artifact.
 
@@ -226,8 +289,15 @@ If the helper prints `PAPER_ROLLOUT_RELEASE_FAIL`:
 - Do not promote the broker-paper change.
 - Attach the failure summary plus both artifact paths to the PR/release record.
 - Inspect failed `check.<name>` lines before rerunning.
+- Open any printed `failure_artifact: <path>` JSON and follow its `operator_next_action`.
 - If cleanup failed or open canary orders are nonzero, page the release owner and reconcile/cancel manually in the paper account before any retry.
 - If the failure is stale evidence, rerun with a fresh rehearsal instead of reusing the old artifact.
+
+Manual remediation for open paper canary orders:
+1. Search the Alpaca paper account for open orders with client order IDs starting `broker-canary-`.
+2. Cancel each open canary order.
+3. Re-query open orders with the same prefix and confirm the count is zero.
+4. Save the cleanup failure artifact and the post-remediation evidence with the release record.
 
 ### Bootstrap Procedure
 1. `poetry install && poetry shell`

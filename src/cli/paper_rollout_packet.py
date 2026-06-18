@@ -11,10 +11,12 @@ from typing import Any, Mapping
 import typer
 from dotenv import load_dotenv
 
-from . import paper_rollout_gate, paper_rollout_rehearsal
-from .paper_rollout_release_check import run_release_check
+from . import paper_rollout_gate, paper_rollout_rehearsal, paper_rollout_release_check
 
-app = typer.Typer(help="Generate paper rollout release packet artifacts")
+app = typer.Typer(
+    help="Generate paper rollout release packet artifacts",
+    pretty_exceptions_show_locals=False,
+)
 
 
 @app.command()
@@ -57,11 +59,29 @@ def main(
         "--environment-name",
         help="Operator environment name for the release packet.",
     ),
+    preflight_only: bool = typer.Option(
+        False,
+        "--preflight-only",
+        help="Validate paper broker preflight without submitting a canary order.",
+    ),
 ) -> None:
     load_dotenv()
     normalized_mode = mode.strip().lower()
     if normalized_mode not in {"auto", "mock", "paper"}:
         raise typer.BadParameter("mode must be 'auto', 'mock', or 'paper'")
+    if preflight_only:
+        result = paper_rollout_release_check.run_preflight_check(
+            artifact_dir=artifact_dir,
+            portfolio_path=portfolio_path,
+            mode=normalized_mode,  # type: ignore[arg-type]
+            symbol=symbol,
+            quantity=quantity,
+            limit_price=limit_price,
+        )
+        _print_preflight_handoff(result)
+        if result["status"] != "passed":
+            raise typer.Exit(1)
+        return
     result = build_packet(
         artifact_dir=artifact_dir,
         profile=profile,
@@ -79,6 +99,8 @@ def main(
         typer.echo("PAPER_ROLLOUT_PACKET_FAIL")
         for failure in failures:
             typer.echo(f"- {failure}")
+        for failure_artifact in _failure_artifacts(result):
+            typer.echo(f"failure_artifact: {failure_artifact}")
         raise typer.Exit(1)
     typer.echo(result["markdown"])
 
@@ -96,7 +118,7 @@ def build_packet(
     commit_sha: str | None = None,
     environment_name: str = "unspecified",
 ) -> dict[str, Any]:
-    release = run_release_check(
+    release = paper_rollout_release_check.run_release_check(
         artifact_dir=artifact_dir,
         profile=profile,
         rehearsal_artifact=rehearsal_artifact,
@@ -175,6 +197,8 @@ def _packet_markdown(packet: Mapping[str, Any]) -> str:
         "canary_reconciliation_mismatches: " f"{summary.get('canary_reconciliation_mismatches')}",
         "final_reconciliation_mismatches: " f"{summary.get('final_reconciliation_mismatches')}",
         f"paper_account_confirmed: {summary.get('paper_account_confirmed')}",
+        f"paper_broker_url_confirmed: {summary.get('paper_broker_url_confirmed')}",
+        "open_canary_orders_before_run: " f"{summary.get('open_canary_orders_before_run')}",
         f"market_is_open: {summary.get('market_is_open')}",
         f"market_hours_guard_enabled: {summary.get('market_hours_guard_enabled')}",
         "open_canary_orders_after_cleanup: " f"{summary.get('open_canary_orders_after_cleanup')}",
@@ -209,6 +233,32 @@ def _mapping(value: Any) -> Mapping[str, Any]:
 
 def _plain_mapping(value: Any) -> dict[str, Any]:
     return dict(value) if isinstance(value, Mapping) else {}
+
+
+def _failure_artifacts(result: Mapping[str, Any]) -> list[str]:
+    release = _mapping(result.get("release"))
+    evidence = _mapping(release.get("evidence"))
+    summary = _mapping(evidence.get("summary"))
+    value = summary.get("failure_artifacts")
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value if item]
+
+
+def _print_preflight_handoff(result: Mapping[str, Any]) -> None:
+    label = (
+        "PAPER_ROLLOUT_PREFLIGHT_PASS"
+        if result.get("status") == "passed"
+        else "PAPER_ROLLOUT_PREFLIGHT_FAIL"
+    )
+    typer.echo(f"{label} {result['rehearsal_artifact']}")
+    typer.echo(f"rehearsal_artifact: {result['rehearsal_artifact']}")
+    preflight = result.get("preflight")
+    preflight_map = preflight if isinstance(preflight, Mapping) else {}
+    if preflight_map.get("reason"):
+        typer.echo(f"reason: {preflight_map.get('reason')}")
+    for failure_artifact in result.get("failure_artifacts") or []:
+        typer.echo(f"failure_artifact: {failure_artifact}")
 
 
 if __name__ == "__main__":
