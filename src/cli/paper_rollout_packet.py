@@ -69,6 +69,16 @@ def main(
         "--max-artifact-age-minutes",
         help="Maximum allowed rehearsal artifact age for promotion evidence.",
     ),
+    broker_health_artifact: str | None = typer.Option(
+        None,
+        "--broker-health-artifact",
+        help="Recent paper broker health artifact required before full packet execution.",
+    ),
+    max_broker_health_age_minutes: int = typer.Option(
+        5,
+        "--max-broker-health-age-minutes",
+        help="Maximum allowed paper broker health artifact age.",
+    ),
 ) -> None:
     load_dotenv()
     normalized_mode = mode.strip().lower()
@@ -99,6 +109,8 @@ def main(
         commit_sha=commit_sha,
         environment_name=environment_name,
         max_artifact_age_minutes=max_artifact_age_minutes,
+        broker_health_artifact=broker_health_artifact,
+        max_broker_health_age_minutes=max_broker_health_age_minutes,
     )
     failures = result["gate_failures"]
     if failures:
@@ -126,7 +138,21 @@ def build_packet(
     max_artifact_age_minutes: int | None = (
         paper_rollout_release_check.DEFAULT_MAX_ARTIFACT_AGE_MINUTES
     ),
+    broker_health_artifact: str | Path | None = None,
+    max_broker_health_age_minutes: int | None = 5,
 ) -> dict[str, Any]:
+    health_failure = _validate_broker_health_artifact(
+        artifact_dir=artifact_dir,
+        broker_health_artifact=broker_health_artifact,
+        max_broker_health_age_minutes=max_broker_health_age_minutes,
+    )
+    if health_failure:
+        return {
+            "gate_failures": [health_failure["message"]],
+            "release": {
+                "evidence": {"summary": {"failure_artifacts": [health_failure["failure_artifact"]]}}
+            },
+        }
     release = paper_rollout_release_check.run_release_check(
         artifact_dir=artifact_dir,
         profile=profile,
@@ -161,6 +187,7 @@ def build_packet(
         "gate_profile": str(profile),
         "source_artifact": evidence["source_artifact"],
         "evidence_artifact": evidence["evidence_artifact"],
+        "broker_health_artifact": str(broker_health_artifact) if broker_health_artifact else None,
         "packet_markdown_artifact": str(markdown_path),
         "packet_json_artifact": str(json_path),
         "summary": dict(summary),
@@ -196,6 +223,7 @@ def _packet_markdown(packet: Mapping[str, Any]) -> str:
         f"gate_profile: {packet['gate_profile']}",
         f"source_artifact: {packet['source_artifact']}",
         f"evidence_artifact: {packet['evidence_artifact']}",
+        f"broker_health_artifact: {packet.get('broker_health_artifact')}",
         f"packet_json_artifact: {packet['packet_json_artifact']}",
         f"packet_markdown_artifact: {packet['packet_markdown_artifact']}",
         "",
@@ -253,6 +281,126 @@ def _failure_artifacts(result: Mapping[str, Any]) -> list[str]:
     if not isinstance(value, list):
         return []
     return [str(item) for item in value if item]
+
+
+def _validate_broker_health_artifact(
+    *,
+    artifact_dir: str | Path,
+    broker_health_artifact: str | Path | None,
+    max_broker_health_age_minutes: int | None,
+) -> dict[str, str] | None:
+    if broker_health_artifact is None:
+        return None
+    health_path = Path(broker_health_artifact)
+    try:
+        payload = json.loads(health_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        failure_path = _write_broker_health_gate_failure(
+            artifact_dir=artifact_dir,
+            broker_health_artifact=str(health_path),
+            reason="broker_health_artifact_unreadable",
+            operator_next_action="Run a fresh paper broker health probe before retrying.",
+            context={"exception": {"type": type(exc).__name__, "message": str(exc)}},
+        )
+        return {
+            "message": "broker health artifact is unreadable",
+            "failure_artifact": str(failure_path),
+        }
+    if not isinstance(payload, Mapping):
+        failure_path = _write_broker_health_gate_failure(
+            artifact_dir=artifact_dir,
+            broker_health_artifact=str(health_path),
+            reason="broker_health_artifact_invalid",
+            operator_next_action="Run a fresh paper broker health probe before retrying.",
+            context={"artifact_type": type(payload).__name__},
+        )
+        return {
+            "message": "broker health artifact is invalid",
+            "failure_artifact": str(failure_path),
+        }
+    if payload.get("status") != "passed":
+        failure_path = _write_broker_health_gate_failure(
+            artifact_dir=artifact_dir,
+            broker_health_artifact=str(health_path),
+            reason="broker_health_not_passed",
+            operator_next_action="Resolve broker health blockers before running the full packet.",
+            context={"status": payload.get("status"), "reason": payload.get("reason")},
+        )
+        return {
+            "message": "broker health artifact did not pass",
+            "failure_artifact": str(failure_path),
+        }
+    if payload.get("read_only") is not True:
+        failure_path = _write_broker_health_gate_failure(
+            artifact_dir=artifact_dir,
+            broker_health_artifact=str(health_path),
+            reason="broker_health_not_read_only",
+            operator_next_action="Run the read-only paper broker health probe before retrying.",
+            context={"read_only": payload.get("read_only")},
+        )
+        return {
+            "message": "broker health artifact is not read-only",
+            "failure_artifact": str(failure_path),
+        }
+    timestamp = (
+        paper_rollout_release_check._parse_timestamp(str(payload.get("created_at")))
+        if payload.get("created_at")
+        else None
+    )
+    if timestamp is None:
+        failure_path = _write_broker_health_gate_failure(
+            artifact_dir=artifact_dir,
+            broker_health_artifact=str(health_path),
+            reason="broker_health_timestamp_missing",
+            operator_next_action="Run a fresh paper broker health probe before retrying.",
+            context={"created_at": payload.get("created_at")},
+        )
+        return {
+            "message": "broker health artifact timestamp is missing or invalid",
+            "failure_artifact": str(failure_path),
+        }
+    if max_broker_health_age_minutes is not None:
+        age_seconds = (datetime.now(timezone.utc) - timestamp).total_seconds()
+        if age_seconds > max_broker_health_age_minutes * 60:
+            failure_path = _write_broker_health_gate_failure(
+                artifact_dir=artifact_dir,
+                broker_health_artifact=str(health_path),
+                reason="broker_health_artifact_stale",
+                operator_next_action="Run a fresh paper broker health probe before retrying.",
+                context={
+                    "created_at": timestamp.isoformat(),
+                    "max_broker_health_age_minutes": max_broker_health_age_minutes,
+                    "age_seconds": age_seconds,
+                },
+            )
+            return {
+                "message": "broker health artifact is stale",
+                "failure_artifact": str(failure_path),
+            }
+    return None
+
+
+def _write_broker_health_gate_failure(
+    *,
+    artifact_dir: str | Path,
+    broker_health_artifact: str,
+    reason: str,
+    operator_next_action: str,
+    context: Mapping[str, Any],
+) -> Path:
+    source = Path(broker_health_artifact)
+    target = Path(artifact_dir) / f"{source.stem}.health.failure.json"
+    payload = {
+        "artifact_type": "paper_rollout_failure",
+        "phase": "broker_health",
+        "severity": "critical",
+        "reason": reason,
+        "operator_next_action": operator_next_action,
+        "context": {"broker_health_artifact": broker_health_artifact, **dict(context)},
+    }
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    return target
 
 
 def _print_preflight_handoff(result: Mapping[str, Any]) -> None:

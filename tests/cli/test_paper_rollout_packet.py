@@ -57,6 +57,26 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.write_text(json.dumps(payload), encoding="utf-8")
 
 
+def _broker_health_payload(*, created_at: str | None = None) -> dict[str, Any]:
+    return {
+        "artifact_type": "paper_broker_health",
+        "created_at": created_at or datetime.now(timezone.utc).isoformat(),
+        "status": "passed",
+        "read_only": True,
+        "broker_base_url": "https://paper-api.alpaca.markets",
+        "account": {
+            "account_id": "paper-1",
+            "status": "ACTIVE",
+            "is_paper": True,
+            "trading_blocked": False,
+        },
+        "market_clock": {"is_open": True},
+        "position_count": 0,
+        "open_canary_orders": 0,
+        "failure_artifacts": [],
+    }
+
+
 def _run_cli_module(args: list[str]) -> subprocess.CompletedProcess[str]:
     repo_root = Path(__file__).resolve().parents[2]
     src_path = str(repo_root / "src")
@@ -237,6 +257,77 @@ def test_packet_cli_blocks_stale_rehearsal_artifact_and_prints_failure_path(
     failure_paths = sorted(artifact_dir.glob("paper_rollout_rehearsal*.freshness.failure.json"))
     assert len(failure_paths) == 1
     assert f"failure_artifact: {failure_paths[0]}" in result.output
+
+
+def test_packet_cli_blocks_stale_broker_health_artifact_and_prints_failure_path(
+    tmp_path: Path,
+) -> None:
+    from cli import paper_rollout_packet
+
+    artifact_dir = tmp_path / "audit"
+    rehearsal_path = artifact_dir / "paper_rollout_rehearsal.json"
+    health_path = artifact_dir / "paper_broker_health.json"
+    _write_json(rehearsal_path, _passing_rehearsal_payload())
+    _write_json(
+        health_path,
+        _broker_health_payload(created_at="2026-06-18T01:00:00+00:00"),
+    )
+
+    result = CliRunner().invoke(
+        paper_rollout_packet.app,
+        [
+            "--artifact-dir",
+            str(artifact_dir),
+            "--rehearsal-artifact",
+            str(rehearsal_path),
+            "--broker-health-artifact",
+            str(health_path),
+            "--max-broker-health-age-minutes",
+            "5",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "PAPER_ROLLOUT_PACKET_FAIL" in result.output
+    assert "broker health artifact is stale" in result.output
+    failure_paths = sorted(artifact_dir.glob("paper_broker_health*.health.failure.json"))
+    assert len(failure_paths) == 1
+    assert f"failure_artifact: {failure_paths[0]}" in result.output
+
+
+def test_packet_build_passes_with_fresh_broker_health_artifact(tmp_path: Path, monkeypatch) -> None:
+    from cli import paper_rollout_packet
+
+    artifact_dir = tmp_path / "audit"
+    health_path = artifact_dir / "paper_broker_health.json"
+    _write_json(health_path, _broker_health_payload())
+
+    monkeypatch.setattr(
+        paper_rollout_packet.paper_rollout_release_check,
+        "run_release_check",
+        lambda **_: {
+            "gate_failures": [],
+            "evidence": {
+                "source_artifact": str(artifact_dir / "paper_rollout_rehearsal.json"),
+                "evidence_artifact": str(artifact_dir / "paper_rollout_evidence.json"),
+                "summary": {"rehearsal_status": "passed"},
+                "checks": [{"name": "rehearsal_status_passed", "status": "passed"}],
+            },
+        },
+    )
+
+    result = paper_rollout_packet.build_packet(
+        artifact_dir=artifact_dir,
+        profile="config/promotion-gates/paper_rollout.json",
+        portfolio_path=tmp_path / "portfolio.json",
+        broker_health_artifact=health_path,
+        max_broker_health_age_minutes=5,
+        commit_sha="abc123",
+        environment_name="paper-staging",
+    )
+
+    assert result["gate_failures"] == []
+    assert result["packet"]["broker_health_artifact"] == str(health_path)
 
 
 def test_packet_cli_turns_startup_config_error_into_blocker_artifacts(
