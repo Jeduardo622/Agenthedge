@@ -43,11 +43,29 @@ def main(
         "--limit-price",
         help="Nonmarketable canary limit price.",
     ),
+    preflight_only: bool = typer.Option(
+        False,
+        "--preflight-only",
+        help="Validate paper broker preflight without submitting a canary order.",
+    ),
 ) -> None:
     load_dotenv()
     normalized_mode = mode.strip().lower()
     if normalized_mode not in {"auto", "mock", "paper"}:
         raise typer.BadParameter("mode must be 'auto', 'mock', or 'paper'")
+    if preflight_only:
+        result = run_preflight_check(
+            artifact_dir=artifact_dir,
+            portfolio_path=portfolio_path,
+            mode=normalized_mode,  # type: ignore[arg-type]
+            symbol=symbol,
+            quantity=quantity,
+            limit_price=limit_price,
+        )
+        _print_preflight_handoff(result)
+        if result["status"] != "passed":
+            raise typer.Exit(1)
+        return
     evidence = run_release_check(
         artifact_dir=artifact_dir,
         profile=profile,
@@ -97,12 +115,66 @@ def run_release_check(
     }
 
 
+def run_preflight_check(
+    *,
+    artifact_dir: str | Path,
+    portfolio_path: str | Path,
+    mode: paper_rollout_rehearsal.RehearsalMode = "auto",
+    symbol: str = "SPY",
+    quantity: float = 1.0,
+    limit_price: float = 1.0,
+) -> dict[str, Any]:
+    artifact_root = Path(artifact_dir)
+    artifact_root.mkdir(parents=True, exist_ok=True)
+    source_path = artifact_root / f"paper_rollout_rehearsal_preflight_{_timestamp()}.json"
+    payload = paper_rollout_rehearsal.run_rehearsal(
+        mode=mode,
+        artifact_path=source_path,
+        portfolio_path=portfolio_path,
+        symbol=symbol,
+        quantity=quantity,
+        limit_price=limit_price,
+        preflight_only=True,
+    )
+    phases = payload.get("phases")
+    phase_map = phases if isinstance(phases, Mapping) else {}
+    preflight = phase_map.get("preflight")
+    return {
+        "status": payload.get("status"),
+        "rehearsal_artifact": str(source_path),
+        "failure_artifacts": list(payload.get("failure_artifacts") or []),
+        "preflight": dict(preflight) if isinstance(preflight, Mapping) else {},
+    }
+
+
 def _print_handoff(label: str, result: Mapping[str, Any]) -> None:
     evidence = result["evidence"]
     typer.echo(f"{label} {evidence['evidence_artifact']}")
     typer.echo(f"rehearsal_artifact: {evidence['source_artifact']}")
     typer.echo(f"evidence_artifact: {evidence['evidence_artifact']}")
     typer.echo(f"profile: {result['profile']}")
+
+
+def _print_preflight_handoff(result: Mapping[str, Any]) -> None:
+    label = (
+        "PAPER_ROLLOUT_PREFLIGHT_PASS"
+        if result.get("status") == "passed"
+        else "PAPER_ROLLOUT_PREFLIGHT_FAIL"
+    )
+    typer.echo(f"{label} {result['rehearsal_artifact']}")
+    typer.echo(f"rehearsal_artifact: {result['rehearsal_artifact']}")
+    preflight = result.get("preflight")
+    preflight_map = preflight if isinstance(preflight, Mapping) else {}
+    if preflight_map.get("reason"):
+        typer.echo(f"reason: {preflight_map.get('reason')}")
+    for failure_artifact in result.get("failure_artifacts") or []:
+        typer.echo(f"failure_artifact: {failure_artifact}")
+
+
+def _timestamp() -> str:
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
 
 if __name__ == "__main__":

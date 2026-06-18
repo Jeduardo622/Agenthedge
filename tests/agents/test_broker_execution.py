@@ -69,6 +69,22 @@ class RecordingBroker:
     def get_order_status(self, broker_order_id: str) -> BrokerOrderStatus:
         return self.submit_status
 
+    def list_open_orders(
+        self, client_order_id_prefix: str | None = None
+    ) -> List[BrokerOrderStatus]:
+        statuses = [
+            status
+            for status in [self.submit_status]
+            if status.status in {"accepted", "partially_filled", "pending_cancel"}
+        ]
+        if client_order_id_prefix is None:
+            return statuses
+        return [
+            status
+            for status in statuses
+            if status.client_order_id.startswith(client_order_id_prefix)
+        ]
+
     def reconcile_fills(self, portfolio_store: PortfolioStore) -> BrokerReconciliationResult:
         return self.reconcile_result
 
@@ -120,6 +136,22 @@ class SequenceStatusBroker:
         if self.statuses:
             return self.statuses.pop(0)
         return self.submit_status
+
+    def list_open_orders(
+        self, client_order_id_prefix: str | None = None
+    ) -> List[BrokerOrderStatus]:
+        statuses = [
+            status
+            for status in [self.submit_status, *self.statuses]
+            if status.status in {"accepted", "partially_filled", "pending_cancel"}
+        ]
+        if client_order_id_prefix is None:
+            return statuses
+        return [
+            status
+            for status in statuses
+            if status.client_order_id.startswith(client_order_id_prefix)
+        ]
 
     def reconcile_fills(self, portfolio_store: PortfolioStore) -> BrokerReconciliationResult:
         return BrokerReconciliationResult(
@@ -847,6 +879,11 @@ def test_canary_uses_paper_adapter_when_execution_mode_is_paper(
                 average_fill_price=None,
             )
 
+        def list_open_orders(
+            self, client_order_id_prefix: str | None = None
+        ) -> List[BrokerOrderStatus]:
+            return []
+
         def reconcile_fills(self, portfolio_store: PortfolioStore) -> BrokerReconciliationResult:
             return BrokerReconciliationResult(
                 broker_positions={},
@@ -908,6 +945,11 @@ def test_canary_writes_artifact_when_paper_submit_is_rejected(
         def get_order_status(self, broker_order_id: str) -> BrokerOrderStatus:
             raise AssertionError("get_order_status should not be called by canary")
 
+        def list_open_orders(
+            self, client_order_id_prefix: str | None = None
+        ) -> List[BrokerOrderStatus]:
+            return []
+
         def reconcile_fills(self, portfolio_store: PortfolioStore) -> BrokerReconciliationResult:
             raise AssertionError("reconcile_fills should not run after rejected submit")
 
@@ -929,6 +971,58 @@ def test_canary_writes_artifact_when_paper_submit_is_rejected(
     assert payload["cancellation"]["reason"] == "order_rejected"
     assert payload["reconciliation"]["status"] == "skipped"
     assert json.loads(artifact.read_text()) == payload
+
+
+def test_canary_writes_redacted_failure_artifact_when_submit_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from cli import broker_canary
+
+    class TimeoutPaperCanaryBroker:
+        def submit_order(self, order: BrokerOrder) -> BrokerOrderStatus:
+            raise TimeoutError("submit timed out with secret-123")
+
+        def list_open_orders(
+            self, client_order_id_prefix: str | None = None
+        ) -> List[BrokerOrderStatus]:
+            return []
+
+        def cancel_order(self, broker_order_id: str) -> BrokerOrderStatus:
+            raise AssertionError("cancel_order should not be called after submit exception")
+
+        def get_order_status(self, broker_order_id: str) -> BrokerOrderStatus:
+            raise AssertionError("get_order_status should not be called after submit exception")
+
+        def reconcile_fills(self, portfolio_store: PortfolioStore) -> BrokerReconciliationResult:
+            raise AssertionError("reconcile_fills should not run after submit exception")
+
+    monkeypatch.setattr(
+        broker_canary.AlpacaPaperBrokerAdapter,
+        "from_env",
+        classmethod(lambda cls, env=None: TimeoutPaperCanaryBroker()),
+    )
+    artifact = tmp_path / "submit-exception-canary.json"
+
+    payload = broker_canary.run_canary(
+        artifact_path=artifact,
+        portfolio_path=tmp_path / "portfolio.json",
+        env={
+            "EXECUTION_MODE": "paper_broker",
+            "ALPACA_API_SECRET_KEY": "secret-123",
+        },
+    )
+
+    assert payload["order_status"]["status"] == "rejected"
+    assert payload["order_status"]["reason"] == "canary_order_submit_exception"
+    assert payload["cancellation"]["status"] == "failed"
+    assert payload["reconciliation"]["status"] == "skipped"
+    failure_artifact = Path(payload["failure_artifacts"][0])
+    failure_payload = json.loads(failure_artifact.read_text(encoding="utf-8"))
+    assert failure_payload["phase"] == "order"
+    assert failure_payload["reason"] == "canary_order_submit_exception"
+    assert failure_payload["context"]["exception"]["type"] == "TimeoutError"
+    assert "secret-123" not in artifact.read_text(encoding="utf-8")
+    assert "secret-123" not in failure_artifact.read_text(encoding="utf-8")
 
 
 def test_canary_records_cancellation_failure_and_writes_artifact(
@@ -974,6 +1068,22 @@ def test_canary_records_cancellation_failure_and_writes_artifact(
                 average_fill_price=None,
             )
 
+        def list_open_orders(
+            self, client_order_id_prefix: str | None = None
+        ) -> List[BrokerOrderStatus]:
+            return [
+                BrokerOrderStatus(
+                    broker_order_id="paper-1",
+                    client_order_id="client-1",
+                    symbol="SPY",
+                    quantity=1.0,
+                    side="buy",
+                    status="accepted",
+                    filled_quantity=0.0,
+                    average_fill_price=None,
+                )
+            ]
+
         def reconcile_fills(self, portfolio_store: PortfolioStore) -> BrokerReconciliationResult:
             return BrokerReconciliationResult(
                 broker_positions={},
@@ -997,7 +1107,87 @@ def test_canary_records_cancellation_failure_and_writes_artifact(
     assert payload["cancellation"]["status"] == "failed"
     assert payload["cancellation"]["cancel_order_status"]["status"] == "rejected"
     assert payload["cancellation"]["post_cancel_order_status"]["status"] == "accepted"
+    assert payload["cancellation"]["open_canary_orders_after_cleanup"] == 1
+    assert payload["cancellation"]["alert"]["failure_artifact"]
     assert json.loads(artifact.read_text()) == payload
+
+
+def test_canary_fails_cleanup_when_open_query_finds_lingering_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from cli import broker_canary
+
+    class LingeringOpenOrderBroker:
+        def __init__(self) -> None:
+            self.client_order_id = ""
+
+        def submit_order(self, order: BrokerOrder) -> BrokerOrderStatus:
+            self.client_order_id = order.client_order_id
+            return BrokerOrderStatus(
+                broker_order_id="paper-1",
+                client_order_id=order.client_order_id,
+                symbol=order.symbol,
+                quantity=order.quantity,
+                side=order.side,
+                status="accepted",
+            )
+
+        def cancel_order(self, broker_order_id: str) -> BrokerOrderStatus:
+            return BrokerOrderStatus(
+                broker_order_id=broker_order_id,
+                client_order_id=self.client_order_id,
+                symbol="SPY",
+                quantity=1.0,
+                side="buy",
+                status="canceled",
+            )
+
+        def get_order_status(self, broker_order_id: str) -> BrokerOrderStatus:
+            return BrokerOrderStatus(
+                broker_order_id=broker_order_id,
+                client_order_id=self.client_order_id,
+                symbol="SPY",
+                quantity=1.0,
+                side="buy",
+                status="canceled",
+            )
+
+        def list_open_orders(
+            self, client_order_id_prefix: str | None = None
+        ) -> List[BrokerOrderStatus]:
+            return [
+                BrokerOrderStatus(
+                    broker_order_id="paper-still-open",
+                    client_order_id=self.client_order_id,
+                    symbol="SPY",
+                    quantity=1.0,
+                    side="buy",
+                    status="accepted",
+                )
+            ]
+
+        def reconcile_fills(self, portfolio_store: PortfolioStore) -> BrokerReconciliationResult:
+            return BrokerReconciliationResult(
+                broker_positions={},
+                portfolio_positions={},
+                mismatches=[],
+            )
+
+    monkeypatch.setattr(
+        broker_canary.AlpacaPaperBrokerAdapter,
+        "from_env",
+        classmethod(lambda cls, env=None: LingeringOpenOrderBroker()),
+    )
+
+    payload = broker_canary.run_canary(
+        artifact_path=tmp_path / "lingering-open.json",
+        portfolio_path=tmp_path / "portfolio.json",
+        env={"EXECUTION_MODE": "paper_broker"},
+    )
+
+    assert payload["cancellation"]["status"] == "failed"
+    assert payload["cancellation"]["open_canary_orders_after_cleanup"] == 1
+    assert payload["cancellation"]["alert"]["reason"] == "canary_cleanup_failed"
 
 
 def test_canary_fails_artifact_on_post_cancel_reconciliation_mismatch(
@@ -1041,6 +1231,11 @@ def test_canary_fails_artifact_on_post_cancel_reconciliation_mismatch(
                 filled_quantity=0.0,
                 average_fill_price=None,
             )
+
+        def list_open_orders(
+            self, client_order_id_prefix: str | None = None
+        ) -> List[BrokerOrderStatus]:
+            return []
 
         def reconcile_fills(self, portfolio_store: PortfolioStore) -> BrokerReconciliationResult:
             return BrokerReconciliationResult(

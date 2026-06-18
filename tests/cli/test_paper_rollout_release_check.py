@@ -36,7 +36,15 @@ def _rehearsal_payload() -> dict[str, Any]:
         "phases": {
             "preflight": {
                 "account": {"is_paper": True},
+                "broker_base_url_confirmed": True,
+                "execution_mode_confirmed": True,
                 "market_clock": {"is_open": False},
+                "market_hours_policy": {
+                    "recorded": True,
+                    "policy": "allow_nonmarketable_canary_outside_market_hours",
+                    "status": "allowed",
+                },
+                "open_canary_orders_before_run": 0,
                 "safety": {"market_hours_guard_enabled": False},
             },
             "canary": {
@@ -142,6 +150,49 @@ def test_release_check_runs_rehearsal_evidence_and_gate(tmp_path: Path, monkeypa
     assert calls["build_evidence"]["limit_price"] == 1.25
     assert calls["gate_payload"] == evidence
     assert calls["profile"] == "config/promotion-gates/paper_rollout.json"
+
+
+def test_release_check_preflight_only_writes_rehearsal_without_evidence(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from cli import paper_rollout_release_check
+
+    calls: dict[str, Any] = {}
+
+    def fake_run_rehearsal(**kwargs: Any) -> dict[str, Any]:
+        calls["run_rehearsal"] = kwargs
+        payload = {
+            "artifact_type": "paper_rollout_rehearsal",
+            "status": "passed",
+            "preflight_only": True,
+            "failure_artifacts": [],
+            "phases": {"preflight": {"status": "passed"}},
+        }
+        Path(kwargs["artifact_path"]).parent.mkdir(parents=True, exist_ok=True)
+        Path(kwargs["artifact_path"]).write_text(json.dumps(payload), encoding="utf-8")
+        return payload
+
+    monkeypatch.setattr(
+        paper_rollout_release_check.paper_rollout_rehearsal,
+        "run_rehearsal",
+        fake_run_rehearsal,
+    )
+
+    result = paper_rollout_release_check.run_preflight_check(
+        artifact_dir=tmp_path / "audit",
+        portfolio_path=tmp_path / "portfolio.json",
+        mode="paper",
+        symbol="SPY",
+        quantity=1.0,
+        limit_price=1.0,
+    )
+
+    assert result["status"] == "passed"
+    assert result["failure_artifacts"] == []
+    assert result["preflight"] == {"status": "passed"}
+    assert Path(result["rehearsal_artifact"]).exists()
+    assert calls["run_rehearsal"]["preflight_only"] is True
+    assert calls["run_rehearsal"]["mode"] == "paper"
 
 
 def test_release_check_exits_nonzero_when_gate_fails(tmp_path: Path, monkeypatch) -> None:

@@ -169,9 +169,28 @@ def _validate_rehearsal(payload: Mapping[str, Any]) -> list[Dict[str, Any]]:
             actual=account.get("is_paper"),
         ),
         _check(
+            "execution_mode_paper_broker",
+            preflight.get("execution_mode_confirmed") is True,
+            actual=preflight.get("execution_mode_confirmed"),
+        ),
+        _check(
+            "paper_broker_url_confirmed",
+            preflight.get("broker_base_url_confirmed") is True,
+            actual=preflight.get("broker_base_url_confirmed"),
+        ),
+        _check(
+            "open_canary_orders_before_zero",
+            preflight.get("open_canary_orders_before_run") == 0,
+            actual=preflight.get("open_canary_orders_before_run"),
+        ),
+        _check(
             "market_hours_behavior_explicit",
             isinstance(market_clock.get("is_open"), bool)
             and isinstance(safety.get("market_hours_guard_enabled"), bool),
+        ),
+        _check(
+            "market_hours_policy_recorded",
+            _mapping(preflight.get("market_hours_policy")).get("recorded") is True,
         ),
         _check(
             "open_canary_orders_zero",
@@ -213,9 +232,13 @@ def _summary(payload: Mapping[str, Any]) -> Dict[str, Any]:
             _list(_mapping(phases.get("reconciliation")).get("mismatches"))
         ),
         "paper_account_confirmed": account.get("is_paper"),
+        "paper_broker_url_confirmed": preflight.get("broker_base_url_confirmed"),
+        "open_canary_orders_before_run": preflight.get("open_canary_orders_before_run"),
+        "market_hours_policy": _mapping(preflight.get("market_hours_policy")),
         "market_is_open": market_clock.get("is_open"),
         "market_hours_guard_enabled": safety.get("market_hours_guard_enabled"),
         "open_canary_orders_after_cleanup": _open_canary_orders_after_cleanup(cancellation),
+        "failure_artifacts": _list(payload.get("failure_artifacts")),
     }
 
 
@@ -279,11 +302,15 @@ def _print_handoff(evidence: Mapping[str, Any]) -> None:
     )
     typer.echo(f"final_reconciliation_mismatches: {summary.get('final_reconciliation_mismatches')}")
     typer.echo(f"paper_account_confirmed: {summary.get('paper_account_confirmed')}")
+    typer.echo(f"paper_broker_url_confirmed: {summary.get('paper_broker_url_confirmed')}")
+    typer.echo(f"open_canary_orders_before_run: {summary.get('open_canary_orders_before_run')}")
     typer.echo(f"market_is_open: {summary.get('market_is_open')}")
     typer.echo(f"market_hours_guard_enabled: {summary.get('market_hours_guard_enabled')}")
     typer.echo(
         f"open_canary_orders_after_cleanup: " f"{summary.get('open_canary_orders_after_cleanup')}"
     )
+    for failure_artifact in _list(summary.get("failure_artifacts")):
+        typer.echo(f"failure_artifact: {failure_artifact}")
     typer.echo(f"evidence_artifact: {evidence['evidence_artifact']}")
     failed = [check["name"] for check in evidence["checks"] if check["status"] == "failed"]
     if failed:

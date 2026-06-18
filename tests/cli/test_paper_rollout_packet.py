@@ -23,7 +23,15 @@ def _passing_rehearsal_payload() -> dict[str, Any]:
         "phases": {
             "preflight": {
                 "account": {"is_paper": True},
+                "broker_base_url_confirmed": True,
+                "execution_mode_confirmed": True,
                 "market_clock": {"is_open": False},
+                "market_hours_policy": {
+                    "recorded": True,
+                    "policy": "allow_nonmarketable_canary_outside_market_hours",
+                    "status": "allowed",
+                },
+                "open_canary_orders_before_run": 0,
                 "safety": {"market_hours_guard_enabled": False},
             },
             "canary": {
@@ -118,7 +126,11 @@ def test_packet_cli_writes_release_ready_markdown_and_json(tmp_path: Path) -> No
         "final_reconciliation_clean",
         "secrets_redacted",
         "paper_account_confirmed",
+        "execution_mode_paper_broker",
+        "paper_broker_url_confirmed",
+        "open_canary_orders_before_zero",
         "market_hours_behavior_explicit",
+        "market_hours_policy_recorded",
         "open_canary_orders_zero",
         "cleanup_failure_alert_artifact",
     }
@@ -156,6 +168,209 @@ def test_packet_cli_exits_nonzero_when_gate_fails(tmp_path: Path, monkeypatch) -
     assert "evidence status failed != passed" in result.output
     assert not sorted(artifact_dir.glob("paper_rollout_packet_*.json"))
     assert not sorted(artifact_dir.glob("paper_rollout_packet_*.md"))
+
+
+def test_packet_cli_reports_failure_artifact_paths_when_blocked(tmp_path: Path) -> None:
+    from cli import paper_rollout_packet
+
+    artifact_dir = tmp_path / "audit"
+    failure_path = artifact_dir / "rollout.preflight.failure.json"
+    rehearsal_path = artifact_dir / "paper_rollout_rehearsal.json"
+    payload = _passing_rehearsal_payload()
+    payload["status"] = "failed"
+    payload["failure_artifacts"] = [str(failure_path)]
+    payload["phases"]["preflight"]["account"]["is_paper"] = False
+    _write_json(rehearsal_path, payload)
+    _write_json(
+        failure_path,
+        {
+            "artifact_type": "paper_rollout_failure",
+            "phase": "preflight",
+            "severity": "critical",
+            "reason": "paper_account_required",
+            "operator_next_action": "Verify paper account credentials.",
+        },
+    )
+
+    result = CliRunner().invoke(
+        paper_rollout_packet.app,
+        [
+            "--artifact-dir",
+            str(artifact_dir),
+            "--rehearsal-artifact",
+            str(rehearsal_path),
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "PAPER_ROLLOUT_PACKET_FAIL" in result.output
+    assert f"failure_artifact: {failure_path}" in result.output
+
+
+def test_packet_cli_turns_startup_config_error_into_blocker_artifacts(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from cli import paper_rollout_packet
+
+    monkeypatch.setattr(paper_rollout_packet, "load_dotenv", lambda: None)
+    monkeypatch.delenv("EXECUTION_MODE", raising=False)
+    monkeypatch.setenv("ALPACA_API_KEY_ID", "key-123")
+    monkeypatch.setenv("ALPACA_API_SECRET_KEY", "secret-123")
+    monkeypatch.setenv("ALPACA_PAPER_BASE_URL", "https://paper-api.alpaca.markets")
+    artifact_dir = tmp_path / "audit"
+
+    result = CliRunner().invoke(
+        paper_rollout_packet.app,
+        [
+            "--artifact-dir",
+            str(artifact_dir),
+            "--profile",
+            "config/promotion-gates/paper_rollout.json",
+            "--mode",
+            "paper",
+            "--portfolio-path",
+            str(tmp_path / "portfolio.json"),
+            "--environment-name",
+            "paper-staging",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "PAPER_ROLLOUT_PACKET_FAIL" in result.output
+    assert "failure_artifact:" in result.output
+    assert "Traceback" not in result.output
+
+    rehearsal_paths = sorted(
+        path
+        for path in artifact_dir.glob("paper_rollout_rehearsal_*.json")
+        if ".failure." not in path.name
+    )
+    failure_paths = sorted(artifact_dir.glob("paper_rollout_rehearsal_*.preflight.failure.json"))
+    evidence_paths = sorted(artifact_dir.glob("paper_rollout_evidence_*.json"))
+    assert len(rehearsal_paths) == 1
+    assert len(failure_paths) == 1
+    assert len(evidence_paths) == 1
+
+    rehearsal = json.loads(rehearsal_paths[0].read_text(encoding="utf-8"))
+    failure = json.loads(failure_paths[0].read_text(encoding="utf-8"))
+    assert rehearsal["status"] == "failed"
+    assert rehearsal["phases"]["preflight"]["reason"] == "execution_mode_not_paper_broker"
+    assert failure["reason"] == "execution_mode_not_paper_broker"
+    assert "secret-123" not in rehearsal_paths[0].read_text(encoding="utf-8")
+    assert "secret-123" not in failure_paths[0].read_text(encoding="utf-8")
+
+
+def test_packet_cli_preflight_only_prints_pass_and_skips_packet_artifacts(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from cli import paper_rollout_packet
+
+    artifact_dir = tmp_path / "audit"
+    rehearsal_path = artifact_dir / "paper_rollout_rehearsal_preflight.json"
+
+    def fake_run_preflight_check(**kwargs: Any) -> dict[str, Any]:
+        artifact_dir = Path(kwargs["artifact_dir"])
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        _write_json(
+            rehearsal_path,
+            {
+                "artifact_type": "paper_rollout_rehearsal",
+                "status": "passed",
+                "preflight_only": True,
+                "failure_artifacts": [],
+            },
+        )
+        return {
+            "status": "passed",
+            "rehearsal_artifact": str(rehearsal_path),
+            "failure_artifacts": [],
+            "preflight": {"status": "passed"},
+        }
+
+    monkeypatch.setattr(
+        paper_rollout_packet.paper_rollout_release_check,
+        "run_preflight_check",
+        fake_run_preflight_check,
+    )
+    monkeypatch.setattr(paper_rollout_packet, "load_dotenv", lambda: None)
+
+    result = CliRunner().invoke(
+        paper_rollout_packet.app,
+        [
+            "--artifact-dir",
+            str(artifact_dir),
+            "--profile",
+            "config/promotion-gates/paper_rollout.json",
+            "--mode",
+            "paper",
+            "--preflight-only",
+            "--environment-name",
+            "paper-staging",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "PAPER_ROLLOUT_PREFLIGHT_PASS" in result.output
+    assert f"rehearsal_artifact: {rehearsal_path}" in result.output
+    assert not sorted(artifact_dir.glob("paper_rollout_packet_*.json"))
+    assert not sorted(artifact_dir.glob("paper_rollout_packet_*.md"))
+
+
+def test_packet_cli_preflight_only_prints_failure_artifacts(tmp_path: Path, monkeypatch) -> None:
+    from cli import paper_rollout_packet
+
+    artifact_dir = tmp_path / "audit"
+    rehearsal_path = artifact_dir / "paper_rollout_rehearsal_preflight.json"
+    failure_path = artifact_dir / "paper_rollout_rehearsal_preflight.preflight.failure.json"
+
+    def fake_run_preflight_check(**kwargs: Any) -> dict[str, Any]:
+        artifact_dir = Path(kwargs["artifact_dir"])
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        _write_json(
+            rehearsal_path,
+            {
+                "artifact_type": "paper_rollout_rehearsal",
+                "status": "failed",
+                "preflight_only": True,
+                "failure_artifacts": [str(failure_path)],
+            },
+        )
+        _write_json(
+            failure_path,
+            {
+                "artifact_type": "paper_rollout_failure",
+                "reason": "open_canary_orders_before_run",
+            },
+        )
+        return {
+            "status": "failed",
+            "rehearsal_artifact": str(rehearsal_path),
+            "failure_artifacts": [str(failure_path)],
+            "preflight": {"status": "failed", "reason": "open_canary_orders_before_run"},
+        }
+
+    monkeypatch.setattr(
+        paper_rollout_packet.paper_rollout_release_check,
+        "run_preflight_check",
+        fake_run_preflight_check,
+    )
+    monkeypatch.setattr(paper_rollout_packet, "load_dotenv", lambda: None)
+
+    result = CliRunner().invoke(
+        paper_rollout_packet.app,
+        [
+            "--artifact-dir",
+            str(artifact_dir),
+            "--mode",
+            "paper",
+            "--preflight-only",
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "PAPER_ROLLOUT_PREFLIGHT_FAIL" in result.output
+    assert f"rehearsal_artifact: {rehearsal_path}" in result.output
+    assert f"failure_artifact: {failure_path}" in result.output
 
 
 def test_packet_module_entrypoint_runs_against_existing_artifact(tmp_path: Path) -> None:

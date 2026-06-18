@@ -99,11 +99,18 @@ class BrokerReconciliationResult:
 
 
 class BrokerAdapter(Protocol):
+    @property
+    def base_url(self) -> str: ...
+
     def get_account(self) -> BrokerAccount: ...
 
     def get_positions(self) -> list[BrokerPosition]: ...
 
     def get_market_clock(self) -> BrokerMarketClock: ...
+
+    def list_open_orders(
+        self, client_order_id_prefix: str | None = None
+    ) -> list[BrokerOrderStatus]: ...
 
     def submit_order(self, order: BrokerOrder) -> BrokerOrderStatus: ...
 
@@ -121,6 +128,10 @@ class SimulatedBrokerAdapter:
         self._portfolio_store = portfolio_store
         self._orders: Dict[str, BrokerOrderStatus] = {}
 
+    @property
+    def base_url(self) -> str:
+        return "simulated"
+
     def get_account(self) -> BrokerAccount:
         return BrokerAccount(
             account_id="simulated",
@@ -137,6 +148,22 @@ class SimulatedBrokerAdapter:
 
     def get_market_clock(self) -> BrokerMarketClock:
         return BrokerMarketClock(is_open=True)
+
+    def list_open_orders(
+        self, client_order_id_prefix: str | None = None
+    ) -> list[BrokerOrderStatus]:
+        statuses = [
+            status
+            for status in self._orders.values()
+            if status.status in {"accepted", "partially_filled", "pending_cancel"}
+        ]
+        if client_order_id_prefix is None:
+            return statuses
+        return [
+            status
+            for status in statuses
+            if status.client_order_id.startswith(client_order_id_prefix)
+        ]
 
     def submit_order(self, order: BrokerOrder) -> BrokerOrderStatus:
         existing = self._orders.get(order.client_order_id)
@@ -260,6 +287,10 @@ class AlpacaPaperBrokerAdapter:
             "Content-Type": "application/json",
         }
 
+    @property
+    def base_url(self) -> str:
+        return self._base_url
+
     def get_account(self) -> BrokerAccount:
         response = requests.get(
             f"{self._base_url}/v2/account",
@@ -305,6 +336,28 @@ class AlpacaPaperBrokerAdapter:
             next_open=str(payload.get("next_open")) if payload.get("next_open") else None,
             next_close=str(payload.get("next_close")) if payload.get("next_close") else None,
         )
+
+    def list_open_orders(
+        self, client_order_id_prefix: str | None = None
+    ) -> list[BrokerOrderStatus]:
+        response = requests.get(
+            f"{self._base_url}/v2/orders",
+            params={"status": "open", "nested": "true"},
+            headers=self._headers,
+            timeout=self._timeout_seconds,
+        )
+        response.raise_for_status()
+        orders: list[BrokerOrderStatus] = []
+        for payload in response.json() or []:
+            if not isinstance(payload, Mapping):
+                continue
+            status = self._status_from_payload(payload)
+            if client_order_id_prefix and not status.client_order_id.startswith(
+                client_order_id_prefix
+            ):
+                continue
+            orders.append(status)
+        return orders
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "AlpacaPaperBrokerAdapter":
@@ -387,6 +440,9 @@ class AlpacaPaperBrokerAdapter:
                 reason=str(payload.get("message") or response.text or response.status_code),
                 raw_status=str(payload.get("status") or response.status_code),
             )
+        return self._status_from_payload(payload)
+
+    def _status_from_payload(self, payload: Mapping[str, Any]) -> BrokerOrderStatus:
         raw_status = str(payload.get("status") or "accepted").lower()
         status = _normalize_status(raw_status)
         return BrokerOrderStatus(

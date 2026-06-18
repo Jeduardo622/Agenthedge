@@ -23,7 +23,15 @@ def _rehearsal_payload(**overrides: Any) -> dict[str, Any]:
         "phases": {
             "preflight": {
                 "account": {"is_paper": True},
+                "broker_base_url_confirmed": True,
+                "execution_mode_confirmed": True,
                 "market_clock": {"is_open": False},
+                "market_hours_policy": {
+                    "recorded": True,
+                    "policy": "allow_nonmarketable_canary_outside_market_hours",
+                    "status": "allowed",
+                },
+                "open_canary_orders_before_run": 0,
                 "safety": {"market_hours_guard_enabled": False},
             },
             "canary": {
@@ -101,13 +109,19 @@ def test_evidence_cli_loads_latest_rehearsal_and_writes_reviewer_artifact(
         {"name": "final_reconciliation_clean", "status": "passed", "mismatches": 0},
         {"name": "secrets_redacted", "status": "passed"},
         {"name": "paper_account_confirmed", "status": "passed", "actual": True},
+        {"name": "execution_mode_paper_broker", "status": "passed", "actual": True},
+        {"name": "paper_broker_url_confirmed", "status": "passed", "actual": True},
+        {"name": "open_canary_orders_before_zero", "status": "passed", "actual": 0},
         {"name": "market_hours_behavior_explicit", "status": "passed"},
+        {"name": "market_hours_policy_recorded", "status": "passed"},
         {"name": "open_canary_orders_zero", "status": "passed", "actual": 0},
         {"name": "cleanup_failure_alert_artifact", "status": "passed"},
     ]
     assert evidence["summary"]["canary_order_status"] == "accepted"
     assert evidence["summary"]["post_cancel_order_status"] == "canceled"
     assert evidence["summary"]["paper_account_confirmed"] is True
+    assert evidence["summary"]["paper_broker_url_confirmed"] is True
+    assert evidence["summary"]["open_canary_orders_before_run"] == 0
     assert evidence["summary"]["market_is_open"] is False
     assert evidence["summary"]["market_hours_guard_enabled"] is False
     assert evidence["summary"]["open_canary_orders_after_cleanup"] == 0
@@ -167,7 +181,11 @@ def test_evidence_cli_fails_guardrails_for_nonpaper_or_implicit_market_hours(
     payload = _rehearsal_payload()
     payload["phases"]["preflight"] = {
         "account": {"is_paper": False},
+        "broker_base_url_confirmed": False,
+        "execution_mode_confirmed": False,
         "market_clock": {},
+        "market_hours_policy": {},
+        "open_canary_orders_before_run": 1,
         "safety": {},
     }
     _write_json(rehearsal_path, payload)
@@ -182,7 +200,11 @@ def test_evidence_cli_fails_guardrails_for_nonpaper_or_implicit_market_hours(
     evidence = json.loads(evidence_paths[0].read_text(encoding="utf-8"))
     failed_checks = {check["name"] for check in evidence["checks"] if check["status"] == "failed"}
     assert "paper_account_confirmed" in failed_checks
+    assert "execution_mode_paper_broker" in failed_checks
+    assert "paper_broker_url_confirmed" in failed_checks
+    assert "open_canary_orders_before_zero" in failed_checks
     assert "market_hours_behavior_explicit" in failed_checks
+    assert "market_hours_policy_recorded" in failed_checks
 
 
 def test_evidence_cli_can_run_rehearsal_when_requested(tmp_path: Path, monkeypatch) -> None:
