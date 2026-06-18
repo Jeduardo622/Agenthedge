@@ -158,6 +158,16 @@ Pre-run checks:
 - Confirm the canary symbol, quantity, and limit price are appropriate for a nonmarketable paper canary if overriding defaults.
 - Confirm no manual open canary orders are expected before starting the rehearsal.
 
+Release-check options:
+- `--artifact-dir`: directory receiving rehearsal and evidence artifacts.
+- `--profile`: paper rollout gate profile JSON.
+- `--rehearsal-artifact`: existing rehearsal artifact for evidence/gate rechecks without a new canary order.
+- `--portfolio-path`: portfolio state path for rehearsal reconciliation.
+- `--mode`: `auto`, `mock`, or `paper`.
+- `--symbol`: canary symbol.
+- `--quantity`: canary quantity.
+- `--limit-price`: nonmarketable canary limit price.
+
 Expected pass output:
 - `PAPER_ROLLOUT_RELEASE_PASS <evidence_artifact>`
 - `rehearsal_artifact: storage/audit/paper_rollout_rehearsal_<timestamp>.json`
