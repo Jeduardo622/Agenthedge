@@ -274,6 +274,11 @@ Operator interpretation:
 - Use each retry outcome's `operator_next_action` from the original failure artifact to decide whether to retry immediately, wait for rate-limit/API recovery, fix credentials, or cancel open canary orders.
 - This history report is observability and operator guidance only; it is not a promotion gate and is not required by `cli.paper_rollout_packet`.
 
+operator handoff checklist:
+- Confirm the paper-staging scheduler daemon is enabled with `poetry run python -m cli.scheduler run` in the intended operator environment.
+- Before handoff, run `poetry run python -m cli.scheduler run-once paper_broker_health_history` and record the generated `storage/audit/paper_broker_health_history_<timestamp>.json` path.
+- Treat unresolved failures in the history report as operator follow-up for the next paper run, not a promotion gate.
+
 ### Fresh Paper Rehearsal
 Run this when the release needs new broker-path proof and the environment is intentionally configured for Alpaca paper trading:
 
