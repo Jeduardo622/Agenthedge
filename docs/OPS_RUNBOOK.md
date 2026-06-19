@@ -161,6 +161,14 @@ poetry run python -m cli.paper_broker_health \
   --artifact-dir storage/audit
 ```
 
+To summarize recent paper broker health and retry outcomes without adding a promotion gate, run the history report manually or from the operator scheduler:
+
+```bash
+poetry run python -m cli.paper_broker_health_history \
+  --artifact-dir storage/audit \
+  --lookback-hours 24
+```
+
 Before the full packet command, run a no-order paper preflight. This validates the paper account, broker URL, market-hours policy, and open canary order state without submitting or canceling a canary:
 
 ```bash
@@ -238,6 +246,27 @@ If broker health fails:
 - For `broker_auth_failed`, verify the paper credentials.
 - For `broker_server_error`, wait for Alpaca paper API recovery.
 - For open canary orders, cancel all `broker-canary-` orders and rerun health.
+
+### Paper Broker Health History
+Use `cli.paper_broker_health_history` as a manual operator report or scheduled read-only job. It scans recent `paper_broker_health_<timestamp>.json` artifacts, reads referenced broker-health failure artifacts, and writes `storage/audit/paper_broker_health_history_<timestamp>.json`.
+
+Expected output when recent failures are recovered:
+- `PAPER_BROKER_HEALTH_HISTORY_PASS`
+- `history_artifact: storage/audit/paper_broker_health_history_<timestamp>.json`
+- `latest_status: passed`
+- `unresolved_failures: 0`
+
+Expected output when a recent broker failure has no later passing health artifact:
+- `PAPER_BROKER_HEALTH_HISTORY_ATTENTION`
+- `history_artifact: storage/audit/paper_broker_health_history_<timestamp>.json`
+- `latest_status: failed`
+- `unresolved_failures: <count>`
+
+Operator interpretation:
+- `recovered_after_retry` means a failed health artifact was followed by a later passing health artifact inside the lookback window.
+- `unresolved_failure` means no later passing health artifact was found. Do not run the full packet until a fresh `cli.paper_broker_health` pass is recorded.
+- Use each retry outcome's `operator_next_action` from the original failure artifact to decide whether to retry immediately, wait for rate-limit/API recovery, fix credentials, or cancel open canary orders.
+- This history report is observability and operator guidance only; it is not a promotion gate and is not required by `cli.paper_rollout_packet`.
 
 ### Fresh Paper Rehearsal
 Run this when the release needs new broker-path proof and the environment is intentionally configured for Alpaca paper trading:
