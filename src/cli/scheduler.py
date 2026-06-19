@@ -51,6 +51,7 @@ def run_once(job: str = typer.Argument(...)) -> None:
         "midday_check",
         "heartbeat_check",
         "reconciliation_check",
+        "paper_broker_health_history",
         "eod_closure",
     }
     if job not in valid_jobs:

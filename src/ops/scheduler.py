@@ -13,6 +13,7 @@ from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
 
 from agents.runtime_builder import build_runtime_from_env
+from cli.paper_broker_health_history import build_history_report
 from infra.governance import RuntimeGovernanceConfig
 from infra.metrics import PrometheusMetricSink
 from infra.postgres import (
@@ -38,6 +39,9 @@ class SchedulerRuntime(Protocol):
     def stop(self, *, wait: bool = True) -> None: ...
 
 
+HealthHistoryReportBuilder = Callable[..., Mapping[str, object]]
+
+
 class SchedulerService:
     """Wraps APScheduler jobs for health checks and daily trades."""
 
@@ -51,6 +55,7 @@ class SchedulerService:
         runtime_builder: Callable[[], SchedulerRuntime] | None = None,
         state_sink: RuntimeStateSink | None = None,
         metric_sink: PrometheusMetricSink | None = None,
+        health_history_report_builder: HealthHistoryReportBuilder | None = None,
     ) -> None:
         self._tz = ZoneInfo(timezone_name)
         self._scheduler = BlockingScheduler(timezone=self._tz)
@@ -59,6 +64,7 @@ class SchedulerService:
         self._snapshot_dir = snapshot_dir or Path("storage/audit")
         self._snapshot_dir.mkdir(parents=True, exist_ok=True)
         self._runtime_builder = runtime_builder or (lambda: build_runtime_from_env(load_env=False))
+        self._health_history_report_builder = health_history_report_builder or build_history_report
         env = os.environ
         self._instance_id = env.get("RUN_ID", "scheduler")
         self._runtime_backend = resolve_runtime_backend(env)
@@ -105,6 +111,11 @@ class SchedulerService:
             self.reconciliation_check,
             CronTrigger(hour="*", minute=5, timezone=self._tz),
             name="reconciliation_check",
+        )
+        self._scheduler.add_job(
+            self.paper_broker_health_history,
+            CronTrigger(hour="*", minute=40, timezone=self._tz),
+            name="paper_broker_health_history",
         )
         self._scheduler.add_job(
             self.eod_closure,
@@ -163,6 +174,39 @@ class SchedulerService:
 
     def reconciliation_check(self) -> None:
         self._run_as_leader("reconciliation_check", self._run_reconciliation_check_impl)
+
+    def paper_broker_health_history(self) -> None:
+        self._run_as_leader(
+            "paper_broker_health_history",
+            self._run_paper_broker_health_history_impl,
+        )
+
+    def _run_paper_broker_health_history_impl(self) -> None:
+        try:
+            report = self._health_history_report_builder(
+                artifact_dir=self._snapshot_dir,
+                lookback_hours=24.0,
+            )
+        except Exception as exc:
+            self._record_job(
+                "paper_broker_health_history",
+                status="failed",
+                details={"error_type": type(exc).__name__},
+            )
+            raise
+        summary = report.get("summary")
+        summary_map = summary if isinstance(summary, Mapping) else {}
+        self._record_job(
+            "paper_broker_health_history",
+            status="completed",
+            details={
+                "health_history_status": report.get("status"),
+                "history_artifact": report.get("history_artifact"),
+                "latest_status": report.get("latest_status"),
+                "unresolved_failures": summary_map.get("unresolved_failures"),
+                "recovered_after_retry": summary_map.get("recovered_after_retry"),
+            },
+        )
 
     def _run_reconciliation_check_impl(self) -> None:
         runtime = self._runtime_builder()
