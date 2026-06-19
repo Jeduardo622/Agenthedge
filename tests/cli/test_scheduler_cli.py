@@ -15,6 +15,9 @@ class DummyService:
     def reconciliation_check(self) -> None:
         self.called = True
 
+    def paper_broker_health_history(self) -> None:
+        self.called = True
+
 
 def test_run_once_invokes_job(monkeypatch) -> None:
     runner = CliRunner()
@@ -35,6 +38,18 @@ def test_run_once_invokes_reconciliation_check(monkeypatch) -> None:
     monkeypatch.setattr(scheduler_cli, "_build_service", lambda: service)
 
     result = runner.invoke(scheduler_cli.app, ["run-once", "reconciliation_check"])
+
+    assert result.exit_code == 0, result.stdout
+    assert service.called
+
+
+def test_run_once_invokes_paper_broker_health_history(monkeypatch) -> None:
+    runner = CliRunner()
+    service = DummyService()
+    monkeypatch.setattr(scheduler_cli, "_configure_environment", lambda: None)
+    monkeypatch.setattr(scheduler_cli, "_build_service", lambda: service)
+
+    result = runner.invoke(scheduler_cli.app, ["run-once", "paper_broker_health_history"])
 
     assert result.exit_code == 0, result.stdout
     assert service.called

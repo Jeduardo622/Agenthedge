@@ -140,6 +140,46 @@ def test_reconciliation_check_records_clean_status(tmp_path) -> None:
     assert snapshot["execution_reconciliation"]["mismatch_count"] == 0
 
 
+def test_paper_broker_health_history_records_report_state(tmp_path) -> None:
+    runtime = FakeRuntime()
+    state = ObservabilityState()
+    calls: list[dict[str, object]] = []
+
+    def _build_report(*, artifact_dir: Path, lookback_hours: float) -> dict[str, object]:
+        calls.append({"artifact_dir": artifact_dir, "lookback_hours": lookback_hours})
+        return {
+            "status": "attention_required",
+            "history_artifact": str(tmp_path / "paper_broker_health_history.json"),
+            "latest_status": "failed",
+            "summary": {
+                "unresolved_failures": 1,
+                "recovered_after_retry": 0,
+            },
+        }
+
+    service = SchedulerService(
+        state=state,
+        calendar=StaticCalendar(True),
+        snapshot_dir=tmp_path,
+        runtime_builder=lambda: runtime,
+        health_history_report_builder=_build_report,
+    )
+
+    service.paper_broker_health_history()
+
+    snapshot = state.snapshot()
+    assert calls == [{"artifact_dir": tmp_path, "lookback_hours": 24.0}]
+    assert runtime.bootstrap_called is False
+    assert snapshot["scheduler"]["paper_broker_health_history"]["status"] == "completed"
+    assert (
+        snapshot["scheduler"]["paper_broker_health_history"]["details"]["health_history_status"]
+        == "attention_required"
+    )
+    assert (
+        snapshot["scheduler"]["paper_broker_health_history"]["details"]["unresolved_failures"] == 1
+    )
+
+
 def test_reconciliation_check_fails_closed_on_mismatch(tmp_path) -> None:
     service, runtime, state = _build_scheduler(tmp_path=tmp_path, trading_day=True)
     runtime._reconciliation = {
