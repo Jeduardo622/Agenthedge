@@ -279,6 +279,231 @@ operator handoff checklist:
 - Before handoff, run `poetry run python -m cli.scheduler run-once paper_broker_health_history` and record the generated `storage/audit/paper_broker_health_history_<timestamp>.json` path.
 - Treat unresolved failures in the history report as operator follow-up for the next paper run, not a promotion gate.
 
+### Paper Operator Status
+Use `cli.paper_operator_status` as the daily read-only operator summary after the scheduler has produced paper broker health history and after any preflight or packet artifacts exist. The command does not contact the broker, submit orders, cancel orders, or update scheduler configuration. It reads existing `storage/audit` artifacts and writes:
+- `storage/audit/paper_operator_status_<timestamp>.json`
+- `storage/audit/paper_operator_status_<timestamp>.md`
+
+```bash
+poetry run python -m cli.paper_operator_status --artifact-dir storage/audit
+```
+
+Expected output when current artifacts need operator attention:
+- `PAPER_OPERATOR_STATUS_ATTENTION`
+- `operator_status_artifact: storage/audit/paper_operator_status_<timestamp>.json`
+- `operator_status_markdown_artifact: storage/audit/paper_operator_status_<timestamp>.md`
+- `unresolved_failures: <count>`
+
+Operator interpretation:
+- `paper_health` summarizes the latest `paper_broker_health_history_<timestamp>.json`, including unresolved failures and the latest health artifact.
+- `last_clean_preflight` points to the latest passing `paper_rollout_rehearsal*_*.json` with zero open canary orders before run.
+- `canary_state` summarizes the latest packet's canary acceptance, cancellation, post-cancel status, and cleanup count.
+- `reconciliation_state` prefers scheduler reconciliation state when available and otherwise uses the latest packet reconciliation summary.
+- This status report is observability and operator guidance only; it is not a promotion gate and is not required by `cli.paper_rollout_packet`.
+
+### Paper Session Lifecycle
+Use `cli.paper_session_lifecycle` to link one day's readiness, run start, run result, reconciliation, and closeout evidence under a stable daily session id. The session id format is `paper-YYYYMMDD`; each lifecycle stage repeats that id so downstream operator reports can join artifacts without guessing by timestamp.
+
+```bash
+poetry run python -m cli.paper_session_lifecycle \
+  --artifact-dir storage/audit \
+  --session-date YYYY-MM-DD
+```
+
+The command writes:
+- `storage/audit/paper_session_lifecycle_paper-YYYYMMDD_<timestamp>.json`
+- `storage/audit/paper_session_lifecycle_paper-YYYYMMDD_<timestamp>.md`
+
+Lifecycle stage definitions:
+- `readiness`: latest `paper_operator_status_<timestamp>.json` for the session date.
+- `run_start`: latest `paper_rollout_rehearsal_<timestamp>.json` for the session date, including preflight state.
+- `run_result`: latest `paper_rollout_packet_<timestamp>.json` for the session date.
+- `reconciliation`: reconciliation status from the operator status report when present, otherwise the packet reconciliation summary.
+- `closeout`: packet cleanup state, including cancellation, post-cancel order status, and open canary order count after cleanup.
+
+This lifecycle report is read-only and does not replace the packet gate. It defines the daily paper session artifact contract so future decision logs and promotion-readiness reports can reference the same `session_id`.
+
+### Paper Decision Log
+Use `cli.paper_decision_log` to record explicit operator decisions against a paper session. Valid decisions are `proceed`, `hold`, `retry`, and `skip`. The command writes audit artifacts only; it does not trigger trading, retry jobs, scheduler changes, packet generation, or promotion.
+
+```bash
+poetry run python -m cli.paper_decision_log \
+  --artifact-dir storage/audit \
+  --session-id paper-YYYYMMDD \
+  --decision hold \
+  --exception-category cleanup_required \
+  --reason "Waiting for same-day packet closeout." \
+  --artifact-ref storage/audit/paper_session_lifecycle_paper-YYYYMMDD_<timestamp>.json
+```
+
+The command writes:
+- `storage/audit/paper_decision_log_paper-YYYYMMDD_<timestamp>.json`
+- `storage/audit/paper_decision_log_paper-YYYYMMDD_<timestamp>.md`
+
+Decision log requirements:
+- Always include a nonempty reason.
+- Use `--exception-category` for hold/retry/skip decisions when a structured category applies. Valid exception categories are `broker_issue`, `market_hours_policy`, `stale_artifact`, `cleanup_required`, and `reconciliation_mismatch`.
+- Reference the lifecycle artifact and any supporting status, packet, failure, or reconciliation artifact used for the decision.
+- Treat `retry` as an operator note to rerun the appropriate read-only or paper-run command manually; it does not invoke a retry.
+- Treat `proceed` as a recorded human decision only; it is not automatic live promotion.
+
+### Daily Paper Review Board
+Use `cli.paper_review_board` after lifecycle and decision artifacts exist for recent paper sessions. The command is read-only: it does not contact the broker, submit or cancel orders, update scheduler state, invoke packet generation, or enable live trading.
+
+```bash
+poetry run python -m cli.paper_review_board \
+  --artifact-dir storage/audit \
+  --min-stable-sessions 5
+```
+
+The command writes:
+- `storage/audit/paper_review_board_<timestamp>.json`
+- `storage/audit/paper_review_board_<timestamp>.md`
+
+The daily session list shows:
+- session status,
+- latest operator decision,
+- missing evidence,
+- unresolved health failures,
+- reconciliation mismatches,
+- closeout status,
+- readiness state through the linked lifecycle stages.
+
+The stability window defines stable paper operations across N recent sessions, defaulting to `--min-stable-sessions 5` for operator review. Stable paper operations require closed sessions, zero unresolved health failures, zero reconciliation mismatches, clean closeouts, and recorded operator decisions.
+
+The reviewer packet is explicitly labeled `review evidence` (`label: review evidence`); it is not a gate. It links session lifecycle artifacts, decision logs, packet artifacts, and the latest paper-to-live readiness report when present.
+
+### Paper-To-Live Readiness Evidence
+Use `cli.paper_live_readiness_report` after daily paper sessions are stable to summarize the evidence that would be required before a live-readiness review. This report is governance-only: it does not enable live trading, does not invoke `cli.paper_rollout_packet`, and does not replace human review.
+
+```bash
+poetry run python -m cli.paper_live_readiness_report \
+  --artifact-dir storage/audit \
+  --session-id paper-YYYYMMDD \
+  --min-stable-sessions 5
+```
+
+The command writes:
+- `storage/audit/paper_live_readiness_report_<timestamp>.json`
+- `storage/audit/paper_live_readiness_report_<timestamp>.md`
+
+Evidence requirements:
+- `closed_paper_session`: at least one `paper_session_lifecycle_<session_id>_<timestamp>.json` is closed.
+- `clean_reconciliation`: closed sessions include clean reconciliation.
+- `clean_closeout`: closed sessions include clean closeout.
+- `operator_proceed_decision`: an operator recorded a `proceed` decision for review.
+- `referenced_artifacts_present`: decision-log artifact references exist on disk.
+- `stable_paper_operations`: when `--min-stable-sessions` is greater than one or a review-board artifact exists, the latest `paper_review_board_<timestamp>.json` stability window reports stable paper operations.
+
+Expected output is either `PAPER_LIVE_READINESS_REVIEW_READY` or `PAPER_LIVE_READINESS_EVIDENCE_MISSING`. Both outcomes remain reporting-only; `automatic_live_promotion` is always `False` and `live_trading_enabled` is always `False`.
+
+### Live Readiness Review Workbench
+Use `cli.paper_live_readiness_workbench build` when the paper stability evidence is ready for a human go/no-go review packet. This is a review workbench, not a live-trading enablement button. It reads existing artifacts only and does not contact the broker, submit or cancel orders, change scheduler state, invoke packet generation, mutate configuration, or enable live trading.
+
+```bash
+poetry run python -m cli.paper_live_readiness_workbench build \
+  --artifact-dir storage/audit \
+  --stability-window 5
+```
+
+The command writes:
+- `storage/audit/paper_live_readiness_workbench_<timestamp>.json`
+- `storage/audit/paper_live_readiness_workbench_<timestamp>.md`
+
+The workbench packet includes:
+- readiness intake for the latest closed paper sessions in the selected stability window,
+- evidence inventory for review-board, lifecycle, decision-log, packet, and live-readiness artifacts,
+- present, stale, missing, and conflicting evidence labels,
+- exception trend counts for `broker_issue`, `market_hours_policy`, `stale_artifact`, `cleanup_required`, and `reconciliation_mismatch`,
+- one-off operator noise separated from repeated operational risk,
+- reviewer checklist, unresolved questions, residual risks, and required `operations`, `risk`, and `compliance` approver slots,
+- a supervised live-dry-run bridge plan covering env checklist, kill-switch proof, rollback plan, paper/live config diff, and monitoring expectations.
+
+The packet is explicitly labeled `review evidence` with `is_gate: False`, `automatic_live_promotion: False`, `live_trading_enabled: False`, and `broker_mutation: False`.
+
+Use `cli.paper_live_readiness_workbench record-decision` to record the human review outcome. Valid outcomes are `ready_for_supervised_paper_extension`, `hold`, `needs_more_sessions`, and `escalate_to_risk_compliance`. The command requires a reason and at least one artifact reference.
+
+```bash
+poetry run python -m cli.paper_live_readiness_workbench record-decision \
+  --artifact-dir storage/audit \
+  --outcome ready_for_supervised_paper_extension \
+  --reason "Five-session review packet accepted for supervised paper extension." \
+  --artifact-ref storage/audit/paper_live_readiness_workbench_<timestamp>.json
+```
+
+The decision register writes:
+- `storage/audit/paper_live_readiness_review_decision_<timestamp>.json`
+- `storage/audit/paper_live_readiness_review_decision_<timestamp>.md`
+
+Decision entries are audit-only and keep `trading_behavior_changed: False` and `live_trading_enabled: False`. A positive review outcome only authorizes preparing the supervised live-dry-run plan; it is not a live-readiness gate.
+
+### Supervised Live-Dry-Run Command Center
+Use `cli.paper_supervised_live_dry_run build` only after the latest `paper_live_readiness_review_decision_<timestamp>.json` records `outcome: ready_for_supervised_paper_extension` and references the accepted workbench artifact. The command is a read-only planning command: it does not contact the broker, submit or cancel orders, change scheduler state, change environment variables, mutate config files, or enable live trading.
+
+```bash
+poetry run python -m cli.paper_supervised_live_dry_run build \
+  --artifact-dir storage/audit
+```
+
+The command writes:
+- `storage/audit/paper_supervised_live_dry_run_<timestamp>.json`
+- `storage/audit/paper_supervised_live_dry_run_<timestamp>.md`
+
+The command center refuses to build when:
+- no review decision artifact exists,
+- the latest decision outcome is not `ready_for_supervised_paper_extension`,
+- the decision has no artifact references,
+- a referenced artifact is missing or stale,
+- the decision does not reference a `paper_live_readiness_workbench` artifact.
+
+The command center packet includes:
+- accepted review outcome intake and linked workbench artifact,
+- redacted environment checklist for `EXECUTION_MODE`, `EXECUTION_REQUIRE_PAPER_ACCOUNT`, `ALPACA_PAPER_BASE_URL`, `EXECUTION_MARKET_HOURS_GUARD`, `ALPACA_API_KEY_ID`, and `ALPACA_API_SECRET_KEY`,
+- kill-switch proof requirements and rollback plan review steps,
+- paper/live config diff review items for execution mode, broker URL, paper-account guard, market-hours guard, sizing limits, and monitoring,
+- monitoring war-room preview with normal, hold, and abort signals,
+- dry-run timeline covering pre-window checks, start criteria, observation cadence, abort criteria, rollback steps, and post-run evidence capture.
+
+The packet is explicitly labeled `supervised dry-run plan` with `is_gate: False`, `automatic_live_promotion: False`, `live_trading_enabled: False`, and `broker_mutation: False`. It is a bridge artifact for the later live-readiness gate, not that gate.
+
+### Supervised Dry-Run Closeout Review
+Use `cli.paper_supervised_dry_run_closeout build` after a supervised dry-run plan has been executed and observed evidence has been captured. This is a closeout review packet, not a live-readiness gate. It reads existing artifacts only and does not contact the broker, submit or cancel orders, change scheduler state, mutate configuration, or enable live trading.
+
+```bash
+poetry run python -m cli.paper_supervised_dry_run_closeout build \
+  --artifact-dir storage/audit
+```
+
+The command writes:
+- `storage/audit/paper_supervised_dry_run_closeout_<timestamp>.json`
+- `storage/audit/paper_supervised_dry_run_closeout_<timestamp>.md`
+
+The closeout review packet includes:
+- dry-run evidence intake for the supervised live-dry-run plan, accepted workbench decision, workbench artifact, broker health history, operator status, lifecycle artifact, reconciliation evidence, and monitoring notes,
+- plan vs observed review for pre-window checks, start criteria, observation cadence, abort criteria, rollback steps, and post-run evidence capture,
+- exception closeout categories for `missing_observed_evidence`, `stale_artifact`, `reconciliation_mismatch`, `broker_issue`, `operator_handoff_gap`, `monitoring_gap`, `rollback_readiness_gap`, and `kill_switch_proof_missing`,
+- one-off operator noise separated from repeated operational risk,
+- reviewer checklist, evidence links, unresolved exceptions, residual risks, and required `operations`, `risk`, and `compliance` approver slots,
+- a bridge artifact that can only point to a later `live_readiness_gate_review`; it is not that gate.
+
+The packet is explicitly labeled `review evidence` with `is_gate: False`, `automatic_live_promotion: False`, `live_trading_enabled: False`, and `broker_mutation: False`.
+
+Use `cli.paper_supervised_dry_run_closeout record-decision` to record the dry-run closeout outcome. Valid outcomes are `repeat_dry_run`, `extend_supervised_paper`, `ready_for_live_readiness_gate_review`, `hold`, and `escalate_to_risk_compliance`. The command requires a reason and at least one artifact reference.
+
+```bash
+poetry run python -m cli.paper_supervised_dry_run_closeout record-decision \
+  --artifact-dir storage/audit \
+  --outcome ready_for_live_readiness_gate_review \
+  --reason "Dry-run evidence is complete enough for a separate gate review." \
+  --artifact-ref storage/audit/paper_supervised_dry_run_closeout_<timestamp>.json
+```
+
+The decision register writes:
+- `storage/audit/paper_supervised_dry_run_closeout_decision_<timestamp>.json`
+- `storage/audit/paper_supervised_dry_run_closeout_decision_<timestamp>.md`
+
+Decision entries are audit-only and keep `trading_behavior_changed: False`, `live_trading_enabled: False`, and `broker_mutation: False`. A positive closeout only creates evidence for a separate live-readiness gate review; it is not live enablement.
+
 ### Fresh Paper Rehearsal
 Run this when the release needs new broker-path proof and the environment is intentionally configured for Alpaca paper trading:
 

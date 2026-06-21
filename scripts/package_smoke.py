@@ -12,8 +12,16 @@ from zipfile import ZipFile
 REQUIRED_PREFIXES = ("cli/", "ops/", "observability/", "research_inputs/", "strategies/")
 REQUIRED_PATHS = (
     "cli/broker_canary.py",
+    "cli/paper_decision_log.py",
     "cli/paper_broker_health.py",
     "cli/paper_broker_health_history.py",
+    "cli/paper_live_readiness_report.py",
+    "cli/paper_live_readiness_workbench.py",
+    "cli/paper_operator_status.py",
+    "cli/paper_review_board.py",
+    "cli/paper_session_lifecycle.py",
+    "cli/paper_supervised_dry_run_closeout.py",
+    "cli/paper_supervised_live_dry_run.py",
     "cli/paper_rollout_evidence.py",
     "cli/paper_rollout_gate.py",
     "cli/paper_rollout_packet.py",
@@ -27,8 +35,16 @@ REQUIRED_PATHS = (
 )
 REQUIRED_IMPORTS = (
     "cli.broker_canary",
+    "cli.paper_decision_log",
     "cli.paper_broker_health",
     "cli.paper_broker_health_history",
+    "cli.paper_live_readiness_report",
+    "cli.paper_live_readiness_workbench",
+    "cli.paper_operator_status",
+    "cli.paper_review_board",
+    "cli.paper_session_lifecycle",
+    "cli.paper_supervised_dry_run_closeout",
+    "cli.paper_supervised_live_dry_run",
     "cli.paper_rollout_evidence",
     "cli.paper_rollout_gate",
     "cli.paper_rollout_packet",
