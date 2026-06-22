@@ -99,7 +99,7 @@ def test_health_history_cli_prints_report_path(tmp_path: Path, monkeypatch) -> N
     artifact_dir = tmp_path / "audit"
     _write_health(
         artifact_dir / "paper_broker_health_20260618T170000Z.json",
-        created_at=datetime(2026, 6, 18, 17, 0, tzinfo=timezone.utc),
+        created_at=datetime.now(timezone.utc),
         status="passed",
     )
     monkeypatch.setattr(paper_broker_health_history, "_timestamp", lambda: "20260618T170100Z")

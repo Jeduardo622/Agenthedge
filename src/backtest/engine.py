@@ -202,7 +202,7 @@ class BacktestEngine:
         self.data_loader = data_loader or YFinanceDataLoader()
         self.storage_dir = Path(storage_dir)
         self.storage_dir.mkdir(parents=True, exist_ok=True)
-        self.strategies = (
+        self.strategies: list[Strategy] = (
             list(strategies)
             if strategies
             else [

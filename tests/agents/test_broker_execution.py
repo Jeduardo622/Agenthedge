@@ -1319,8 +1319,9 @@ def test_execution_mode_defaults_to_simulated_and_rejects_unknown() -> None:
     assert AgentRuntimeConfig.from_env({"EXECUTION_MODE": "paper_broker"}).execution_mode == (
         "paper_broker"
     )
+    assert AgentRuntimeConfig.from_env({"EXECUTION_MODE": "live"}).execution_mode == "live"
     with pytest.raises(ValueError, match="EXECUTION_MODE"):
-        AgentRuntimeConfig.from_env({"EXECUTION_MODE": "live"})
+        AgentRuntimeConfig.from_env({"EXECUTION_MODE": "cash"})
 
 
 def test_execution_safety_config_parses_env_caps_and_guards() -> None:
@@ -1369,6 +1370,39 @@ def test_alpaca_paper_adapter_requires_explicit_paper_execution_mode() -> None:
     )
 
     assert isinstance(adapter, AlpacaPaperBrokerAdapter)
+
+
+def test_alpaca_live_adapter_requires_live_mode_and_guard() -> None:
+    from portfolio.broker import AlpacaLiveBrokerAdapter
+
+    base_env = {
+        "ALPACA_API_KEY_ID": "key",
+        "ALPACA_API_SECRET_KEY": "secret",
+        "ALPACA_LIVE_BASE_URL": "https://api.alpaca.markets",
+    }
+    with pytest.raises(ValueError, match="EXECUTION_MODE=live"):
+        AlpacaLiveBrokerAdapter.from_env(base_env)
+    with pytest.raises(ValueError, match="EXECUTION_LIVE_BROKER_ENABLED=true"):
+        AlpacaLiveBrokerAdapter.from_env({"EXECUTION_MODE": "live", **base_env})
+    with pytest.raises(ValueError, match="ALPACA_LIVE_BASE_URL"):
+        AlpacaLiveBrokerAdapter.from_env(
+            {
+                "EXECUTION_MODE": "live",
+                "EXECUTION_LIVE_BROKER_ENABLED": "true",
+                **base_env,
+                "ALPACA_LIVE_BASE_URL": "https://paper-api.alpaca.markets",
+            }
+        )
+
+    adapter = AlpacaLiveBrokerAdapter.from_env(
+        {
+            "EXECUTION_MODE": "live",
+            "EXECUTION_LIVE_BROKER_ENABLED": "true",
+            **base_env,
+        }
+    )
+
+    assert adapter.base_url == "https://api.alpaca.markets"
 
 
 def test_alpaca_paper_adapter_normalizes_versioned_base_url(

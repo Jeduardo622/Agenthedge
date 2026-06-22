@@ -16,7 +16,12 @@ from infra.metrics import ensure_metrics_server
 from infra.postgres import get_postgres_dsn, resolve_runtime_backend, resolve_runtime_profile
 from infra.runtime_state import NullRuntimeStateSink, PostgresRuntimeStateSink, RuntimeStateSink
 from observability.state import get_observability_state
-from portfolio.broker import AlpacaPaperBrokerAdapter, BrokerAdapter, SimulatedBrokerAdapter
+from portfolio.broker import (
+    AlpacaLiveBrokerAdapter,
+    AlpacaPaperBrokerAdapter,
+    BrokerAdapter,
+    SimulatedBrokerAdapter,
+)
 from portfolio.postgres_store import PostgresPortfolioStore
 from portfolio.store import PortfolioStore
 
@@ -96,6 +101,8 @@ def build_runtime_from_env(*, load_env: bool = True) -> AgentRuntime:
         broker_adapter = SimulatedBrokerAdapter(portfolio_store)
     elif config.execution_mode == "paper_broker":
         broker_adapter = AlpacaPaperBrokerAdapter.from_env(env)
+    elif config.execution_mode == "live":
+        broker_adapter = AlpacaLiveBrokerAdapter.from_env(env)
     logging.getLogger("agenthedge.runtime_builder").info(
         "runtime backend resolved",
         extra={
