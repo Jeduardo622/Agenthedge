@@ -131,6 +131,106 @@ def test_workbench_builds_review_packet_and_exception_trends(tmp_path: Path, mon
     assert "is_gate: False" in markdown
 
 
+def test_workbench_keeps_open_hold_session_visible(tmp_path: Path, monkeypatch) -> None:
+    from cli import paper_live_readiness_workbench
+
+    artifact_dir = tmp_path / "audit"
+    lifecycle_path = artifact_dir / "paper_session_lifecycle_paper-20260619_20260619T184051Z.json"
+    decision_path = artifact_dir / "paper_decision_log_paper-20260619_20260619T184409Z.json"
+    review_board_path = artifact_dir / "paper_review_board_20260619T185000Z.json"
+    live_readiness_path = artifact_dir / "paper_live_readiness_report_20260619T184809Z.json"
+    _write_json(
+        lifecycle_path,
+        {
+            "artifact_type": "paper_session_lifecycle",
+            "created_at": "2026-06-19T18:40:51+00:00",
+            "session_id": "paper-20260619",
+            "session_date": "2026-06-19",
+            "status": "open",
+            "stages": [
+                {"name": "readiness", "status": "passed", "artifact": "operator_status.json"},
+                {"name": "run_start", "status": "missing", "artifact": None},
+                {"name": "run_result", "status": "missing", "artifact": None},
+                {
+                    "name": "reconciliation",
+                    "status": "clean",
+                    "artifact": "operator_status.json",
+                    "final_reconciliation_mismatches": 0,
+                },
+                {"name": "closeout", "status": "missing", "artifact": None},
+            ],
+        },
+    )
+    _write_json(
+        decision_path,
+        {
+            "artifact_type": "paper_decision_log",
+            "created_at": "2026-06-19T18:44:09+00:00",
+            "session_id": "paper-20260619",
+            "decision": "hold",
+            "reason": "Waiting for same-day run result and closeout artifacts.",
+            "artifact_refs": [str(lifecycle_path)],
+        },
+    )
+    _write_json(
+        review_board_path,
+        {
+            "artifact_type": "paper_review_board",
+            "created_at": "2026-06-19T18:50:00+00:00",
+            "status": "attention_required",
+            "stability_window": {
+                "required_sessions": 5,
+                "sessions_reviewed": 1,
+                "closed_sessions": 0,
+                "stable_paper_operations": False,
+            },
+        },
+    )
+    _write_json(
+        live_readiness_path,
+        {
+            "artifact_type": "paper_live_readiness_report",
+            "created_at": "2026-06-19T18:48:09+00:00",
+            "status": "evidence_missing",
+            "live_readiness_artifact": str(live_readiness_path),
+        },
+    )
+    monkeypatch.setattr(paper_live_readiness_workbench, "_timestamp", lambda: "20260619T190000Z")
+
+    packet = paper_live_readiness_workbench.build_workbench(
+        artifact_dir=artifact_dir,
+        stability_window=5,
+        now=datetime(2026, 6, 19, 19, 0, tzinfo=timezone.utc),
+    )
+
+    window = packet["readiness_intake"]["stability_window"]
+    assert window["session_ids"] == ["paper-20260619"]
+    assert window["sessions_selected"] == 1
+    assert packet["readiness_intake"]["session_reviews"] == [
+        {
+            "session_id": "paper-20260619",
+            "session_status": "open",
+            "latest_operator_decision": "hold",
+            "missing_evidence": [
+                "missing_closeout",
+                "missing_run_result",
+                "missing_run_start",
+                "session_not_closed",
+                "unclean_closeout",
+            ],
+        }
+    ]
+    assert packet["readiness_intake"]["evidence_inventory"]["decision_logs"]["present_count"] == 1
+    assert (
+        "Complete missing paper-session evidence before signoff."
+        in packet["human_signoff_packet"]["unresolved_questions"]
+    )
+    assert (
+        "Open or held paper sessions are not ready for signoff."
+        in packet["human_signoff_packet"]["unresolved_questions"]
+    )
+
+
 def test_workbench_decision_register_requires_reason_and_artifacts(
     tmp_path: Path, monkeypatch
 ) -> None:

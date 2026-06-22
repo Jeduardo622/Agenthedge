@@ -411,7 +411,8 @@ The command writes:
 - `storage/audit/paper_live_readiness_workbench_<timestamp>.md`
 
 The workbench packet includes:
-- readiness intake for the latest closed paper sessions in the selected stability window,
+- readiness intake for the latest paper sessions in the selected stability window, including open or held sessions that block signoff,
+- per-session review state showing session status, latest operator decision, and missing evidence,
 - evidence inventory for review-board, lifecycle, decision-log, packet, and live-readiness artifacts,
 - present, stale, missing, and conflicting evidence labels,
 - exception trend counts for `broker_issue`, `market_hours_policy`, `stale_artifact`, `cleanup_required`, and `reconciliation_mismatch`,

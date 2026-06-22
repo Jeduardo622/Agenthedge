@@ -40,7 +40,7 @@ def build_workbench(
     artifact_root.mkdir(parents=True, exist_ok=True)
     current_time = now or datetime.now(timezone.utc)
     required_sessions = max(1, stability_window)
-    selected_sessions = _closed_session_window(artifact_root, required_sessions)
+    selected_sessions = _session_window(artifact_root, required_sessions)
     decisions = _latest_decisions_by_session(artifact_root)
     review_board = _latest_payload(artifact_root, "paper_review_board_*.json", "paper_review_board")
     live_readiness = _latest_payload(
@@ -146,6 +146,10 @@ def _readiness_intake(
     max_artifact_age_days: int,
 ) -> dict[str, Any]:
     session_ids = [str(session.get("session_id")) for session in sessions]
+    session_reviews = [
+        _session_review(session, decisions.get(session_id))
+        for session_id, session in zip(session_ids, sessions, strict=True)
+    ]
     packet_refs = _packet_refs(sessions)
     conflicts = _conflicts(review_board, live_readiness)
     inventory = {
@@ -174,6 +178,7 @@ def _readiness_intake(
             "sessions_selected": len(sessions),
             "session_ids": session_ids,
         },
+        "session_reviews": session_reviews,
         "evidence_inventory": inventory,
         "conflicts": conflicts,
     }
@@ -201,10 +206,16 @@ def _human_signoff_packet(
     intake: Mapping[str, Any], exception_review: Mapping[str, Any]
 ) -> dict[str, Any]:
     conflicts = list(intake.get("conflicts") or [])
+    inventory = _mapping(intake.get("evidence_inventory"))
+    session_reviews = list(intake.get("session_reviews") or [])
     repeated = list(exception_review.get("repeated_operational_risks") or [])
     unresolved = []
     if conflicts:
         unresolved.append("Resolve conflicting review-board and live-readiness evidence.")
+    if _has_missing_inventory(inventory):
+        unresolved.append("Complete missing paper-session evidence before signoff.")
+    if _has_open_or_held_session(session_reviews):
+        unresolved.append("Open or held paper sessions are not ready for signoff.")
     if repeated:
         unresolved.append("Explain repeated exception categories before signoff.")
     residual = []
@@ -249,13 +260,11 @@ def _supervised_live_dry_run_plan(
     }
 
 
-def _closed_session_window(artifact_root: Path, required_sessions: int) -> list[dict[str, Any]]:
+def _session_window(artifact_root: Path, required_sessions: int) -> list[dict[str, Any]]:
     latest: dict[str, tuple[datetime, dict[str, Any]]] = {}
     for path in artifact_root.glob("paper_session_lifecycle_*.json"):
         payload = _load_json(path)
         if payload.get("artifact_type") != "paper_session_lifecycle":
-            continue
-        if payload.get("status") != "closed":
             continue
         session_id = payload.get("session_id")
         if not isinstance(session_id, str) or not session_id:
@@ -269,6 +278,64 @@ def _closed_session_window(artifact_root: Path, required_sessions: int) -> list[
             latest[session_id] = (created_at, payload)
     ordered = [payload for _, payload in sorted(latest.values(), key=lambda item: item[0])]
     return ordered[-required_sessions:]
+
+
+def _session_review(
+    session: Mapping[str, Any], decision: Mapping[str, Any] | None
+) -> dict[str, Any]:
+    return {
+        "session_id": session.get("session_id"),
+        "session_status": session.get("status"),
+        "latest_operator_decision": _mapping(decision).get("decision"),
+        "missing_evidence": _missing_evidence(session),
+    }
+
+
+def _missing_evidence(session: Mapping[str, Any]) -> list[str]:
+    stages = _stages_by_name(session)
+    missing: list[str] = []
+    for name in ("readiness", "run_start", "run_result", "reconciliation", "closeout"):
+        stage = _mapping(stages.get(name))
+        if stage.get("status") == "missing" or not stage.get("artifact"):
+            missing.append(f"missing_{name}")
+    if session.get("status") != "closed":
+        missing.append("session_not_closed")
+    closeout = _mapping(stages.get("closeout"))
+    if closeout.get("status") != "passed" or _int_or_zero(
+        closeout.get("open_canary_orders_after_cleanup")
+    ):
+        missing.append("unclean_closeout")
+    reconciliation = _mapping(stages.get("reconciliation"))
+    if _int_or_zero(reconciliation.get("final_reconciliation_mismatches")):
+        missing.append("reconciliation_mismatch")
+    readiness = _mapping(stages.get("readiness"))
+    if _int_or_zero(readiness.get("unresolved_failures")):
+        missing.append("unresolved_health_failures")
+    return sorted(set(missing))
+
+
+def _has_missing_inventory(inventory: Mapping[str, Any]) -> bool:
+    for state in inventory.values():
+        if not isinstance(state, Mapping):
+            continue
+        if state.get("status") in {"missing", "stale"}:
+            return True
+        if _int_or_zero(state.get("missing_count")):
+            return True
+    return False
+
+
+def _has_open_or_held_session(session_reviews: Iterable[Any]) -> bool:
+    for review in session_reviews:
+        if not isinstance(review, Mapping):
+            continue
+        if review.get("session_status") != "closed":
+            return True
+        if review.get("latest_operator_decision") == "hold":
+            return True
+        if review.get("missing_evidence"):
+            return True
+    return False
 
 
 def _latest_decisions_by_session(artifact_root: Path) -> dict[str, dict[str, Any]]:
@@ -480,6 +547,10 @@ def _parse_created_at(value: Any) -> datetime | None:
 
 def _mapping(value: Any = None) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
+
+
+def _int_or_zero(value: Any) -> int:
+    return value if isinstance(value, int) else 0
 
 
 def _timestamp() -> str:
