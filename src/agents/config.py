@@ -51,7 +51,7 @@ def _get_experimental_strategies(env: Mapping[str, str]) -> List[str] | None:
 
 def _get_execution_mode(env: Mapping[str, str]) -> str:
     value = (env.get("EXECUTION_MODE") or "simulated").strip().lower()
-    allowed = {"simulated", "paper_broker"}
+    allowed = {"simulated", "paper_broker", "live"}
     if value not in allowed:
         raise ValueError(f"EXECUTION_MODE must be one of {sorted(allowed)}")
     return value

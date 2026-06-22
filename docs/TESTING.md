@@ -57,6 +57,8 @@ Informed by the Technical Implementation Plan (CI/CD, sanity checks) and the arc
 - `poetry run python -m cli.paper_live_readiness_workbench build --artifact-dir storage/audit --stability-window 5` writes the human review workbench packet and supervised live-dry-run bridge plan without broker mutation or live enablement.
 - `poetry run python -m cli.paper_supervised_live_dry_run build --artifact-dir storage/audit` writes the supervised live-dry-run command center plan after an accepted workbench decision, keeping env values redacted and live trading disabled.
 - `poetry run python -m cli.paper_supervised_dry_run_closeout build --artifact-dir storage/audit` writes the supervised dry-run closeout review packet from observed evidence, without broker mutation, live enablement, or gate behavior.
+- `poetry run python -m cli.paper_live_enablement_switch build --artifact-dir storage/audit` writes the final live switch transcript in dry-run mode by default and reports `ready_to_apply_live_switch` or `blocked_with_reasons`.
+- `poetry run python -m cli.paper_live_enablement_switch rollback --artifact-dir storage/audit --reason "<reason>"` writes rollback proof targeting paper broker mode; applying rollback requires typed confirmation.
 - `scripts/backtest_strategy.py` validates strategy before enabling live cycle.
 - `poetry build && poetry run python scripts/package_smoke.py` validates the wheel contains/imports critical runtime modules.
 - `poetry run python scripts/backtest_strategy.py --symbol SPY --start 2024-01-02 --end 2024-01-05 --capital 100000` should complete within CI budget and attach the resulting `storage/backtests/<run_id>/result.json` as an artifact for code review.

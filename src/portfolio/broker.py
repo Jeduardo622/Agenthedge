@@ -518,6 +518,70 @@ class AlpacaPaperBrokerAdapter:
         )
 
 
+class AlpacaLiveBrokerAdapter(AlpacaPaperBrokerAdapter):
+    """Alpaca live-trading adapter guarded by explicit live execution config."""
+
+    def __init__(
+        self,
+        *,
+        api_key_id: str,
+        api_secret_key: str,
+        base_url: str = "https://api.alpaca.markets",
+        timeout_seconds: float = 10.0,
+        safe_read_retry_attempts: int = AlpacaPaperBrokerAdapter._SAFE_READ_RETRY_ATTEMPTS,
+        safe_read_retry_delay_seconds: float = (
+            AlpacaPaperBrokerAdapter._SAFE_READ_RETRY_DELAY_SECONDS
+        ),
+    ) -> None:
+        if not api_key_id or not api_secret_key:
+            raise ValueError(
+                "Alpaca live broker requires ALPACA_API_KEY_ID and ALPACA_API_SECRET_KEY"
+            )
+        normalized_base_url = base_url.rstrip("/")
+        if normalized_base_url.endswith("/v2"):
+            normalized_base_url = normalized_base_url[: -len("/v2")]
+        if normalized_base_url != "https://api.alpaca.markets":
+            raise ValueError("ALPACA_LIVE_BASE_URL must be https://api.alpaca.markets")
+        self._base_url = normalized_base_url
+        self._timeout_seconds = timeout_seconds
+        self._safe_read_retry_attempts = max(1, safe_read_retry_attempts)
+        self._safe_read_retry_delay_seconds = max(0.0, safe_read_retry_delay_seconds)
+        self._headers = {
+            "APCA-API-KEY-ID": api_key_id,
+            "APCA-API-SECRET-KEY": api_secret_key,
+            "Content-Type": "application/json",
+        }
+
+    @classmethod
+    def from_env(cls, env: Mapping[str, str] | None = None) -> "AlpacaLiveBrokerAdapter":
+        source = env if env is not None else os.environ
+        if (source.get("EXECUTION_MODE") or "simulated").strip().lower() != "live":
+            raise ValueError("Alpaca live broker requires EXECUTION_MODE=live")
+        if (source.get("EXECUTION_LIVE_BROKER_ENABLED") or "false").strip().lower() not in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }:
+            raise ValueError("Alpaca live broker requires EXECUTION_LIVE_BROKER_ENABLED=true")
+        return cls(
+            api_key_id=source.get("ALPACA_API_KEY_ID", ""),
+            api_secret_key=source.get("ALPACA_API_SECRET_KEY", ""),
+            base_url=source.get("ALPACA_LIVE_BASE_URL", ""),
+            timeout_seconds=float(source.get("PROVIDER_HTTP_TIMEOUT_SECONDS", "10")),
+        )
+
+    def get_account(self) -> BrokerAccount:
+        account = super().get_account()
+        return BrokerAccount(
+            account_id=account.account_id,
+            status=account.status,
+            is_paper=False,
+            trading_blocked=account.trading_blocked,
+            raw_status=account.raw_status,
+        )
+
+
 def _normalize_side(value: object) -> OrderSide:
     return "sell" if isinstance(value, str) and value.lower() == "sell" else "buy"
 

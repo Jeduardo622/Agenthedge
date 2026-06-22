@@ -505,6 +505,249 @@ The decision register writes:
 
 Decision entries are audit-only and keep `trading_behavior_changed: False`, `live_trading_enabled: False`, and `broker_mutation: False`. A positive closeout only creates evidence for a separate live-readiness gate review; it is not live enablement.
 
+### Live Readiness Gate Review Dossier
+Use `cli.paper_live_readiness_gate_dossier build` after a supervised dry-run closeout decision records `outcome: ready_for_live_readiness_gate_review`. This command assembles the review packet an operator can use to ask whether ops, risk, and compliance are ready to schedule a live-readiness gate review. It is not live enablement: it reads existing artifacts only and does not contact the broker, submit or cancel orders, change scheduler state, mutate configuration, set environment variables, or enable live trading.
+
+```bash
+poetry run python -m cli.paper_live_readiness_gate_dossier build \
+  --artifact-dir storage/audit
+```
+
+The command writes:
+- `storage/audit/paper_live_readiness_gate_dossier_<timestamp>.json`
+- `storage/audit/paper_live_readiness_gate_dossier_<timestamp>.md`
+
+The Live Readiness Gate Review Dossier includes:
+- an outcome of `ready_for_gate_review` or `blocked_with_reasons`,
+- evidence links back to the live-readiness workbench, supervised dry-run plan, dry-run closeout packet, and closeout decision artifact,
+- explicit blocker and residual-risk sections,
+- pending approver slots for `operations`, `risk`, and `compliance`,
+- a decision register for `approve_gate_review_request`, `block_gate_review_request`, and `request_more_evidence`,
+- an immutable review packet record for the later live-enablement slice.
+
+The packet is explicitly labeled `review evidence` with `is_gate: False`, `automatic_live_promotion: False`, `live_trading_enabled: False`, and `broker_mutation: False`.
+
+Use `cli.paper_live_readiness_gate_dossier record-decision` when an ops, risk, or compliance reviewer records whether the dossier is complete enough to request the later live-readiness gate review. The command requires a reason, at least one artifact reference, and an `--approver-role` of `operations`, `risk`, or `compliance`.
+
+```bash
+poetry run python -m cli.paper_live_readiness_gate_dossier record-decision \
+  --artifact-dir storage/audit \
+  --outcome approve_gate_review_request \
+  --approver-role risk \
+  --reason "Dossier is complete enough to schedule the human gate review." \
+  --artifact-ref storage/audit/paper_live_readiness_gate_dossier_<timestamp>.json
+```
+
+The decision register writes:
+- `storage/audit/paper_live_readiness_gate_dossier_decision_<timestamp>.json`
+- `storage/audit/paper_live_readiness_gate_dossier_decision_<timestamp>.md`
+
+Decision entries are audit-only and keep `immutable_review_packet: True`, `trading_behavior_changed: False`, `live_trading_enabled: False`, and `broker_mutation: False`. A positive dossier decision only says the evidence is complete enough to request a separate live-readiness gate review; it is not live enablement.
+
+### Live Readiness Gate Review
+Use `cli.paper_live_readiness_gate_review build` only after the latest dossier has `outcome: ready_for_gate_review` and ops, risk, and compliance have each recorded `approve_gate_review_request` dossier decisions. This is the protected human review gate packet for deciding whether the evidence is complete enough to open a separate live-enablement request. It does not contact the broker, submit or cancel orders, change scheduler state, mutate runtime configuration, set environment variables, or enable live trading.
+
+```bash
+poetry run python -m cli.paper_live_readiness_gate_review build \
+  --artifact-dir storage/audit
+```
+
+The command writes:
+- `storage/audit/paper_live_readiness_gate_review_<timestamp>.json`
+- `storage/audit/paper_live_readiness_gate_review_<timestamp>.md`
+
+The Live Readiness Gate Review includes:
+- an outcome of `ready_for_live_enablement_review` or `blocked_with_reasons`,
+- intake of the accepted dossier and linked evidence,
+- an approval matrix for `operations`, `risk`, and `compliance`,
+- blocker and residual-risk registers,
+- a live-enablement handoff that only allows a `separate_live_enablement_request`,
+- explicit non-mutation flags: `automatic_live_promotion: False`, `live_trading_enabled: False`, `broker_mutation: False`, `runtime_config_mutation: False`, `scheduler_mutation: False`, and `env_var_mutation: False`.
+
+Use `cli.paper_live_readiness_gate_review record-decision` to record the protected gate review disposition. Valid outcomes are `approve_live_enablement_review`, `block_live_enablement_review`, and `request_live_enablement_remediation`. The command requires a reason, at least one artifact reference, and an `--approver-role` of `operations`, `risk`, or `compliance`.
+
+```bash
+poetry run python -m cli.paper_live_readiness_gate_review record-decision \
+  --artifact-dir storage/audit \
+  --outcome approve_live_enablement_review \
+  --approver-role compliance \
+  --reason "Gate review packet can move to a separate live-enablement request." \
+  --artifact-ref storage/audit/paper_live_readiness_gate_review_<timestamp>.json
+```
+
+The decision register writes:
+- `storage/audit/paper_live_readiness_gate_review_decision_<timestamp>.json`
+- `storage/audit/paper_live_readiness_gate_review_decision_<timestamp>.md`
+
+Decision entries are protected review records only. A positive gate review decision approves opening the later live-enablement slice; it still keeps `automatic_live_promotion: False`, `live_trading_enabled: False`, `broker_mutation: False`, `runtime_config_mutation: False`, `scheduler_mutation: False`, and `env_var_mutation: False`.
+
+### Live Enablement Request
+Use `cli.paper_live_enablement_request build` only after a protected gate review decision records `outcome: approve_live_enablement_review`. This command assembles the request packet for a human live-enablement board. It consumes the latest read-only `cli.paper_broker_health` artifact as live check evidence, but it does not contact the broker itself, submit or cancel orders, change scheduler state, mutate runtime configuration, set environment variables, or enable live trading.
+
+Before building the request, run a fresh read-only paper broker health check while the market is open:
+
+```bash
+poetry run python -m cli.paper_broker_health \
+  --artifact-dir storage/audit
+```
+
+Then build the request packet:
+
+```bash
+poetry run python -m cli.paper_live_enablement_request build \
+  --artifact-dir storage/audit \
+  --max-live-check-age-minutes 30
+```
+
+The command writes:
+- `storage/audit/paper_live_enablement_request_<timestamp>.json`
+- `storage/audit/paper_live_enablement_request_<timestamp>.md`
+
+The Live Enablement Request includes:
+- an outcome of `ready_for_live_enablement_review_board` or `blocked_with_reasons`,
+- gate review and gate review decision intake,
+- live check evidence from the latest read-only paper broker health artifact,
+- market clock evidence from that broker health artifact,
+- blocker details for stale or failed live checks,
+- a control handoff whose allowed next action is `human_live_enablement_board`,
+- explicit non-mutation flags: `automatic_live_promotion: False`, `live_trading_enabled: False`, `broker_mutation: False`, `runtime_config_mutation: False`, `scheduler_mutation: False`, and `env_var_mutation: False`.
+
+Use `cli.paper_live_enablement_request record-decision` to record whether the board accepts this request for a separate execution-plan slice. Valid outcomes are `approve_live_enablement_execution_plan`, `block_live_enablement_request`, and `request_live_enablement_changes`. The command requires a reason, at least one artifact reference, and an `--approver-role` of `operations`, `risk`, or `compliance`.
+
+```bash
+poetry run python -m cli.paper_live_enablement_request record-decision \
+  --artifact-dir storage/audit \
+  --outcome approve_live_enablement_execution_plan \
+  --approver-role operations \
+  --reason "Request packet can move to a separately reviewed execution plan." \
+  --artifact-ref storage/audit/paper_live_enablement_request_<timestamp>.json
+```
+
+The decision register writes:
+- `storage/audit/paper_live_enablement_request_decision_<timestamp>.json`
+- `storage/audit/paper_live_enablement_request_decision_<timestamp>.md`
+
+Decision entries remain protected review records only. A positive decision approves a later execution-plan slice; it still keeps `automatic_live_promotion: False`, `live_trading_enabled: False`, `broker_mutation: False`, `runtime_config_mutation: False`, `scheduler_mutation: False`, and `env_var_mutation: False`.
+
+### Live Enablement Execution Plan
+Use `cli.paper_live_enablement_execution_plan build` only after the live-enablement request decision records `outcome: approve_live_enablement_execution_plan`. This command enumerates the future config, environment, broker, scheduler, risk-control, and rollback changes needed before a final execution switch can be reviewed. It is a protected plan artifact only: it does not contact the broker, submit or cancel orders, change scheduler state, mutate runtime configuration, set environment variables, or enable live trading.
+
+```bash
+poetry run python -m cli.paper_live_enablement_execution_plan build \
+  --artifact-dir storage/audit \
+  --max-artifact-age-days 7
+```
+
+The command writes:
+- `storage/audit/paper_live_enablement_execution_plan_<timestamp>.json`
+- `storage/audit/paper_live_enablement_execution_plan_<timestamp>.md`
+
+The Live Enablement Execution Plan includes:
+- an outcome of `ready_for_execution_plan_review` or `blocked_with_reasons`,
+- request and request-decision intake,
+- planned-not-applied env changes for `EXECUTION_MODE`, `EXECUTION_REQUIRE_PAPER_ACCOUNT`, `EXECUTION_MARKET_HOURS_GUARD`, `ALPACA_API_KEY_ID`, `ALPACA_API_SECRET_KEY`, and `ALPACA_PAPER_BASE_URL`,
+- runtime config review items for `src.agents.config` and `src.agents.runtime_builder`,
+- broker account read-only checks, scheduler plan steps, risk-control settings, and rollback requirements,
+- execution boundaries that keep broker state, runtime config, scheduler state, environment variables, and live trading switches untouched,
+- explicit non-mutation flags: `automatic_live_promotion: False`, `live_trading_enabled: False`, `broker_mutation: False`, `runtime_config_mutation: False`, `scheduler_mutation: False`, and `env_var_mutation: False`.
+
+Use `cli.paper_live_enablement_execution_plan record-decision` to record whether ops, risk, or compliance accepts the plan for a later final enablement slice. Valid outcomes are `approve_execution_plan_for_final_enablement`, `block_execution_plan`, and `request_execution_plan_changes`. The command requires a reason, at least one artifact reference, and an `--approver-role` of `operations`, `risk`, or `compliance`.
+
+```bash
+poetry run python -m cli.paper_live_enablement_execution_plan record-decision \
+  --artifact-dir storage/audit \
+  --outcome approve_execution_plan_for_final_enablement \
+  --approver-role risk \
+  --reason "Execution plan is complete enough for final enablement review." \
+  --artifact-ref storage/audit/paper_live_enablement_execution_plan_<timestamp>.json
+```
+
+The decision register writes:
+- `storage/audit/paper_live_enablement_execution_plan_decision_<timestamp>.json`
+- `storage/audit/paper_live_enablement_execution_plan_decision_<timestamp>.md`
+
+Decision entries remain protected review records only. A positive execution-plan decision approves a later final enablement slice; it still keeps `automatic_live_promotion: False`, `live_trading_enabled: False`, `broker_mutation: False`, `runtime_config_mutation: False`, `scheduler_mutation: False`, and `env_var_mutation: False`.
+
+### Live Enablement Final Review
+Use `cli.paper_live_enablement_final_review build` only after the execution-plan decision records `outcome: approve_execution_plan_for_final_enablement`. This command assembles the final protected review packet that can authorize a separate implementation slice. It is still not the switch: it does not contact the broker, submit or cancel orders, change scheduler state, mutate runtime configuration, set environment variables, or enable live trading.
+
+```bash
+poetry run python -m cli.paper_live_enablement_final_review build \
+  --artifact-dir storage/audit \
+  --max-artifact-age-days 7
+```
+
+The command writes:
+- `storage/audit/paper_live_enablement_final_review_<timestamp>.json`
+- `storage/audit/paper_live_enablement_final_review_<timestamp>.md`
+
+The Live Enablement Final Review includes:
+- an outcome of `ready_for_final_enablement_slice` or `blocked_with_reasons`,
+- execution plan and execution-plan decision intake,
+- implementation authorization whose allowed next slice is `separate_live_enablement_switch_implementation`,
+- required switch-contract checks for runtime config, environment variables, broker account proof, scheduler enablement, risk limits, and rollback ownership,
+- explicit non-mutation flags: `automatic_live_promotion: False`, `live_trading_enabled: False`, `broker_mutation: False`, `runtime_config_mutation: False`, `scheduler_mutation: False`, and `env_var_mutation: False`.
+
+Use `cli.paper_live_enablement_final_review record-decision` to record whether ops, risk, or compliance accepts the final review for a separate implementation slice. Valid outcomes are `approve_live_enablement_switch_implementation`, `block_live_enablement_switch`, and `request_final_enablement_changes`. The command requires a reason, at least one artifact reference, and an `--approver-role` of `operations`, `risk`, or `compliance`.
+
+```bash
+poetry run python -m cli.paper_live_enablement_final_review record-decision \
+  --artifact-dir storage/audit \
+  --outcome approve_live_enablement_switch_implementation \
+  --approver-role compliance \
+  --reason "Final review accepts a separate live-enablement implementation slice." \
+  --artifact-ref storage/audit/paper_live_enablement_final_review_<timestamp>.json
+```
+
+The decision register writes:
+- `storage/audit/paper_live_enablement_final_review_decision_<timestamp>.json`
+- `storage/audit/paper_live_enablement_final_review_decision_<timestamp>.md`
+
+Decision entries remain protected review records only. A positive final-review decision authorizes coding the later implementation slice; it still keeps `automatic_live_promotion: False`, `live_trading_enabled: False`, `broker_mutation: False`, `runtime_config_mutation: False`, `scheduler_mutation: False`, and `env_var_mutation: False`.
+
+### Live Enablement Switch Command Center
+Use `cli.paper_live_enablement_switch build` only after the final-review decision records `outcome: approve_live_enablement_switch_implementation`. The command defaults to dry-run and writes the final switch transcript without mutating `.env`, scheduler state, or broker state. It consumes `paper_live_enablement_final_review_decision_<timestamp>.json`, runs a fresh final preflight for broker identity, account type, market clock, risk caps, kill-switch proof, scheduler state, and open orders, and shows the exact switch diff for config, env, scheduler, and broker mode.
+
+```bash
+poetry run python -m cli.paper_live_enablement_switch build \
+  --artifact-dir storage/audit
+```
+
+The command writes:
+- `storage/audit/paper_live_enablement_switch_<timestamp>.json`
+- `storage/audit/paper_live_enablement_switch_<timestamp>.md`
+
+Dry-run outcomes are:
+- `ready_to_apply_live_switch` when the approved final decision and fresh preflight are clean,
+- `blocked_with_reasons` when approval, config, broker, scheduler, risk, kill-switch, or open-order proof is missing.
+
+The explicit apply path requires both `--apply` and typed confirmation:
+
+```bash
+poetry run python -m cli.paper_live_enablement_switch build \
+  --artifact-dir storage/audit \
+  --apply \
+  --confirm "APPLY LIVE SWITCH"
+```
+
+When clean, the apply transcript records `live_switch_applied_with_rollback_packet`, keeps `scheduler_mutation: False`, and includes a rollback packet preview. Scheduler enablement remains a separate reviewed step unless a switch packet can prove scheduler state and rollback.
+
+Use `cli.paper_live_enablement_switch rollback` to write rollback proof for reverting to paper broker mode. The apply path requires typed confirmation:
+
+```bash
+poetry run python -m cli.paper_live_enablement_switch rollback \
+  --artifact-dir storage/audit \
+  --reason "Operator requested rollback after supervised live switch." \
+  --apply \
+  --confirm "ROLLBACK LIVE SWITCH"
+```
+
+The rollback command writes:
+- `storage/audit/paper_live_enablement_rollback_<timestamp>.json`
+- `storage/audit/paper_live_enablement_rollback_<timestamp>.md`
+
+Rollback packets target `EXECUTION_MODE=paper_broker`, `EXECUTION_LIVE_BROKER_ENABLED=false`, and keep scheduler enablement separate.
+
 ### Fresh Paper Rehearsal
 Run this when the release needs new broker-path proof and the environment is intentionally configured for Alpaca paper trading:
 
