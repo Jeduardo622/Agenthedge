@@ -323,6 +323,31 @@ Lifecycle stage definitions:
 
 This lifecycle report is read-only and does not replace the packet gate. It defines the daily paper session artifact contract so future decision logs and promotion-readiness reports can reference the same `session_id`.
 
+### Paper Session Repair
+Use `cli.paper_session_repair` when a review board or live-readiness workbench reports an incomplete paper session. The command is a read-only operator repair report. It does not contact the broker, submit or cancel orders, update scheduler state, mutate configuration, or enable live trading.
+
+The June 19 blocker shape is the canonical fail-closed case: `paper-20260619` is open with missing run start, run result, and closeout evidence. The repair command first checks whether existing same-day artifacts can reconstruct a closed lifecycle. If the required source artifacts already exist, it writes a fresh `paper_session_lifecycle_paper-YYYYMMDD_<timestamp>.json` and records `PAPER_SESSION_REPAIR_RECONSTRUCTED`. If evidence is still missing or the closeout is not clean, it writes `PAPER_SESSION_REPAIR_REQUIRED` with a precise checklist.
+
+```bash
+poetry run python -m cli.paper_session_repair \
+  --artifact-dir storage/audit \
+  --session-id paper-YYYYMMDD \
+  --review-board storage/audit/paper_review_board_<timestamp>.json \
+  --workbench storage/audit/paper_live_readiness_workbench_<timestamp>.json
+```
+
+The command writes:
+- `storage/audit/paper_session_repair_paper-YYYYMMDD_<timestamp>.json`
+- `storage/audit/paper_session_repair_paper-YYYYMMDD_<timestamp>.md`
+
+Repair checklist actions are intentionally manual and fail closed:
+- `capture_run_start`: produce same-day `paper_rollout_rehearsal_<timestamp>.json`.
+- `capture_run_result`: produce same-day `paper_rollout_packet_<timestamp>.json`.
+- `capture_clean_closeout`: confirm packet summary has `cancellation_status=passed`, `post_cancel_order_status=canceled`, and `open_canary_orders_after_cleanup=0`.
+- `rebuild_lifecycle`: rerun `cli.paper_session_lifecycle` for the repaired session date.
+- `record_operator_decision`: record a new operator decision after review.
+- `rerun_review_packets`: rerun `cli.paper_review_board` and `cli.paper_live_readiness_workbench build`.
+
 ### Paper Decision Log
 Use `cli.paper_decision_log` to record explicit operator decisions against a paper session. Valid decisions are `proceed`, `hold`, `retry`, and `skip`. The command writes audit artifacts only; it does not trigger trading, retry jobs, scheduler changes, packet generation, or promotion.
 
