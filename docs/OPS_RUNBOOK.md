@@ -95,6 +95,11 @@ Escalation steps follow `GOVERNANCE.md` matrix; severe incidents require manual 
   - Example local DSN: `postgresql://postgres:postgres@localhost:55432/agenthedge`
   - `RUNTIME_NAME` + `RUNTIME_LEASE_SECONDS` configure runtime lease/fencing semantics
   - `PORTFOLIO_ACCOUNT_ID` and `PORTFOLIO_INITIAL_CASH` control durable ledger bootstrap
+- Supervised paper execution controls:
+  - Keep `EXECUTION_MODE=paper_broker`, `EXECUTION_LIVE_BROKER_ENABLED=false`, and `EXECUTION_REQUIRE_PAPER_ACCOUNT=true` while tuning in paper mode.
+  - Initial paper-mode risk caps are `EXECUTION_MAX_ORDER_NOTIONAL=100`, `EXECUTION_MAX_ORDER_SHARES=1`, and `EXECUTION_MAX_SYMBOL_POSITION_SHARES=1` unless a reviewed paper tuning packet approves different values.
+  - Live mode remains disabled until `LIVE_ENABLEMENT_3_SESSION_STABILITY_CONFIRMED=true`, `LIVE_ENABLEMENT_LIVE_CREDENTIALS_VERIFIED=true`, and `LIVE_ENABLEMENT_RISK_CAPS_APPROVED=true` are all set with supporting review evidence.
+  - Live risk caps must be explicit positive `EXECUTION_MAX_*` values; do not reuse paper starter caps as live approval.
 - Break-glass controls:
   - `BREAK_GLASS_ENABLED=true|false`
   - `BREAK_GLASS_DEFAULT_TTL_SECONDS` and `BREAK_GLASS_MAX_TTL_SECONDS`
