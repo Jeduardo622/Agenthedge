@@ -25,6 +25,11 @@ from portfolio.broker import (
 )
 from portfolio.postgres_store import PostgresPortfolioStore
 from portfolio.store import PortfolioStore
+from research_inputs.catalyst_calendar import (
+    CatalystCalendarValidationError,
+    load_catalyst_calendar,
+)
+from strategies import CatalystStrategy, MacroStrategy, MomentumStrategy, ValueStrategy
 
 from .config import AgentRuntimeConfig
 from .context import AuditSink
@@ -58,6 +63,7 @@ def build_runtime_from_env(*, load_env: bool = True) -> AgentRuntime:
     register_builtin_agents(registry)
     ingestion = DataIngestionService()
     config = AgentRuntimeConfig.from_env()
+    agent_extras = _agent_extras_from_config(config)
     prometheus_port = int(os.environ.get("PROMETHEUS_METRICS_PORT", "9464"))
     ensure_metrics_server(prometheus_port)
     state = get_observability_state()
@@ -123,8 +129,29 @@ def build_runtime_from_env(*, load_env: bool = True) -> AgentRuntime:
         state_sink=state_sink,
         break_glass_store=break_glass_store,
         broker_adapter=broker_adapter,
+        agent_extras=agent_extras,
     )
     return runtime
+
+
+def _agent_extras_from_config(config: AgentRuntimeConfig) -> dict[str, object]:
+    strategies = [MomentumStrategy(), ValueStrategy(), MacroStrategy()]
+    research_inputs: dict[str, dict[str, object]] = {}
+    experimental = set(config.experimental_strategies or [])
+    if "catalyst" in experimental:
+        path = config.catalyst_research_input_path
+        if not path:
+            raise ValueError("CATALYST_RESEARCH_INPUT_PATH is required when catalyst is enabled")
+        try:
+            packet = load_catalyst_calendar(path)
+        except (OSError, CatalystCalendarValidationError, ValueError) as exc:
+            raise ValueError(f"Invalid catalyst research input: {path}") from exc
+        strategies.append(CatalystStrategy())
+        research_inputs.setdefault(packet.symbol.upper(), {})["catalyst_calendar"] = packet
+    extras: dict[str, object] = {"strategies": strategies}
+    if research_inputs:
+        extras["research_inputs"] = research_inputs
+    return extras
 
 
 def _resolve_audit_path(env: Mapping[str, str], config: AgentRuntimeConfig) -> Path:

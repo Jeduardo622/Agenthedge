@@ -82,6 +82,44 @@ class CatalystStrategy:
             },
         )
 
+    def explain_no_decision(self, payload: StrategyPayload) -> dict:
+        packet = _extract_packet(payload.directive)
+        if not packet:
+            return {"reason": "missing_catalyst_research_input", "metadata": {}}
+        metadata: dict[str, Any] = {
+            "artifact_id": packet.artifact_id,
+            "promotion_status": packet.promotion_status,
+        }
+        if packet.symbol.upper() != payload.symbol.upper():
+            metadata["packet_symbol"] = packet.symbol.upper()
+            return {"reason": "catalyst_symbol_mismatch", "metadata": metadata}
+        if packet.promotion_status not in ACTIVE_PROMOTION_STATUSES:
+            return {"reason": "inactive_catalyst_promotion_status", "metadata": metadata}
+        current_date = _directive_date(payload.directive, packet.as_of)
+        active_catalysts = _active_catalyst_ids(packet, current_date)
+        if not active_catalysts:
+            metadata["as_of"] = current_date.isoformat()
+            return {"reason": "no_active_catalyst", "metadata": metadata}
+        metadata["catalyst_id"] = active_catalysts[0]
+        metadata["catalyst_ids"] = active_catalysts
+        signal = _expected_return_signal(packet, current_date)
+        if not signal:
+            return {"reason": "missing_expected_return_signal", "metadata": metadata}
+        metadata["expected_return"] = signal.value
+        metadata["signal_confidence"] = signal.confidence
+        if signal.confidence < self.min_signal_confidence:
+            metadata["min_signal_confidence"] = self.min_signal_confidence
+            return {"reason": "expected_return_confidence_below_threshold", "metadata": metadata}
+        if signal.value <= 0:
+            return {"reason": "non_positive_expected_return", "metadata": metadata}
+        allocation = max(1.0, payload.portfolio.cash * self.target_alloc_pct)
+        quantity = int(allocation // payload.price)
+        if quantity <= 0:
+            metadata["allocation"] = allocation
+            metadata["price"] = payload.price
+            return {"reason": "insufficient_cash_for_catalyst_allocation", "metadata": metadata}
+        return {"reason": "no_signal", "metadata": metadata}
+
 
 def _extract_packet(directive: Mapping[str, Any]) -> CatalystCalendarPacket | None:
     research_inputs = directive.get("research_inputs")
