@@ -13,6 +13,7 @@ REQUIRED_PREFIXES = ("cli/", "ops/", "observability/", "research_inputs/", "stra
 REQUIRED_PATHS = (
     "cli/broker_canary.py",
     "cli/paper_decision_log.py",
+    "cli/paper_strategy_tuning_capture.py",
     "cli/paper_broker_health.py",
     "cli/paper_broker_health_history.py",
     "cli/paper_live_enablement_execution_plan.py",
@@ -25,6 +26,7 @@ REQUIRED_PATHS = (
     "cli/paper_live_readiness_workbench.py",
     "cli/paper_operator_status.py",
     "cli/paper_review_board.py",
+    "cli/paper_strategy_tuning_report.py",
     "cli/paper_session_repair.py",
     "cli/paper_session_lifecycle.py",
     "cli/paper_supervised_dry_run_closeout.py",
@@ -43,6 +45,7 @@ REQUIRED_PATHS = (
 REQUIRED_IMPORTS = (
     "cli.broker_canary",
     "cli.paper_decision_log",
+    "cli.paper_strategy_tuning_capture",
     "cli.paper_broker_health",
     "cli.paper_broker_health_history",
     "cli.paper_live_enablement_execution_plan",
@@ -55,6 +58,7 @@ REQUIRED_IMPORTS = (
     "cli.paper_live_readiness_workbench",
     "cli.paper_operator_status",
     "cli.paper_review_board",
+    "cli.paper_strategy_tuning_report",
     "cli.paper_session_repair",
     "cli.paper_session_lifecycle",
     "cli.paper_supervised_dry_run_closeout",

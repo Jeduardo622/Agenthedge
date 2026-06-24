@@ -468,6 +468,51 @@ The decision register writes:
 
 Decision entries are audit-only and keep `trading_behavior_changed: False` and `live_trading_enabled: False`. A positive review outcome only authorizes preparing the supervised live-dry-run plan; it is not a live-readiness gate.
 
+### Paper Strategy Tuning Report
+Use `cli.paper_strategy_tuning_capture` before the daily report when operators have per-decision strategy evidence. The command records the inputs needed to judge strategy quality: agent signal snapshots, rejected trade proposals and reasons, expected-vs-actual movement, drawdown, gross/net exposure, hit rate, and catalyst attribution. It is paper-only and audit-only; it does not contact the broker, submit or cancel orders, change scheduler state, mutate runtime configuration, alter strategy weights, or enable live trading.
+
+```bash
+poetry run python -m cli.paper_strategy_tuning_capture \
+  --artifact-dir storage/audit \
+  --session-id paper-YYYYMMDD \
+  --decision-artifact storage/audit/paper_decision_log_paper-YYYYMMDD_<timestamp>.json \
+  --signal-json '{"agent":"quant","strategy":"catalyst","symbol":"SPY","direction":"buy","confidence":0.72,"expected_return":0.018}' \
+  --expected-movement 0.018 \
+  --actual-movement 0.011 \
+  --movement-horizon next_session_close \
+  --rejected-trade-json '{"symbol":"QQQ","strategy":"momentum","reason":"below confidence threshold","blocked_by":"risk"}' \
+  --drawdown 0 \
+  --gross-exposure 100 \
+  --net-exposure 100 \
+  --hit-rate 1 \
+  --catalyst-json '{"catalyst_id":"spy-earnings-preview"}'
+```
+
+The command writes:
+- `storage/audit/paper_strategy_tuning_capture_paper-YYYYMMDD_<timestamp>.json`
+- `storage/audit/paper_strategy_tuning_capture_paper-YYYYMMDD_<timestamp>.md`
+
+Use `cli.paper_strategy_tuning_report` after paper-only workbench acceptance when the next question is strategy quality rather than live readiness. The command reads existing lifecycle, decision, rollout packet, and strategy tuning capture artifacts only; it does not contact the broker, submit or cancel orders, change scheduler state, mutate runtime configuration, alter strategy weights, or enable live trading.
+
+```bash
+poetry run python -m cli.paper_strategy_tuning_report \
+  --artifact-dir storage/audit \
+  --start-date YYYY-MM-DD \
+  --end-date YYYY-MM-DD
+```
+
+The command writes:
+- `storage/audit/paper_strategy_tuning_report_<timestamp>.json`
+- `storage/audit/paper_strategy_tuning_report_<timestamp>.md`
+
+The daily paper performance report answers:
+- what the agents wanted to do,
+- what risk or compliance blocked,
+- what happened after the decision,
+- which strategy inputs were useful or noisy.
+
+The report is explicitly paper-only with `paper_only: True`, `live_trading_enabled: False`, `broker_mutation: False`, and `strategy_behavior_changed: False`. It consumes the latest `paper_strategy_tuning_capture_paper-YYYYMMDD_<timestamp>.json` for each session when present. It also surfaces missing strategy-quality inputs such as `strategy_signal_snapshot`, `expected_vs_actual_movement`, `drawdown`, `exposure`, `hit_rate`, and `catalyst_attribution` so the next paper sessions can capture the evidence needed for cap, sizing, and strategy-rule review.
+
 ### Supervised Live-Dry-Run Command Center
 Use `cli.paper_supervised_live_dry_run build` only after the latest `paper_live_readiness_review_decision_<timestamp>.json` records `outcome: ready_for_supervised_paper_extension` and references the accepted workbench artifact. The command is a read-only planning command: it does not contact the broker, submit or cancel orders, change scheduler state, change environment variables, mutate config files, or enable live trading.
 
