@@ -67,6 +67,7 @@ class AgentRuntime:
         break_glass_store: BreakGlassStore | None = None,
         observability_state: ObservabilityState | None = None,
         broker_adapter: BrokerAdapter | None = None,
+        agent_extras: Mapping[str, Any] | None = None,
     ) -> None:
         self.logger = logging.getLogger("agenthedge.runtime")
         self.registry = registry
@@ -98,6 +99,7 @@ class AgentRuntime:
         self._audit_path = getattr(self.audit_sink, "path", DEFAULT_AUDIT_PATH)
         self.portfolio_store = portfolio_store or PortfolioStore(DEFAULT_PORTFOLIO_PATH)
         self.broker_adapter = broker_adapter or SimulatedBrokerAdapter(self.portfolio_store)
+        self._agent_extras = dict(agent_extras or {})
         self.alert_notifier = alert_notifier or AlertNotifier.from_env()
         self._alert_sink = self.alert_notifier.notify if self.alert_notifier else None
         self._audit_report_dir = Path(os.environ.get("AUDIT_REPORT_DIR", "storage/audit/reports"))
@@ -171,6 +173,7 @@ class AgentRuntime:
                     "audit_path": self._audit_path,
                     "audit_report_dir": self._audit_report_dir,
                     "performance_tracker": self._performance_tracker,
+                    **self._agent_extras,
                 },
                 alert_sink=self._alert_sink,
             ).with_message_bus(self.bus)

@@ -44,3 +44,29 @@ def test_director_includes_data_metadata_in_directive(tmp_path) -> None:
 
     assert directives
     assert directives[0]["data_metadata"]["degraded_mode"] is True
+
+
+def test_director_attaches_symbol_research_inputs_to_directive(tmp_path) -> None:
+    bus = MessageBus()
+    store = PortfolioStore(tmp_path / "portfolio.json", initial_cash=10000.0)
+    research_packet = object()
+    ctx = AgentContext.build_default(
+        name="director",
+        ingestion=FakeIngestion(),
+        extras={
+            "portfolio_store": store,
+            "research_inputs": {"SPY": {"catalyst_calendar": research_packet}},
+        },
+    ).with_message_bus(bus)
+    director = DirectorAgent(ctx)
+    directives: List[Dict[str, Any]] = []
+    bus.subscribe(
+        lambda env: directives.append(dict(env.message.payload or {})),
+        topics=["director.directive"],
+    )
+
+    director.tick()
+    assert bus.drain(1.0) is True
+
+    assert directives
+    assert directives[0]["research_inputs"]["catalyst_calendar"] is research_packet

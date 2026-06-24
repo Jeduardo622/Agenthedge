@@ -294,6 +294,10 @@ def _strategy_capture_from_artifact_refs(artifact_refs: Iterable[str]) -> dict[s
                 extracted = _rejected_trades_from_quant_consensus_rejected(record, payload)
                 rejected_trades.extend(extracted)
                 rejected_signals.extend(extracted)
+            elif action == "quant_no_proposals":
+                extracted = _non_participation_from_quant_audit(record, payload)
+                rejected_trades.extend(extracted)
+                rejected_signals.extend(extracted)
             elif action == "strategy_proposal":
                 signal = _signal_from_strategy_proposal(record, payload)
                 if signal:
@@ -384,10 +388,28 @@ def _rejected_trades_from_quant_consensus_rejected(
     record: Mapping[str, Any], payload: Mapping[str, Any]
 ) -> list[dict[str, Any]]:
     rejected = payload.get("rejected_trades")
-    if not isinstance(rejected, list):
+    trades = _strategy_entries_from_audit_list(record, payload, rejected)
+    trades.extend(_non_participation_from_quant_audit(record, payload))
+    return trades
+
+
+def _non_participation_from_quant_audit(
+    record: Mapping[str, Any], payload: Mapping[str, Any]
+) -> list[dict[str, Any]]:
+    return _strategy_entries_from_audit_list(
+        record,
+        payload,
+        payload.get("non_participating_strategies"),
+    )
+
+
+def _strategy_entries_from_audit_list(
+    record: Mapping[str, Any], payload: Mapping[str, Any], raw_entries: Any
+) -> list[dict[str, Any]]:
+    if not isinstance(raw_entries, list):
         return []
     trades: list[dict[str, Any]] = []
-    for trade in rejected:
+    for trade in raw_entries:
         trade_payload = _mapping(trade)
         metadata = dict(_mapping(trade_payload.get("metadata")))
         signal = {

@@ -53,6 +53,30 @@ class MacroStrategy:
             },
         )
 
+    def explain_no_decision(self, payload: StrategyPayload) -> dict:
+        news_items = payload.directive.get("news") or []
+        sentiment_scores = _extract_sentiment(news_items)
+        if not sentiment_scores:
+            return {"reason": "missing_news_sentiment", "metadata": {"samples": 0}}
+        avg_sentiment = mean(sentiment_scores)
+        if abs(avg_sentiment) < self.sentiment_threshold:
+            return {
+                "reason": "macro_sentiment_below_threshold",
+                "metadata": {
+                    "avg_sentiment": avg_sentiment,
+                    "sentiment_threshold": self.sentiment_threshold,
+                    "samples": len(sentiment_scores),
+                },
+            }
+        allocation = max(1.0, payload.portfolio.cash * self.target_alloc_pct)
+        qty = int(allocation // payload.price)
+        if qty <= 0:
+            return {
+                "reason": "insufficient_cash_for_macro_allocation",
+                "metadata": {"allocation": allocation, "price": payload.price},
+            }
+        return {"reason": "no_signal", "metadata": {"avg_sentiment": avg_sentiment}}
+
 
 def _extract_sentiment(news_items: List[Dict[str, Any]]) -> List[float]:
     scores: List[float] = []

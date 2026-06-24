@@ -67,6 +67,49 @@ def test_build_runtime_paper_broker_defaults_to_session_audit_path(monkeypatch) 
     )
 
 
+def test_build_runtime_injects_enabled_catalyst_strategy_and_research_input(
+    monkeypatch, tmp_path
+) -> None:
+    _wire_common_builder_stubs(monkeypatch)
+    catalyst_path = tmp_path / "catalyst.json"
+    catalyst_path.write_text("{}", encoding="utf-8")
+
+    class _CatalystStrategy:
+        name = "catalyst"
+
+    class _Packet:
+        symbol = "SPY"
+
+    monkeypatch.setattr(
+        "agents.runtime_builder.AgentRuntimeConfig",
+        type(
+            "Cfg",
+            (),
+            {
+                "from_env": staticmethod(
+                    lambda: AgentRuntimeConfig(
+                        experimental_strategies=["catalyst"],
+                        catalyst_research_input_path=str(catalyst_path),
+                    )
+                )
+            },
+        ),
+    )
+    monkeypatch.setattr("agents.runtime_builder.CatalystStrategy", _CatalystStrategy)
+    monkeypatch.setattr("agents.runtime_builder.load_catalyst_calendar", lambda _path: _Packet())
+
+    runtime = build_runtime_from_env(load_env=False)
+
+    extras = runtime.kwargs["agent_extras"]
+    assert [strategy.name for strategy in extras["strategies"]] == [
+        "momentum",
+        "value",
+        "macro",
+        "catalyst",
+    ]
+    assert extras["research_inputs"]["SPY"]["catalyst_calendar"].symbol == "SPY"
+
+
 def test_build_runtime_uses_postgres_components(monkeypatch) -> None:
     _wire_common_builder_stubs(monkeypatch)
     monkeypatch.setenv("RUNTIME_BACKEND", "postgres")

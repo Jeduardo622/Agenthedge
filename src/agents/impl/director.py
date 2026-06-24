@@ -22,6 +22,7 @@ class DirectorAgent(BaseAgent):
             raise RuntimeError("DirectorAgent requires a message bus")
         self.bus: MessageBus = bus
         self.symbols = self._resolve_symbols(context.extras or {})
+        self.research_inputs = self._resolve_research_inputs(context.extras or {})
         self._approval_subscription: Subscription | None = None
         self._approval_ttl_seconds = int(os.environ.get("DIRECTOR_APPROVAL_TTL_SECONDS", "900"))
 
@@ -37,6 +38,18 @@ class DirectorAgent(BaseAgent):
             if tokens:
                 return tokens
         return ["SPY", "QQQ"]
+
+    def _resolve_research_inputs(
+        self, extras: Mapping[str, object]
+    ) -> Mapping[str, Mapping[str, Any]]:
+        raw_inputs = extras.get("research_inputs")
+        if not isinstance(raw_inputs, Mapping):
+            return {}
+        resolved: dict[str, Mapping[str, Any]] = {}
+        for symbol, inputs in raw_inputs.items():
+            if isinstance(inputs, Mapping):
+                resolved[str(symbol).upper()] = dict(inputs)
+        return resolved
 
     def setup(self) -> None:
         self._approval_subscription = self.bus.subscribe(
@@ -68,6 +81,9 @@ class DirectorAgent(BaseAgent):
                 "timestamp": datetime.now(timezone.utc).isoformat(),
                 "run_id": run_id,
             }
+            symbol_research_inputs = self.research_inputs.get(symbol.upper())
+            if symbol_research_inputs:
+                directive["research_inputs"] = dict(symbol_research_inputs)
             fundamentals = snapshot.fundamentals or {}
             metadata = getattr(snapshot, "metadata", {})
             degraded = metadata.get("degraded_mode") if isinstance(metadata, dict) else False

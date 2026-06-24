@@ -118,21 +118,36 @@ class StrategyCouncilAgent(BaseAgent):
         directive_id = payload.get("directive_id")
         decision_id = payload.get("decision_id") or directive_id
         proposals: List[StrategyDecision] = []
+        non_participating: list[dict[str, Any]] = []
         for strategy in self.strategies:
-            decision = strategy.generate(
-                StrategyPayload(
-                    symbol=symbol,
-                    price=price,
-                    directive=payload,
-                    portfolio=snapshot,
-                    performance=self.strategy_performance,
-                )
+            strategy_payload = StrategyPayload(
+                symbol=symbol,
+                price=price,
+                directive=payload,
+                portfolio=snapshot,
+                performance=self.strategy_performance,
             )
+            decision = strategy.generate(strategy_payload)
             if not decision:
+                non_participating.append(
+                    self._non_participation_payload(
+                        strategy,
+                        strategy_payload,
+                        directive_id=directive_id,
+                        decision_id=decision_id,
+                    )
+                )
                 continue
             self._publish_strategy_proposal(decision, directive_id, decision_id)
             proposals.append(decision)
         if not proposals:
+            self._audit_no_proposals(
+                symbol=symbol,
+                price=price,
+                non_participating=non_participating,
+                directive_id=directive_id,
+                decision_id=decision_id,
+            )
             return
         consensus = self._build_consensus(symbol, price, proposals, directive_id, decision_id)
         if not consensus:
@@ -140,6 +155,7 @@ class StrategyCouncilAgent(BaseAgent):
                 symbol=symbol,
                 price=price,
                 decisions=proposals,
+                non_participating=non_participating,
                 directive_id=directive_id,
                 decision_id=decision_id,
             )
@@ -272,6 +288,7 @@ class StrategyCouncilAgent(BaseAgent):
         symbol: str,
         price: float,
         decisions: Sequence[StrategyDecision],
+        non_participating: Sequence[Mapping[str, Any]],
         directive_id: str | None,
         decision_id: str | None,
     ) -> None:
@@ -309,6 +326,29 @@ class StrategyCouncilAgent(BaseAgent):
                     "decision_id": decision_id,
                 },
                 "rejected_trades": rejected_trades,
+                "non_participating_strategies": [dict(item) for item in non_participating],
+            },
+        )
+
+    def _audit_no_proposals(
+        self,
+        *,
+        symbol: str,
+        price: float,
+        non_participating: Sequence[Mapping[str, Any]],
+        directive_id: str | None,
+        decision_id: str | None,
+    ) -> None:
+        self.audit(
+            "quant_no_proposals",
+            {
+                "decision_id": decision_id or directive_id,
+                "directive_id": directive_id,
+                "symbol": symbol,
+                "price": price,
+                "reason": "no_strategy_proposals",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "non_participating_strategies": [dict(item) for item in non_participating],
             },
         )
 
@@ -362,6 +402,34 @@ class StrategyCouncilAgent(BaseAgent):
             if metadata.get(key) is not None:
                 payload[key] = metadata[key]
         return payload
+
+    def _non_participation_payload(
+        self,
+        strategy: Strategy,
+        payload: StrategyPayload,
+        *,
+        directive_id: str | None,
+        decision_id: str | None,
+    ) -> dict[str, Any]:
+        explanation = _strategy_no_decision_explanation(strategy, payload)
+        metadata = dict(_mapping(explanation.get("metadata")))
+        entry: dict[str, Any] = {
+            "strategy": strategy.name,
+            "symbol": payload.symbol,
+            "reason": str(explanation.get("reason") or "no_signal"),
+            "blocked_by": "strategy_council",
+            "decision_id": decision_id or directive_id,
+            "direction": "none",
+            "quantity": 0,
+            "metadata": metadata,
+        }
+        expected_return = _as_float(metadata.get("expected_return"))
+        if expected_return is not None:
+            entry["expected_return"] = expected_return
+        for key in ("artifact_id", "catalyst_id", "catalyst_ids"):
+            if metadata.get(key) is not None:
+                entry[key] = metadata[key]
+        return entry
 
     def _default_strategies(self) -> List[Strategy]:
         return [
@@ -420,6 +488,20 @@ def _as_float(value: object) -> float | None:
         except ValueError:
             return None
     return None
+
+
+def _mapping(value: object) -> Mapping[str, Any]:
+    return value if isinstance(value, Mapping) else {}
+
+
+def _strategy_no_decision_explanation(
+    strategy: Strategy, payload: StrategyPayload
+) -> Mapping[str, Any]:
+    explainer = getattr(strategy, "explain_no_decision", None)
+    if not callable(explainer):
+        return {"reason": "no_signal", "metadata": {}}
+    explanation = explainer(payload)
+    return explanation if isinstance(explanation, Mapping) else {"reason": "no_signal"}
 
 
 # Backwards compatibility alias for runtimes/tests that still import QuantAgent

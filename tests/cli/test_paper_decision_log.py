@@ -338,6 +338,18 @@ def test_decision_log_extracts_rejected_strategy_capture_from_no_consensus_audit
                             },
                         }
                     ],
+                    "non_participating_strategies": [
+                        {
+                            "strategy": "value",
+                            "symbol": "SPY",
+                            "reason": "missing_fundamentals",
+                            "blocked_by": "strategy_council",
+                            "direction": "none",
+                            "quantity": 0,
+                            "decision_id": "director-decision-1",
+                            "metadata": {"missing": ["PERatio", "ProfitMargin"]},
+                        }
+                    ],
                 },
             }
         ],
@@ -359,6 +371,8 @@ def test_decision_log_extracts_rejected_strategy_capture_from_no_consensus_audit
     assert capture["strategy_signal_snapshot"][0]["strategy"] == "catalyst"
     assert capture["strategy_signal_snapshot"][0]["expected_return"] == 0.018
     assert capture["rejected_trades"][0]["reason"] == "consensus_threshold_not_met"
+    assert capture["rejected_trades"][1]["strategy"] == "value"
+    assert capture["rejected_trades"][1]["reason"] == "missing_fundamentals"
     assert capture["expected_vs_actual_movement"]["expected"] == 0.018
     assert capture["catalyst_attribution"] == {
         "artifact_id": "research-20260627-spy",

@@ -36,6 +36,19 @@ class _StubStrategy:
         )
 
 
+class _NoDecisionStrategy:
+    def __init__(self, name: str, reason: str, metadata: dict | None = None) -> None:
+        self.name = name
+        self._reason = reason
+        self._metadata = metadata or {}
+
+    def generate(self, payload: StrategyPayload) -> StrategyDecision | None:
+        return None
+
+    def explain_no_decision(self, payload: StrategyPayload) -> dict:
+        return {"reason": self._reason, "metadata": dict(self._metadata)}
+
+
 def _build_context(tmp_path, strategies):
     store = PortfolioStore(tmp_path / "portfolio.json", initial_cash=100000.0)
     tracker = PerformanceTracker(tmp_path / "performance.json")
@@ -163,4 +176,73 @@ def test_strategy_council_rejection_preserves_expected_return_and_catalyst_metad
     assert catalyst["expected_return"] == 0.018
     assert catalyst["metadata"]["artifact_id"] == "research-20260626-spy"
     assert catalyst["metadata"]["catalyst_id"] == "spy-earnings-preview"
+    agent.teardown()
+
+
+def test_strategy_council_records_non_participation_when_strategy_returns_none(tmp_path):
+    strategies = [
+        _NoDecisionStrategy(
+            "catalyst",
+            "missing_catalyst_research_input",
+            metadata={"artifact_id": "research-missing"},
+        ),
+        _StubStrategy("momentum", "sell", confidence=0.3),
+    ]
+    context, _, bus, audit_events = _build_context(tmp_path, strategies)
+    agent = StrategyCouncilAgent(context)
+    agent.setup()
+
+    bus.publish(
+        "director.directive",
+        payload={
+            "symbol": "SPY",
+            "latest_close": 105.0,
+            "quote": {"pc": 100.0},
+        },
+    )
+    assert bus.drain(1.0) is True
+
+    rejected = [event for event in audit_events if event["action"] == "quant_consensus_rejected"]
+    assert rejected
+    skipped = rejected[0]["payload"]["non_participating_strategies"]
+    assert skipped == [
+        {
+            "strategy": "catalyst",
+            "symbol": "SPY",
+            "reason": "missing_catalyst_research_input",
+            "blocked_by": "strategy_council",
+            "decision_id": rejected[0]["payload"]["decision_id"],
+            "direction": "none",
+            "quantity": 0,
+            "metadata": {"artifact_id": "research-missing"},
+            "artifact_id": "research-missing",
+        }
+    ]
+    agent.teardown()
+
+
+def test_strategy_council_audits_non_participation_when_no_strategy_proposes(tmp_path):
+    strategies = [
+        _NoDecisionStrategy("value", "missing_fundamentals"),
+        _NoDecisionStrategy("macro", "missing_news_sentiment"),
+    ]
+    context, _, bus, audit_events = _build_context(tmp_path, strategies)
+    agent = StrategyCouncilAgent(context)
+    agent.setup()
+
+    bus.publish(
+        "director.directive",
+        payload={
+            "symbol": "SPY",
+            "latest_close": 105.0,
+            "quote": {"pc": 100.0},
+        },
+    )
+    assert bus.drain(1.0) is True
+
+    no_proposals = [event for event in audit_events if event["action"] == "quant_no_proposals"]
+    assert no_proposals
+    assert {
+        item["reason"] for item in no_proposals[0]["payload"]["non_participating_strategies"]
+    } == {"missing_fundamentals", "missing_news_sentiment"}
     agent.teardown()
