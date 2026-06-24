@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Mapping
 
@@ -64,7 +65,7 @@ def build_runtime_from_env(*, load_env: bool = True) -> AgentRuntime:
     run_id = env.get("RUN_ID", "runtime")
     profile = resolve_runtime_profile(env)
     backend = resolve_runtime_backend(env)
-    audit_path = Path(env.get("AUDIT_LOG_PATH", "storage/audit/runtime_events.jsonl"))
+    audit_path = _resolve_audit_path(env, config)
     portfolio_path = Path(env.get("PORTFOLIO_STATE_PATH", "storage/strategy_state/portfolio.json"))
     bus = MessageBus()
     audit_sink: AuditSink = JsonlAuditSink(audit_path)
@@ -124,6 +125,23 @@ def build_runtime_from_env(*, load_env: bool = True) -> AgentRuntime:
         broker_adapter=broker_adapter,
     )
     return runtime
+
+
+def _resolve_audit_path(env: Mapping[str, str], config: AgentRuntimeConfig) -> Path:
+    configured = env.get("AUDIT_LOG_PATH")
+    if configured and configured.strip():
+        return Path(configured)
+    if config.execution_mode == "paper_broker":
+        session_date = _paper_session_date(env)
+        return Path("storage/audit") / f"runtime_events_paper-{session_date}.jsonl"
+    return Path("storage/audit/runtime_events.jsonl")
+
+
+def _paper_session_date(env: Mapping[str, str]) -> str:
+    configured = env.get("PAPER_SESSION_DATE")
+    if configured and configured.strip():
+        return configured.strip().replace("-", "")
+    return datetime.now(timezone.utc).strftime("%Y%m%d")
 
 
 __all__ = ["build_runtime_from_env"]

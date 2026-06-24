@@ -141,3 +141,101 @@ def test_strategy_tuning_capture_cli_accepts_json_inputs(tmp_path: Path, monkeyp
     assert "PAPER_STRATEGY_TUNING_CAPTURE" in result.output
     assert "capture_artifact:" in result.output
     assert "live_trading_enabled: False" in result.output
+
+
+def test_strategy_tuning_capture_cli_reuses_decision_capture_for_actual_movement(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from cli import paper_strategy_tuning_capture
+
+    artifact_dir = tmp_path / "audit"
+    decision_path = artifact_dir / "paper_decision_log_paper-20260625_20260625T135900Z.json"
+    prior_capture_path = (
+        artifact_dir / "paper_strategy_tuning_capture_paper-20260625_20260625T135901Z.json"
+    )
+    _write_json(
+        prior_capture_path,
+        {
+            "artifact_type": "paper_strategy_tuning_capture",
+            "session_id": "paper-20260625",
+            "decision_artifact": str(decision_path),
+            "strategy_signal_snapshot": [
+                {
+                    "agent": "quant",
+                    "strategy": "catalyst",
+                    "symbol": "SPY",
+                    "direction": "buy",
+                    "confidence": 0.72,
+                    "expected_return": 0.018,
+                    "metadata": {
+                        "artifact_id": "research-20260625-spy",
+                        "catalyst_id": "spy-earnings-preview",
+                    },
+                }
+            ],
+            "expected_vs_actual_movement": {
+                "expected": 0.018,
+                "actual": None,
+                "difference": None,
+                "horizon": None,
+                "unit": "return",
+            },
+            "performance_metrics": {
+                "drawdown": 0.0,
+                "gross_exposure": 100.0,
+                "net_exposure": 100.0,
+                "hit_rate": None,
+            },
+            "catalyst_attribution": {
+                "artifact_id": "research-20260625-spy",
+                "catalyst_id": "spy-earnings-preview",
+            },
+        },
+    )
+    _write_json(
+        decision_path,
+        {
+            "artifact_type": "paper_decision_log",
+            "session_id": "paper-20260625",
+            "strategy_capture_artifact": str(prior_capture_path),
+        },
+    )
+    monkeypatch.setattr(paper_strategy_tuning_capture, "_timestamp", lambda: "20260625T210000Z")
+
+    result = CliRunner().invoke(
+        paper_strategy_tuning_capture.app,
+        [
+            "--artifact-dir",
+            str(artifact_dir),
+            "--session-id",
+            "paper-20260625",
+            "--decision-artifact",
+            str(decision_path),
+            "--actual-movement",
+            "0.011",
+            "--movement-horizon",
+            "next_session_close",
+            "--from-decision-capture",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    capture_path = (
+        artifact_dir / "paper_strategy_tuning_capture_paper-20260625_20260625T210000Z.json"
+    )
+    capture = json.loads(capture_path.read_text(encoding="utf-8"))
+    assert capture["strategy_signal_snapshot"][0]["strategy"] == "catalyst"
+    assert capture["expected_vs_actual_movement"] == {
+        "expected": 0.018,
+        "actual": 0.011,
+        "difference": -0.007,
+        "horizon": "next_session_close",
+        "unit": "return",
+    }
+    assert capture["performance_metrics"]["gross_exposure"] == 100.0
+    assert capture["catalyst_attribution"]["catalyst_id"] == "spy-earnings-preview"
+
+
+def _write_json(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload), encoding="utf-8")

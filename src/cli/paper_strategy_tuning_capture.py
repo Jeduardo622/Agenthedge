@@ -174,6 +174,54 @@ def _json_mapping(value: str, field: str) -> dict[str, Any]:
     return parsed
 
 
+def _capture_defaults_from_decision(decision_artifact: str | None) -> dict[str, Any]:
+    if not decision_artifact:
+        return {}
+    decision = _load_json(Path(decision_artifact))
+    capture_ref = decision.get("strategy_capture_artifact")
+    if not isinstance(capture_ref, str) or not capture_ref.strip():
+        return {}
+    capture = _load_json(Path(capture_ref))
+    if capture.get("artifact_type") != "paper_strategy_tuning_capture":
+        return {}
+    movement = _mapping(capture.get("expected_vs_actual_movement"))
+    metrics = _mapping(capture.get("performance_metrics"))
+    return {
+        "signals": _normalize_mappings(_list_of_mappings(capture.get("strategy_signal_snapshot"))),
+        "expected_movement": _float_or_none(movement.get("expected")),
+        "movement_unit": str(movement.get("unit") or "return"),
+        "rejected_trades": _normalize_mappings(_list_of_mappings(capture.get("rejected_trades"))),
+        "drawdown": _float_or_none(metrics.get("drawdown")),
+        "gross_exposure": _float_or_none(metrics.get("gross_exposure")),
+        "net_exposure": _float_or_none(metrics.get("net_exposure")),
+        "hit_rate": _float_or_none(metrics.get("hit_rate")),
+        "catalyst_attribution": dict(_mapping(capture.get("catalyst_attribution"))),
+    }
+
+
+def _load_json(path: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _list_of_mappings(value: Any) -> list[Mapping[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, Mapping)]
+
+
+def _float_or_none(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _validate_nonempty(field: str, value: str) -> str:
     normalized = value.strip()
     if not normalized:
@@ -249,28 +297,47 @@ def main(
         "--catalyst-json",
         help="JSON object describing catalyst attribution.",
     ),
+    from_decision_capture: bool = typer.Option(
+        False,
+        "--from-decision-capture",
+        help="Reuse the decision artifact's prior strategy capture while adding review movement.",
+    ),
     recorder: str | None = typer.Option(None, "--recorder", help="Recorder identifier."),
     notes: str | None = typer.Option(None, "--notes", help="Operator notes."),
 ) -> None:
+    defaults = _capture_defaults_from_decision(decision_artifact) if from_decision_capture else {}
+    signals = [_json_mapping(value, "signal-json") for value in signal_json] or defaults.get(
+        "signals", []
+    )
+    rejected_trades = [
+        _json_mapping(value, "rejected-trade-json") for value in rejected_trade_json
+    ] or defaults.get("rejected_trades", [])
+    catalyst_attribution = (
+        _json_mapping(catalyst_json, "catalyst-json")
+        if catalyst_json
+        else defaults.get("catalyst_attribution")
+    )
     capture = record_capture(
         artifact_dir=artifact_dir,
         session_id=session_id,
         decision_artifact=decision_artifact,
-        signals=[_json_mapping(value, "signal-json") for value in signal_json],
-        expected_movement=expected_movement,
+        signals=signals,
+        expected_movement=(
+            expected_movement
+            if expected_movement is not None
+            else defaults.get("expected_movement")
+        ),
         actual_movement=actual_movement,
         movement_horizon=movement_horizon,
-        movement_unit=movement_unit,
-        rejected_trades=[
-            _json_mapping(value, "rejected-trade-json") for value in rejected_trade_json
-        ],
-        drawdown=drawdown,
-        gross_exposure=gross_exposure,
-        net_exposure=net_exposure,
-        hit_rate=hit_rate,
-        catalyst_attribution=(
-            _json_mapping(catalyst_json, "catalyst-json") if catalyst_json else None
+        movement_unit=movement_unit or str(defaults.get("movement_unit") or "return"),
+        rejected_trades=rejected_trades,
+        drawdown=drawdown if drawdown is not None else defaults.get("drawdown"),
+        gross_exposure=(
+            gross_exposure if gross_exposure is not None else defaults.get("gross_exposure")
         ),
+        net_exposure=net_exposure if net_exposure is not None else defaults.get("net_exposure"),
+        hit_rate=hit_rate if hit_rate is not None else defaults.get("hit_rate"),
+        catalyst_attribution=catalyst_attribution,
         recorder=recorder,
         notes=notes,
     )

@@ -374,7 +374,8 @@ Decision log requirements:
 - Always include a nonempty reason.
 - Use `--exception-category` for hold/retry/skip decisions when a structured category applies. Valid exception categories are `broker_issue`, `market_hours_policy`, `stale_artifact`, `cleanup_required`, and `reconciliation_mismatch`.
 - Reference the lifecycle artifact and any supporting status, packet, failure, or reconciliation artifact used for the decision.
-- When Strategy Council audit output exists, reference the matching `storage/audit/runtime_events*.jsonl` artifact. `cli.paper_decision_log` extracts `quant_consensus` signal snapshots, expected return, and catalyst attribution automatically, then emits `paper_strategy_tuning_capture_paper-YYYYMMDD_<timestamp>.json` before the tuning report runs. This companion capture derives paper exposure and drawdown from referenced paper packet and broker health artifacts when those artifacts are present.
+- Paper-broker runtime sessions default to the same-session audit path `storage/audit/runtime_events_paper-YYYYMMDD.jsonl` when `AUDIT_LOG_PATH` is unset. Set `PAPER_SESSION_DATE=YYYY-MM-DD` before `cli.runtime run-once` when replaying or supervising a specific session date.
+- When Strategy Council audit output exists, reference the matching `storage/audit/runtime_events_paper-YYYYMMDD.jsonl` artifact from the `runtime_events*.jsonl` audit family. `cli.paper_decision_log` extracts `quant_consensus` signal snapshots, expected return, and catalyst attribution automatically, then emits `paper_strategy_tuning_capture_paper-YYYYMMDD_<timestamp>.json` before the tuning report runs. This companion capture derives paper exposure and drawdown from referenced paper packet and broker health artifacts when those artifacts are present.
 - Use `--strategy-signal-json`, `--expected-movement`, `--actual-movement`, `--movement-horizon`, `--rejected-trade-json`, `--hit-rate`, and `--catalyst-json` only to override or backfill evidence that was not emitted by the agents.
 - Treat `retry` as an operator note to rerun the appropriate read-only or paper-run command manually; it does not invoke a retry.
 - Treat `proceed` as a recorded human decision only; it is not automatic live promotion.
@@ -388,13 +389,7 @@ poetry run python -m cli.paper_decision_log \
   --artifact-ref storage/audit/paper_session_lifecycle_paper-YYYYMMDD_<timestamp>.json \
   --artifact-ref storage/audit/paper_rollout_packet_<timestamp>.json \
   --artifact-ref storage/audit/runtime_events_paper-YYYYMMDD.jsonl \
-  --strategy-signal-json '{"agent":"quant","strategy":"catalyst","symbol":"SPY","direction":"buy","confidence":0.72,"expected_return":0.018}' \
-  --expected-movement 0.018 \
-  --actual-movement 0.011 \
-  --movement-horizon next_session_close \
-  --rejected-trade-json '{"symbol":"QQQ","strategy":"momentum","reason":"below confidence threshold","blocked_by":"risk"}' \
-  --hit-rate 1 \
-  --catalyst-json '{"catalyst_id":"spy-earnings-preview"}'
+  --emit-strategy-capture
 ```
 
 ### Daily Paper Review Board
@@ -506,6 +501,18 @@ poetry run python -m cli.paper_strategy_tuning_capture \
   --net-exposure 100 \
   --hit-rate 1 \
   --catalyst-json '{"catalyst_id":"spy-earnings-preview"}'
+```
+
+At the review horizon, prefer preserving the decision-time agent snapshot and adding only the observed movement:
+
+```bash
+poetry run python -m cli.paper_strategy_tuning_capture \
+  --artifact-dir storage/audit \
+  --session-id paper-YYYYMMDD \
+  --decision-artifact storage/audit/paper_decision_log_paper-YYYYMMDD_<timestamp>.json \
+  --actual-movement 0.011 \
+  --movement-horizon next_session_close \
+  --from-decision-capture
 ```
 
 The command writes:
