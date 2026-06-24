@@ -73,6 +73,19 @@ def test_paper_rollout_runbook_documents_health_history_closeout_checklist() -> 
         "ready_for_supervised_paper_extension",
         "paper_live_readiness_review_decision_<timestamp>.json",
         "trading_behavior_changed: False",
+        "poetry run python -m cli.paper_strategy_tuning_capture",
+        "paper_strategy_tuning_capture_paper-YYYYMMDD_<timestamp>.json",
+        "--signal-json",
+        "--expected-movement",
+        "--actual-movement",
+        "--rejected-trade-json",
+        "poetry run python -m cli.paper_strategy_tuning_report",
+        "paper_strategy_tuning_report_<timestamp>.json",
+        "Paper Strategy Tuning Report",
+        "paper_only: True",
+        "expected_vs_actual_movement",
+        "strategy_signal_snapshot",
+        "catalyst_attribution",
         "supervised live-dry-run bridge plan",
         "poetry run python -m cli.paper_supervised_live_dry_run build",
         "paper_supervised_live_dry_run_<timestamp>.json",
@@ -149,7 +162,33 @@ def test_paper_rollout_runbook_documents_health_history_closeout_checklist() -> 
         "paper_live_enablement_rollback_<timestamp>.json",
         "ROLLBACK LIVE SWITCH",
         "EXECUTION_LIVE_BROKER_ENABLED=false",
+        "EXECUTION_MODE=paper_broker",
+        "EXECUTION_MAX_ORDER_NOTIONAL=100",
+        "EXECUTION_MAX_ORDER_SHARES=1",
+        "EXECUTION_MAX_SYMBOL_POSITION_SHARES=1",
+        "LIVE_ENABLEMENT_3_SESSION_STABILITY_CONFIRMED=true",
+        "LIVE_ENABLEMENT_LIVE_CREDENTIALS_VERIFIED=true",
+        "LIVE_ENABLEMENT_RISK_CAPS_APPROVED=true",
+        "do not reuse paper starter caps as live approval",
     ]
 
     missing = [phrase for phrase in required_phrases if phrase not in runbook]
+    assert missing == []
+
+
+def test_env_example_defaults_live_disabled_with_paper_caps() -> None:
+    env_example = Path(".env.example").read_text(encoding="utf-8")
+
+    required_phrases = [
+        'EXECUTION_LIVE_BROKER_ENABLED="false"',
+        'EXECUTION_MAX_ORDER_NOTIONAL="100"',
+        'EXECUTION_MAX_ORDER_SHARES="1"',
+        'EXECUTION_MAX_SYMBOL_POSITION_SHARES="1"',
+        'EXECUTION_REQUIRE_PAPER_ACCOUNT="true"',
+        'LIVE_ENABLEMENT_3_SESSION_STABILITY_CONFIRMED="false"',
+        'LIVE_ENABLEMENT_LIVE_CREDENTIALS_VERIFIED="false"',
+        'LIVE_ENABLEMENT_RISK_CAPS_APPROVED="false"',
+    ]
+
+    missing = [phrase for phrase in required_phrases if phrase not in env_example]
     assert missing == []

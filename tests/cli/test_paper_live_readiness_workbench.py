@@ -260,6 +260,7 @@ def test_workbench_decision_register_requires_reason_and_artifacts(
     assert decision["outcome"] == "ready_for_supervised_paper_extension"
     assert decision["reason"].startswith("Five-session evidence")
     assert decision["artifact_refs"] == [str(packet_path)]
+    assert decision["paper_only"] is True
     assert decision["trading_behavior_changed"] is False
     assert decision["live_trading_enabled"] is False
 

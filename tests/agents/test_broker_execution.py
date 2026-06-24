@@ -1319,7 +1319,8 @@ def test_execution_mode_defaults_to_simulated_and_rejects_unknown() -> None:
     assert AgentRuntimeConfig.from_env({"EXECUTION_MODE": "paper_broker"}).execution_mode == (
         "paper_broker"
     )
-    assert AgentRuntimeConfig.from_env({"EXECUTION_MODE": "live"}).execution_mode == "live"
+    with pytest.raises(ValueError, match="LIVE_ENABLEMENT"):
+        AgentRuntimeConfig.from_env({"EXECUTION_MODE": "live"})
     with pytest.raises(ValueError, match="EXECUTION_MODE"):
         AgentRuntimeConfig.from_env({"EXECUTION_MODE": "cash"})
 
