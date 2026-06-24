@@ -103,6 +103,8 @@ def test_catalyst_strategy_buys_when_experiment_packet_has_confident_expected_re
     assert decision.quantity == 30
     assert decision.confidence == 0.7
     assert decision.metadata["artifact_id"] == "research-20260612-spy-catalysts"
+    assert decision.metadata["catalyst_id"] == "Investor day"
+    assert decision.metadata["catalyst_ids"] == ["Investor day"]
     assert decision.metadata["expected_return"] == 0.04
 
 

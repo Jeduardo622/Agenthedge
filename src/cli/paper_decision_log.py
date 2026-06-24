@@ -385,7 +385,7 @@ def _first_catalyst_attribution(signals: Iterable[Mapping[str, Any]]) -> dict[st
         metadata = _mapping(signal.get("metadata"))
         attribution = {
             key: metadata[key]
-            for key in ("artifact_id", "catalyst_id")
+            for key in ("artifact_id", "catalyst_id", "catalyst_ids")
             if metadata.get(key) is not None
         }
         if attribution:

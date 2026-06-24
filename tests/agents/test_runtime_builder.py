@@ -41,6 +41,32 @@ def test_build_runtime_uses_in_memory_backend_by_default(monkeypatch) -> None:
     assert isinstance(runtime.kwargs["break_glass_store"], NullBreakGlassStore)
 
 
+def test_build_runtime_paper_broker_defaults_to_session_audit_path(monkeypatch) -> None:
+    _wire_common_builder_stubs(monkeypatch)
+    monkeypatch.setattr(
+        "agents.runtime_builder.AgentRuntimeConfig",
+        type(
+            "Cfg",
+            (),
+            {"from_env": staticmethod(lambda: AgentRuntimeConfig(execution_mode="paper_broker"))},
+        ),
+    )
+    monkeypatch.setattr(
+        "agents.runtime_builder.AlpacaPaperBrokerAdapter",
+        type("PaperBroker", (), {"from_env": staticmethod(lambda _env: object())}),
+    )
+    monkeypatch.delenv("AUDIT_LOG_PATH", raising=False)
+    monkeypatch.setenv("PAPER_SESSION_DATE", "2026-06-25")
+
+    runtime = build_runtime_from_env(load_env=False)
+
+    assert (
+        runtime.kwargs["audit_sink"]
+        .path.as_posix()
+        .endswith("storage/audit/runtime_events_paper-20260625.jsonl")
+    )
+
+
 def test_build_runtime_uses_postgres_components(monkeypatch) -> None:
     _wire_common_builder_stubs(monkeypatch)
     monkeypatch.setenv("RUNTIME_BACKEND", "postgres")

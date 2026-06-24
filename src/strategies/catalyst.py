@@ -50,6 +50,10 @@ class CatalystStrategy:
         if not _has_active_catalyst(packet, current_date):
             return None
 
+        active_catalysts = _active_catalyst_ids(packet, current_date)
+        if not active_catalysts:
+            return None
+
         signal = _expected_return_signal(packet, current_date)
         if not signal or signal.confidence < self.min_signal_confidence:
             return None
@@ -70,6 +74,8 @@ class CatalystStrategy:
             rationale=f"catalyst_expected_return={signal.value:.4f}",
             metadata={
                 "artifact_id": packet.artifact_id,
+                "catalyst_id": active_catalysts[0],
+                "catalyst_ids": active_catalysts,
                 "expected_return": signal.value,
                 "allocation": allocation,
                 "promotion_status": packet.promotion_status,
@@ -90,6 +96,14 @@ def _has_active_catalyst(packet: CatalystCalendarPacket, as_of: date) -> bool:
         catalyst.event_date >= as_of and catalyst.expires_at >= as_of
         for catalyst in packet.catalysts
     )
+
+
+def _active_catalyst_ids(packet: CatalystCalendarPacket, as_of: date) -> list[str]:
+    return [
+        catalyst.name
+        for catalyst in packet.catalysts
+        if catalyst.event_date >= as_of and catalyst.expires_at >= as_of
+    ]
 
 
 def _expected_return_signal(packet: CatalystCalendarPacket, as_of: date) -> Signal | None:
