@@ -164,6 +164,7 @@ dmypy.json
 storage/
 .env
 .env.*
+!.env.example
 *.sqlite
 logs/
 
