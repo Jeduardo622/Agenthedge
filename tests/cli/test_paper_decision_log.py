@@ -301,6 +301,71 @@ def test_decision_log_extracts_strategy_capture_from_strategy_council_audit_ref(
     }
 
 
+def test_decision_log_extracts_rejected_strategy_capture_from_no_consensus_audit_ref(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from cli import paper_decision_log, paper_strategy_tuning_capture
+
+    artifact_dir = tmp_path / "audit"
+    strategy_audit_path = artifact_dir / "runtime_events_paper-20260627.jsonl"
+    _write_jsonl(
+        strategy_audit_path,
+        [
+            {
+                "action": "quant_consensus_rejected",
+                "agent_id": "quant",
+                "timestamp": "2026-06-27T15:29:00+00:00",
+                "payload": {
+                    "decision_id": "director-decision-1",
+                    "symbol": "SPY",
+                    "reason": "consensus_threshold_not_met",
+                    "rejected_trades": [
+                        {
+                            "strategy": "catalyst",
+                            "symbol": "SPY",
+                            "direction": "buy",
+                            "quantity": 1,
+                            "confidence": 0.4,
+                            "rationale": "catalyst_expected_return=0.0180",
+                            "reason": "consensus_threshold_not_met",
+                            "expected_return": 0.018,
+                            "proposal_id": "proposal-1",
+                            "decision_id": "director-decision-1",
+                            "metadata": {
+                                "expected_return": 0.018,
+                                "artifact_id": "research-20260627-spy",
+                                "catalyst_id": "spy-earnings-preview",
+                            },
+                        }
+                    ],
+                },
+            }
+        ],
+    )
+    monkeypatch.setattr(paper_decision_log, "_timestamp", lambda: "20260627T154500Z")
+    monkeypatch.setattr(paper_strategy_tuning_capture, "_timestamp", lambda: "20260627T154501Z")
+
+    entry = paper_decision_log.record_decision(
+        artifact_dir=artifact_dir,
+        session_id="paper-20260627",
+        decision="hold",
+        reason="Hold after Strategy Council no-consensus audit output.",
+        artifact_refs=[str(strategy_audit_path)],
+        emit_strategy_capture=True,
+        now=datetime(2026, 6, 27, 15, 45, tzinfo=timezone.utc),
+    )
+
+    capture = json.loads(Path(entry["strategy_capture_artifact"]).read_text(encoding="utf-8"))
+    assert capture["strategy_signal_snapshot"][0]["strategy"] == "catalyst"
+    assert capture["strategy_signal_snapshot"][0]["expected_return"] == 0.018
+    assert capture["rejected_trades"][0]["reason"] == "consensus_threshold_not_met"
+    assert capture["expected_vs_actual_movement"]["expected"] == 0.018
+    assert capture["catalyst_attribution"] == {
+        "artifact_id": "research-20260627-spy",
+        "catalyst_id": "spy-earnings-preview",
+    }
+
+
 def test_decision_log_cli_rejects_invalid_decision(tmp_path: Path) -> None:
     from cli import paper_decision_log
 

@@ -59,6 +59,7 @@ def record_decision(
     normalized_rejected_trades = [dict(trade) for trade in rejected_trades or []]
     strategy_capture = _strategy_capture_from_artifact_refs(refs)
     effective_strategy_signals = normalized_strategy_signals or strategy_capture["signals"]
+    effective_rejected_trades = normalized_rejected_trades or strategy_capture["rejected_trades"]
     effective_expected_movement = (
         expected_movement
         if expected_movement is not None
@@ -100,7 +101,7 @@ def record_decision(
         strategy_signals=effective_strategy_signals,
         expected_movement=effective_expected_movement,
         actual_movement=actual_movement,
-        rejected_trades=normalized_rejected_trades,
+        rejected_trades=effective_rejected_trades,
         hit_rate=hit_rate,
         catalyst_attribution=effective_catalyst_attribution,
     ):
@@ -114,7 +115,7 @@ def record_decision(
             actual_movement=actual_movement,
             movement_horizon=movement_horizon,
             movement_unit=movement_unit,
-            rejected_trades=normalized_rejected_trades,
+            rejected_trades=effective_rejected_trades,
             drawdown=metrics.get("drawdown"),
             gross_exposure=metrics.get("gross_exposure"),
             net_exposure=metrics.get("net_exposure"),
@@ -280,6 +281,8 @@ def _paper_metrics_from_artifact_refs(artifact_refs: Iterable[str]) -> dict[str,
 
 def _strategy_capture_from_artifact_refs(artifact_refs: Iterable[str]) -> dict[str, Any]:
     consensus_signals: list[dict[str, Any]] = []
+    rejected_signals: list[dict[str, Any]] = []
+    rejected_trades: list[dict[str, Any]] = []
     proposal_signals: list[dict[str, Any]] = []
     for ref in artifact_refs:
         for record in _load_strategy_audit_records(Path(ref)):
@@ -287,15 +290,20 @@ def _strategy_capture_from_artifact_refs(artifact_refs: Iterable[str]) -> dict[s
             payload = _mapping(record.get("payload"))
             if action == "quant_consensus":
                 consensus_signals.extend(_signals_from_quant_consensus(record, payload))
+            elif action == "quant_consensus_rejected":
+                extracted = _rejected_trades_from_quant_consensus_rejected(record, payload)
+                rejected_trades.extend(extracted)
+                rejected_signals.extend(extracted)
             elif action == "strategy_proposal":
                 signal = _signal_from_strategy_proposal(record, payload)
                 if signal:
                     proposal_signals.append(signal)
-    signals = consensus_signals or proposal_signals
+    signals = consensus_signals or rejected_signals or proposal_signals
     expected_movement = _first_expected_movement(signals)
     catalyst_attribution = _first_catalyst_attribution(signals)
     return {
         "signals": signals,
+        "rejected_trades": rejected_trades,
         "expected_movement": expected_movement,
         "catalyst_attribution": catalyst_attribution,
     }
@@ -370,6 +378,40 @@ def _signal_from_strategy_proposal(
         "metadata": metadata,
     }
     return {key: value for key, value in signal.items() if value is not None}
+
+
+def _rejected_trades_from_quant_consensus_rejected(
+    record: Mapping[str, Any], payload: Mapping[str, Any]
+) -> list[dict[str, Any]]:
+    rejected = payload.get("rejected_trades")
+    if not isinstance(rejected, list):
+        return []
+    trades: list[dict[str, Any]] = []
+    for trade in rejected:
+        trade_payload = _mapping(trade)
+        metadata = dict(_mapping(trade_payload.get("metadata")))
+        signal = {
+            "agent": record.get("agent_id") or "quant",
+            "strategy": trade_payload.get("strategy"),
+            "symbol": trade_payload.get("symbol") or payload.get("symbol"),
+            "direction": trade_payload.get("direction") or trade_payload.get("action"),
+            "quantity": trade_payload.get("quantity"),
+            "confidence": trade_payload.get("confidence"),
+            "rationale": trade_payload.get("rationale"),
+            "reason": trade_payload.get("reason") or payload.get("reason"),
+            "blocked_by": trade_payload.get("blocked_by") or "strategy_council",
+            "expected_return": _float_or_none(
+                trade_payload.get("expected_return") or metadata.get("expected_return")
+            ),
+            "proposal_id": trade_payload.get("proposal_id"),
+            "decision_id": trade_payload.get("decision_id") or payload.get("decision_id"),
+            "metadata": metadata,
+        }
+        for key in ("artifact_id", "catalyst_id", "catalyst_ids"):
+            if trade_payload.get(key) is not None and metadata.get(key) is None:
+                metadata[key] = trade_payload.get(key)
+        trades.append({key: value for key, value in signal.items() if value is not None})
+    return trades
 
 
 def _first_expected_movement(signals: Iterable[Mapping[str, Any]]) -> float | None:

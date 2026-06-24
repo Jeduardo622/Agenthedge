@@ -136,6 +136,13 @@ class StrategyCouncilAgent(BaseAgent):
             return
         consensus = self._build_consensus(symbol, price, proposals, directive_id, decision_id)
         if not consensus:
+            self._audit_consensus_rejection(
+                symbol=symbol,
+                price=price,
+                decisions=proposals,
+                directive_id=directive_id,
+                decision_id=decision_id,
+            )
             return
         self.bus.publish("quant.proposal", payload=consensus, publisher=self.name)
         self.audit("quant_consensus", consensus)
@@ -258,6 +265,103 @@ class StrategyCouncilAgent(BaseAgent):
                 "decision_id": decision_id,
             },
         }
+
+    def _audit_consensus_rejection(
+        self,
+        *,
+        symbol: str,
+        price: float,
+        decisions: Sequence[StrategyDecision],
+        directive_id: str | None,
+        decision_id: str | None,
+    ) -> None:
+        candidates = self._consensus_candidates(decisions)
+        best_action = candidates[0]["action"] if candidates else None
+        rejected_trades = [
+            self._rejected_trade_payload(
+                decision,
+                reason=(
+                    "consensus_threshold_not_met"
+                    if decision.action == best_action
+                    else "not_selected_lower_support"
+                ),
+                directive_id=directive_id,
+                decision_id=decision_id,
+            )
+            for decision in decisions
+        ]
+        self.audit(
+            "quant_consensus_rejected",
+            {
+                "decision_id": decision_id or directive_id,
+                "directive_id": directive_id,
+                "symbol": symbol,
+                "price": price,
+                "reason": "consensus_threshold_not_met",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "consensus": {
+                    "candidates": candidates,
+                    "requirements": {
+                        "min_support": self.min_support,
+                        "weight_threshold": self.weight_threshold,
+                    },
+                    "directive_id": directive_id,
+                    "decision_id": decision_id,
+                },
+                "rejected_trades": rejected_trades,
+            },
+        )
+
+    def _consensus_candidates(self, decisions: Sequence[StrategyDecision]) -> list[dict[str, Any]]:
+        aggregates: Dict[str, Dict[str, Any]] = defaultdict(
+            lambda: {"weight": 0.0, "count": 0, "strategies": []}
+        )
+        for decision in decisions:
+            weight = max(0.0, self.strategy_weights.get(decision.strategy, 1.0))
+            support = weight * max(0.0, decision.confidence)
+            entry = aggregates[decision.action]
+            entry["weight"] += support
+            entry["count"] += 1
+            entry["strategies"].append(decision.strategy)
+        candidates = [
+            {
+                "action": action,
+                "weight": stats["weight"],
+                "count": stats["count"],
+                "strategies": list(stats["strategies"]),
+            }
+            for action, stats in aggregates.items()
+        ]
+        return sorted(candidates, key=lambda item: (item["weight"], item["count"]), reverse=True)
+
+    def _rejected_trade_payload(
+        self,
+        decision: StrategyDecision,
+        *,
+        reason: str,
+        directive_id: str | None,
+        decision_id: str | None,
+    ) -> dict[str, Any]:
+        metadata = dict(decision.metadata)
+        payload: dict[str, Any] = {
+            "strategy": decision.strategy,
+            "symbol": decision.symbol,
+            "direction": decision.action,
+            "quantity": decision.quantity,
+            "confidence": decision.confidence,
+            "rationale": decision.rationale,
+            "reason": reason,
+            "blocked_by": "strategy_council",
+            "decision_id": decision_id or directive_id,
+            "metadata": metadata,
+        }
+        expected_return = _as_float(metadata.get("expected_return"))
+        if expected_return is not None:
+            payload["expected_return"] = expected_return
+        for key in ("artifact_id", "catalyst_id", "catalyst_ids"):
+            if metadata.get(key) is not None:
+                payload[key] = metadata[key]
+        return payload
 
     def _default_strategies(self) -> List[Strategy]:
         return [
