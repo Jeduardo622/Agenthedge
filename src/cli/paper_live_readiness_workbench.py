@@ -153,6 +153,12 @@ def _readiness_intake(
     ]
     packet_refs = _packet_refs(sessions)
     conflicts = _conflicts(review_board, live_readiness)
+    stability_context = _stability_context(
+        review_board=review_board,
+        required_sessions=required_sessions,
+        selected_sessions=len(sessions),
+        session_reviews=session_reviews,
+    )
     inventory = {
         "review_board": _artifact_state(review_board, now, max_artifact_age_days),
         "live_readiness_report": _artifact_state(live_readiness, now, max_artifact_age_days),
@@ -178,7 +184,8 @@ def _readiness_intake(
             "required_sessions": required_sessions,
             "sessions_selected": len(sessions),
             "session_ids": session_ids,
-        },
+        }
+        | stability_context,
         "session_reviews": session_reviews,
         "evidence_inventory": inventory,
         "conflicts": conflicts,
@@ -213,7 +220,9 @@ def _human_signoff_packet(
     unresolved = []
     if conflicts:
         unresolved.append("Resolve conflicting review-board and live-readiness evidence.")
-    if _has_missing_inventory(inventory):
+    if _has_clean_session_count_shortfall(intake):
+        unresolved.append(_session_shortfall_message(intake))
+    elif _has_missing_inventory(inventory):
         unresolved.append("Complete missing paper-session evidence before signoff.")
     if _has_open_or_held_session(session_reviews):
         unresolved.append("Open or held paper sessions are not ready for signoff.")
@@ -339,6 +348,53 @@ def _has_open_or_held_session(session_reviews: Iterable[Any]) -> bool:
     return False
 
 
+def _stability_context(
+    *,
+    review_board: Mapping[str, Any] | None,
+    required_sessions: int,
+    selected_sessions: int,
+    session_reviews: Iterable[Mapping[str, Any]],
+) -> dict[str, Any]:
+    review_stability = _mapping(_mapping(review_board).get("stability_window"))
+    sessions_shortfall = max(0, required_sessions - selected_sessions)
+    selected_sessions_need_attention = _has_open_or_held_session(session_reviews)
+    review_blocking_reason = review_stability.get("blocking_reason")
+    blocking_reason = None
+    if (
+        review_blocking_reason == "insufficient_session_count"
+        and not selected_sessions_need_attention
+    ):
+        blocking_reason = "insufficient_session_count"
+    elif review_blocking_reason and review_blocking_reason != "insufficient_session_count":
+        blocking_reason = review_blocking_reason
+    if blocking_reason is None and sessions_shortfall and not selected_sessions_need_attention:
+        blocking_reason = "insufficient_session_count"
+    return {
+        "sessions_shortfall": _int_or_zero(review_stability.get("sessions_shortfall"))
+        or sessions_shortfall,
+        "blocking_reason": blocking_reason,
+    }
+
+
+def _has_clean_session_count_shortfall(intake: Mapping[str, Any]) -> bool:
+    window = _mapping(intake.get("stability_window"))
+    return (
+        window.get("blocking_reason") == "insufficient_session_count"
+        and _int_or_zero(window.get("sessions_shortfall")) > 0
+    )
+
+
+def _session_shortfall_message(intake: Mapping[str, Any]) -> str:
+    window = _mapping(intake.get("stability_window"))
+    selected = _int_or_zero(window.get("sessions_selected"))
+    required = _int_or_zero(window.get("required_sessions"))
+    shortfall = _int_or_zero(window.get("sessions_shortfall"))
+    return (
+        f"Stability window has {selected} of {required} required closed paper sessions; "
+        f"needs {_session_count_phrase(shortfall)} before signoff."
+    )
+
+
 def _latest_decisions_by_session(artifact_root: Path) -> dict[str, dict[str, Any]]:
     latest: dict[str, tuple[datetime, dict[str, Any]]] = {}
     for path in artifact_root.glob("paper_decision_log_*.json"):
@@ -456,6 +512,8 @@ def _render_workbench_markdown(packet: Mapping[str, Any]) -> str:
         "### Readiness Intake",
         f"required_sessions: {window.get('required_sessions')}",
         f"sessions_selected: {window.get('sessions_selected')}",
+        f"sessions_shortfall: {window.get('sessions_shortfall')}",
+        f"stability_blocker: {window.get('blocking_reason')}",
         "",
         "### Exception Trend Review",
     ]
@@ -467,9 +525,13 @@ def _render_workbench_markdown(packet: Mapping[str, Any]) -> str:
             "",
             "### Human Signoff Packet",
             f"required_approver_slots: {', '.join(signoff.get('required_approver_slots') or [])}",
-            "",
         ]
     )
+    unresolved = [str(item) for item in signoff.get("unresolved_questions") or []]
+    if unresolved:
+        lines.extend(["", "unresolved_questions:"])
+        lines.extend(f"- {item}" for item in unresolved)
+    lines.append("")
     return "\n".join(lines)
 
 
@@ -553,6 +615,11 @@ def _mapping(value: Any = None) -> Mapping[str, Any]:
 
 def _int_or_zero(value: Any) -> int:
     return value if isinstance(value, int) else 0
+
+
+def _session_count_phrase(count: int) -> str:
+    noun = "session" if count == 1 else "sessions"
+    return f"{count} additional closed paper {noun}"
 
 
 def _timestamp() -> str:

@@ -414,7 +414,7 @@ The daily session list shows:
 - closeout status,
 - readiness state through the linked lifecycle stages.
 
-The stability window defines stable paper operations across N recent sessions, defaulting to `--min-stable-sessions 5` for operator review. Stable paper operations require closed sessions, zero unresolved health failures, zero reconciliation mismatches, clean closeouts, and recorded operator decisions.
+The stability window defines stable paper operations across N recent sessions, defaulting to `--min-stable-sessions 5` for operator review. Stable paper operations require closed sessions, zero unresolved health failures, zero reconciliation mismatches, clean closeouts, and recorded operator decisions. When the available sessions are otherwise clean but fewer than the required count exist, the review board reports `stability_blocker: insufficient_session_count`, `sessions_shortfall`, and a note naming the additional closed paper sessions needed instead of generic missing-evidence wording.
 
 The reviewer packet is explicitly labeled `review evidence` (`label: review evidence`); it is not a gate. It links session lifecycle artifacts, decision logs, packet artifacts, and the latest paper-to-live readiness report when present.
 
@@ -459,6 +459,7 @@ The workbench packet includes:
 - readiness intake for the latest paper sessions in the selected stability window, including open or held sessions that block signoff,
 - per-session review state showing session status, latest operator decision, and missing evidence,
 - evidence inventory for review-board, lifecycle, decision-log, packet, and live-readiness artifacts,
+- explicit stability shortfall fields and unresolved-question text when the only blocker is fewer than the required closed paper sessions,
 - present, stale, missing, and conflicting evidence labels,
 - exception trend counts for `broker_issue`, `market_hours_policy`, `stale_artifact`, `cleanup_required`, and `reconciliation_mismatch`,
 - one-off operator noise separated from repeated operational risk,

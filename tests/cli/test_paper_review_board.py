@@ -172,6 +172,72 @@ def test_review_board_surfaces_missing_evidence_and_exceptions(tmp_path: Path, m
     assert report["operator_exceptions"]["reconciliation_mismatch"] == 1
 
 
+def test_review_board_explains_stability_shortfall_when_sessions_are_clean(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from cli import paper_review_board
+
+    artifact_dir = tmp_path / "audit"
+    for day in range(22, 24):
+        session_id = f"paper-202606{day}"
+        lifecycle_path = (
+            artifact_dir / f"paper_session_lifecycle_{session_id}_202606{day}T143200Z.json"
+        )
+        decision_path = artifact_dir / f"paper_decision_log_{session_id}_202606{day}T152200Z.json"
+        packet_path = artifact_dir / f"paper_rollout_packet_202606{day}T143200Z.json"
+        _write_json(
+            lifecycle_path,
+            {
+                "artifact_type": "paper_session_lifecycle",
+                "created_at": f"2026-06-{day}T14:32:00+00:00",
+                "session_id": session_id,
+                "session_date": f"2026-06-{day}",
+                "status": "closed",
+                "stages": [
+                    {"name": "readiness", "status": "passed", "artifact": "status.json"},
+                    {"name": "run_start", "status": "passed", "artifact": "rehearsal.json"},
+                    {"name": "run_result", "status": "passed", "artifact": str(packet_path)},
+                    {
+                        "name": "reconciliation",
+                        "status": "clean",
+                        "artifact": str(packet_path),
+                        "final_reconciliation_mismatches": 0,
+                    },
+                    {
+                        "name": "closeout",
+                        "status": "passed",
+                        "artifact": str(packet_path),
+                        "open_canary_orders_after_cleanup": 0,
+                    },
+                ],
+            },
+        )
+        _write_json(
+            decision_path,
+            {
+                "artifact_type": "paper_decision_log",
+                "created_at": f"2026-06-{day}T15:22:00+00:00",
+                "session_id": session_id,
+                "decision": "proceed",
+                "exception_category": None,
+                "artifact_refs": [str(lifecycle_path), str(packet_path)],
+            },
+        )
+    monkeypatch.setattr(paper_review_board, "_timestamp", lambda: "20260623T164638Z")
+
+    report = paper_review_board.build_review_board(
+        artifact_dir=artifact_dir,
+        min_stable_sessions=3,
+        now=datetime(2026, 6, 23, 16, 46, tzinfo=timezone.utc),
+    )
+
+    assert report["stability_window"]["stable_paper_operations"] is False
+    assert report["stability_window"]["blocking_reason"] == "insufficient_session_count"
+    assert report["stability_window"]["sessions_shortfall"] == 1
+    assert "stability_blocker: insufficient_session_count" in report["markdown"]
+    assert "needs 1 additional closed paper session" in report["markdown"]
+
+
 def test_review_board_cli_prints_artifact_paths(tmp_path: Path, monkeypatch) -> None:
     from cli import paper_review_board
 
