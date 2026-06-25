@@ -467,6 +467,42 @@ The workbench packet includes:
 
 The packet is explicitly labeled `review evidence` with `is_gate: False`, `automatic_live_promotion: False`, `live_trading_enabled: False`, and `broker_mutation: False`.
 
+### June 24 Paper Stability Evidence Chain
+Use `cli.paper_stability_evidence_chain` to run the existing read-only paper-reporting sequence as one operator command for the June 24 third stability session. The command calls the existing health-history, operator-status, session-lifecycle, decision-log, review-board, live-readiness, and workbench builders, then writes a chain summary that links the full artifact set. It does not contact the broker, submit or cancel orders, change scheduler state, mutate runtime configuration, set environment variables, invoke live switches, or enable live trading.
+
+```bash
+poetry run python -m cli.paper_stability_evidence_chain \
+  --artifact-dir storage/audit \
+  --session-date 2026-06-24 \
+  --generated-at 2026-06-24T23:59:00+00:00 \
+  --min-stable-sessions 3 \
+  --decision proceed \
+  --reason "June 24 third stability session reviewed for paper evidence."
+```
+
+The command writes and prints links for:
+- `storage/audit/paper_broker_health_history_<timestamp>.json`
+- `storage/audit/paper_operator_status_<timestamp>.json`
+- `storage/audit/paper_session_lifecycle_paper-20260624_<timestamp>.json`
+- `storage/audit/paper_decision_log_paper-20260624_<timestamp>.json`
+- `storage/audit/paper_review_board_<timestamp>.json`
+- `storage/audit/paper_live_readiness_report_<timestamp>.json`
+- `storage/audit/paper_live_readiness_workbench_<timestamp>.json`
+- `storage/audit/paper_stability_evidence_chain_paper-20260624_<timestamp>.json`
+
+Expected output when the third-session evidence is linked and stable:
+- `PAPER_STABILITY_EVIDENCE_CHAIN_READY`
+- `health_history_artifact: storage/audit/paper_broker_health_history_<timestamp>.json`
+- `operator_status_artifact: storage/audit/paper_operator_status_<timestamp>.json`
+- `lifecycle_artifact: storage/audit/paper_session_lifecycle_paper-20260624_<timestamp>.json`
+- `decision_artifact: storage/audit/paper_decision_log_paper-20260624_<timestamp>.json`
+- `review_board_artifact: storage/audit/paper_review_board_<timestamp>.json`
+- `live_readiness_artifact: storage/audit/paper_live_readiness_report_<timestamp>.json`
+- `workbench_artifact: storage/audit/paper_live_readiness_workbench_<timestamp>.json`
+- `chain_artifact: storage/audit/paper_stability_evidence_chain_paper-20260624_<timestamp>.json`
+- `live_trading_enabled: False`
+- `broker_mutation: False`
+
 Use `cli.paper_live_readiness_workbench record-decision` to record the human review outcome. Valid outcomes are `ready_for_supervised_paper_extension`, `hold`, `needs_more_sessions`, and `escalate_to_risk_compliance`. The command requires a reason and at least one artifact reference.
 
 ```bash
