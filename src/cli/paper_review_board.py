@@ -180,15 +180,34 @@ def _stability_window(sessions: list[dict[str, Any]], required_sessions: int) ->
         and unclean_closeouts == 0
         and decisions_recorded >= required_sessions
     )
+    sessions_shortfall = max(0, required_sessions - len(sessions))
+    clean_available_sessions = (
+        sessions_shortfall > 0
+        and closed_sessions == len(sessions)
+        and unresolved == 0
+        and mismatches == 0
+        and unclean_closeouts == 0
+        and decisions_recorded == len(sessions)
+    )
     return {
         "required_sessions": required_sessions,
         "sessions_reviewed": len(sessions),
+        "sessions_shortfall": sessions_shortfall,
         "closed_sessions": closed_sessions,
         "unresolved_health_failures": unresolved,
         "reconciliation_mismatches": mismatches,
         "unclean_closeouts": unclean_closeouts,
         "decisions_recorded": decisions_recorded,
         "stable_paper_operations": stable,
+        "blocking_reason": (
+            None
+            if stable
+            else (
+                "insufficient_session_count"
+                if clean_available_sessions
+                else "session_evidence_attention_required"
+            )
+        ),
     }
 
 
@@ -277,20 +296,33 @@ def _render_markdown(report: Mapping[str, Any]) -> str:
         "### Stability Window",
         f"required_sessions: {stability.get('required_sessions')}",
         f"sessions_reviewed: {stability.get('sessions_reviewed')}",
+        f"sessions_shortfall: {stability.get('sessions_shortfall')}",
         f"closed_sessions: {stability.get('closed_sessions')}",
         f"unresolved_health_failures: {stability.get('unresolved_health_failures')}",
         f"reconciliation_mismatches: {stability.get('reconciliation_mismatches')}",
         f"unclean_closeouts: {stability.get('unclean_closeouts')}",
         f"decisions_recorded: {stability.get('decisions_recorded')}",
         f"stable_paper_operations: {stability.get('stable_paper_operations')}",
-        "",
-        "### Reviewer Packet",
-        f"label: {packet.get('label')}",
-        f"is_gate: {packet.get('is_gate')}",
-        f"live_readiness_report: {packet.get('live_readiness_report')}",
-        "",
-        "### Recent Sessions",
+        f"stability_blocker: {stability.get('blocking_reason')}",
     ]
+    if stability.get("blocking_reason") == "insufficient_session_count":
+        lines.append(
+            "stability_note: "
+            f"stability has {stability.get('sessions_reviewed')} of "
+            f"{stability.get('required_sessions')} required closed paper sessions; "
+            f"needs {_session_count_phrase(_int_or_zero(stability.get('sessions_shortfall')))}."
+        )
+    lines.extend(
+        [
+            "",
+            "### Reviewer Packet",
+            f"label: {packet.get('label')}",
+            f"is_gate: {packet.get('is_gate')}",
+            f"live_readiness_report: {packet.get('live_readiness_report')}",
+            "",
+            "### Recent Sessions",
+        ]
+    )
     for session in report.get("daily_sessions") or []:
         if not isinstance(session, Mapping):
             continue
@@ -315,6 +347,8 @@ def _print_handoff(report: Mapping[str, Any]) -> None:
     typer.echo(f"review_board_artifact: {report['review_board_artifact']}")
     typer.echo(f"review_board_markdown_artifact: {report['review_board_markdown_artifact']}")
     typer.echo(f"stable_paper_operations: {stability.get('stable_paper_operations')}")
+    typer.echo(f"stability_blocker: {stability.get('blocking_reason')}")
+    typer.echo(f"sessions_shortfall: {stability.get('sessions_shortfall')}")
     typer.echo(f"closed_sessions: {stability.get('closed_sessions')}")
     typer.echo(f"unresolved_health_failures: {stability.get('unresolved_health_failures')}")
     typer.echo(f"reconciliation_mismatches: {stability.get('reconciliation_mismatches')}")
@@ -326,6 +360,11 @@ def _present(values: Any) -> list[str]:
 
 def _int_or_zero(value: Any) -> int:
     return value if isinstance(value, int) else 0
+
+
+def _session_count_phrase(count: int) -> str:
+    noun = "session" if count == 1 else "sessions"
+    return f"{count} additional closed paper {noun}"
 
 
 def _load_json(path: Path) -> dict[str, Any]:

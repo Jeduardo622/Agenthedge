@@ -414,7 +414,7 @@ The daily session list shows:
 - closeout status,
 - readiness state through the linked lifecycle stages.
 
-The stability window defines stable paper operations across N recent sessions, defaulting to `--min-stable-sessions 5` for operator review. Stable paper operations require closed sessions, zero unresolved health failures, zero reconciliation mismatches, clean closeouts, and recorded operator decisions.
+The stability window defines stable paper operations across N recent sessions, defaulting to `--min-stable-sessions 5` for operator review. Stable paper operations require closed sessions, zero unresolved health failures, zero reconciliation mismatches, clean closeouts, and recorded operator decisions. When the available sessions are otherwise clean but fewer than the required count exist, the review board reports `stability_blocker: insufficient_session_count`, `sessions_shortfall`, and a note naming the additional closed paper sessions needed instead of generic missing-evidence wording.
 
 The reviewer packet is explicitly labeled `review evidence` (`label: review evidence`); it is not a gate. It links session lifecycle artifacts, decision logs, packet artifacts, and the latest paper-to-live readiness report when present.
 
@@ -459,6 +459,7 @@ The workbench packet includes:
 - readiness intake for the latest paper sessions in the selected stability window, including open or held sessions that block signoff,
 - per-session review state showing session status, latest operator decision, and missing evidence,
 - evidence inventory for review-board, lifecycle, decision-log, packet, and live-readiness artifacts,
+- explicit stability shortfall fields and unresolved-question text when the only blocker is fewer than the required closed paper sessions,
 - present, stale, missing, and conflicting evidence labels,
 - exception trend counts for `broker_issue`, `market_hours_policy`, `stale_artifact`, `cleanup_required`, and `reconciliation_mismatch`,
 - one-off operator noise separated from repeated operational risk,
@@ -466,6 +467,42 @@ The workbench packet includes:
 - a supervised live-dry-run bridge plan covering env checklist, kill-switch proof, rollback plan, paper/live config diff, and monitoring expectations.
 
 The packet is explicitly labeled `review evidence` with `is_gate: False`, `automatic_live_promotion: False`, `live_trading_enabled: False`, and `broker_mutation: False`.
+
+### June 24 Paper Stability Evidence Chain
+Use `cli.paper_stability_evidence_chain` to run the existing read-only paper-reporting sequence as one operator command for the June 24 third stability session. The command calls the existing health-history, operator-status, session-lifecycle, decision-log, review-board, live-readiness, and workbench builders, then writes a chain summary that links the full artifact set. It does not contact the broker, submit or cancel orders, change scheduler state, mutate runtime configuration, set environment variables, invoke live switches, or enable live trading.
+
+```bash
+poetry run python -m cli.paper_stability_evidence_chain \
+  --artifact-dir storage/audit \
+  --session-date 2026-06-24 \
+  --generated-at 2026-06-24T23:59:00+00:00 \
+  --min-stable-sessions 3 \
+  --decision proceed \
+  --reason "June 24 third stability session reviewed for paper evidence."
+```
+
+The command writes and prints links for:
+- `storage/audit/paper_broker_health_history_<timestamp>.json`
+- `storage/audit/paper_operator_status_<timestamp>.json`
+- `storage/audit/paper_session_lifecycle_paper-20260624_<timestamp>.json`
+- `storage/audit/paper_decision_log_paper-20260624_<timestamp>.json`
+- `storage/audit/paper_review_board_<timestamp>.json`
+- `storage/audit/paper_live_readiness_report_<timestamp>.json`
+- `storage/audit/paper_live_readiness_workbench_<timestamp>.json`
+- `storage/audit/paper_stability_evidence_chain_paper-20260624_<timestamp>.json`
+
+Expected output when the third-session evidence is linked and stable:
+- `PAPER_STABILITY_EVIDENCE_CHAIN_READY`
+- `health_history_artifact: storage/audit/paper_broker_health_history_<timestamp>.json`
+- `operator_status_artifact: storage/audit/paper_operator_status_<timestamp>.json`
+- `lifecycle_artifact: storage/audit/paper_session_lifecycle_paper-20260624_<timestamp>.json`
+- `decision_artifact: storage/audit/paper_decision_log_paper-20260624_<timestamp>.json`
+- `review_board_artifact: storage/audit/paper_review_board_<timestamp>.json`
+- `live_readiness_artifact: storage/audit/paper_live_readiness_report_<timestamp>.json`
+- `workbench_artifact: storage/audit/paper_live_readiness_workbench_<timestamp>.json`
+- `chain_artifact: storage/audit/paper_stability_evidence_chain_paper-20260624_<timestamp>.json`
+- `live_trading_enabled: False`
+- `broker_mutation: False`
 
 Use `cli.paper_live_readiness_workbench record-decision` to record the human review outcome. Valid outcomes are `ready_for_supervised_paper_extension`, `hold`, `needs_more_sessions`, and `escalate_to_risk_compliance`. The command requires a reason and at least one artifact reference.
 

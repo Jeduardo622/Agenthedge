@@ -231,6 +231,108 @@ def test_workbench_keeps_open_hold_session_visible(tmp_path: Path, monkeypatch) 
     )
 
 
+def test_workbench_names_clean_session_count_shortfall(tmp_path: Path, monkeypatch) -> None:
+    from cli import paper_live_readiness_workbench
+
+    artifact_dir = tmp_path / "audit"
+    review_board_path = artifact_dir / "paper_review_board_20260623T164638Z.json"
+    live_readiness_path = artifact_dir / "paper_live_readiness_report_20260623T164639Z.json"
+    for day in range(22, 24):
+        session_id = f"paper-202606{day}"
+        lifecycle_path = (
+            artifact_dir / f"paper_session_lifecycle_{session_id}_202606{day}T143200Z.json"
+        )
+        packet_path = artifact_dir / f"paper_rollout_packet_202606{day}T143200Z.json"
+        _write_json(
+            lifecycle_path,
+            {
+                "artifact_type": "paper_session_lifecycle",
+                "created_at": f"2026-06-{day}T14:32:00+00:00",
+                "session_id": session_id,
+                "session_date": f"2026-06-{day}",
+                "status": "closed",
+                "stages": [
+                    {"name": "readiness", "status": "passed", "artifact": "status.json"},
+                    {"name": "run_start", "status": "passed", "artifact": "rehearsal.json"},
+                    {"name": "run_result", "status": "passed", "artifact": str(packet_path)},
+                    {
+                        "name": "reconciliation",
+                        "status": "clean",
+                        "artifact": str(packet_path),
+                        "final_reconciliation_mismatches": 0,
+                    },
+                    {
+                        "name": "closeout",
+                        "status": "passed",
+                        "artifact": str(packet_path),
+                        "open_canary_orders_after_cleanup": 0,
+                    },
+                ],
+            },
+        )
+        _write_json(
+            artifact_dir / f"paper_decision_log_{session_id}_202606{day}T152200Z.json",
+            {
+                "artifact_type": "paper_decision_log",
+                "created_at": f"2026-06-{day}T15:22:00+00:00",
+                "session_id": session_id,
+                "decision": "proceed",
+                "exception_category": None,
+                "artifact_refs": [str(lifecycle_path), str(packet_path)],
+            },
+        )
+    _write_json(
+        review_board_path,
+        {
+            "artifact_type": "paper_review_board",
+            "created_at": "2026-06-23T16:46:38+00:00",
+            "status": "attention_required",
+            "stability_window": {
+                "required_sessions": 3,
+                "sessions_reviewed": 2,
+                "closed_sessions": 2,
+                "unresolved_health_failures": 0,
+                "reconciliation_mismatches": 0,
+                "unclean_closeouts": 0,
+                "decisions_recorded": 2,
+                "stable_paper_operations": False,
+                "blocking_reason": "insufficient_session_count",
+                "sessions_shortfall": 1,
+            },
+        },
+    )
+    _write_json(
+        live_readiness_path,
+        {
+            "artifact_type": "paper_live_readiness_report",
+            "created_at": "2026-06-23T16:46:39+00:00",
+            "status": "evidence_missing",
+            "live_readiness_artifact": str(live_readiness_path),
+        },
+    )
+    monkeypatch.setattr(paper_live_readiness_workbench, "_timestamp", lambda: "20260623T164645Z")
+
+    packet = paper_live_readiness_workbench.build_workbench(
+        artifact_dir=artifact_dir,
+        stability_window=3,
+        now=datetime(2026, 6, 23, 16, 46, tzinfo=timezone.utc),
+    )
+
+    assert packet["readiness_intake"]["stability_window"]["sessions_selected"] == 2
+    assert packet["readiness_intake"]["stability_window"]["sessions_shortfall"] == 1
+    assert packet["readiness_intake"]["stability_window"]["blocking_reason"] == (
+        "insufficient_session_count"
+    )
+    assert packet["human_signoff_packet"]["unresolved_questions"] == [
+        (
+            "Stability window has 2 of 3 required closed paper sessions; "
+            "needs 1 additional closed paper session before signoff."
+        )
+    ]
+    assert "Complete missing paper-session evidence before signoff." not in packet["markdown"]
+    assert "needs 1 additional closed paper session" in packet["markdown"]
+
+
 def test_workbench_decision_register_requires_reason_and_artifacts(
     tmp_path: Path, monkeypatch
 ) -> None:
