@@ -361,6 +361,8 @@ def _evaluated_window(report: Mapping[str, Any]) -> dict[str, Any]:
 def _catalyst_direction_misses(daily_reports: Iterable[Mapping[str, Any]]) -> int:
     misses = 0
     for daily in daily_reports:
+        if not _mapping(_mapping(daily.get("strategy_inputs")).get("catalyst_attribution")):
+            continue
         movement = _mapping(daily.get("expected_vs_actual_movement"))
         expected = movement.get("expected")
         actual = movement.get("actual")

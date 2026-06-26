@@ -70,13 +70,17 @@ def build_data_gap_review(
     summary = _summary(blockers)
     if review_entry_issues:
         summary["review_entry_issue_count"] = len(review_entry_issues)
+    has_review_entry_issues = bool(review_entry_issues)
     status = (
         "accepted_paper_limitations"
-        if blockers and summary["needs_evidence_count"] == 0
+        if blockers and summary["needs_evidence_count"] == 0 and not has_review_entry_issues
         else (
             "partial_data_gap_review"
-            if summary["needs_evidence_count"]
-            and (summary["clearance_ready_count"] or summary["accepted_paper_limitation_count"])
+            if has_review_entry_issues
+            or (
+                summary["needs_evidence_count"]
+                and (summary["clearance_ready_count"] or summary["accepted_paper_limitation_count"])
+            )
             else "needs_data_gap_evidence"
         )
     )
@@ -387,7 +391,9 @@ def _required_next_step(status: str) -> str:
             "thresholds, broker wiring, or live settings."
         )
     if status == "partial_data_gap_review":
-        return "Resolve remaining data-gap blockers before another tuning gate."
+        return (
+            "Resolve remaining data-gap blockers or review-entry issues before another tuning gate."
+        )
     return (
         "Attach missing-data evidence or record explicit paper-only acceptance before another "
         "tuning gate."

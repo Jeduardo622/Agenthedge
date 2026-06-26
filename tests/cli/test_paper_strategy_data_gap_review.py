@@ -171,7 +171,7 @@ def test_strategy_data_gap_review_supports_per_blocker_review_entries(
         "QQQ had no catalyst candidate in this paper-only window."
     )
     assert review["required_next_step"] == (
-        "Resolve remaining data-gap blockers before another tuning gate."
+        "Resolve remaining data-gap blockers or review-entry issues before another tuning gate."
     )
 
 
@@ -565,7 +565,7 @@ def test_strategy_data_gap_review_surfaces_unmatched_review_entries(
         now=datetime(2026, 6, 24, 19, 15, tzinfo=timezone.utc),
     )
 
-    assert review["status"] == "needs_data_gap_evidence"
+    assert review["status"] == "partial_data_gap_review"
     assert review["summary"] == {
         "blocker_count": 3,
         "clearance_ready_count": 0,
@@ -582,6 +582,49 @@ def test_strategy_data_gap_review_surfaces_unmatched_review_entries(
         }
     ]
     assert {blocker["clearance_status"] for blocker in review["blockers"]} == {"needs_evidence"}
+
+
+def test_strategy_data_gap_review_issue_prevents_accepted_status(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from cli import paper_strategy_data_gap_review
+
+    artifact_dir = tmp_path / "audit"
+    report_path = artifact_dir / "paper_strategy_tuning_report_20260624T185531Z.json"
+    gate_path = artifact_dir / "paper_strategy_tuning_gate_decision_20260624T190000Z.json"
+    _write_json(report_path, _june_22_24_report(report_path))
+    _write_json(gate_path, _gate_decision(gate_path, report_path))
+    monkeypatch.setattr(paper_strategy_data_gap_review, "_timestamp", lambda: "20260624T191500Z")
+
+    review = paper_strategy_data_gap_review.build_data_gap_review(
+        gate_decision_path=gate_path,
+        artifact_dir=artifact_dir,
+        acceptance_reason=(
+            "Paper-only follow-up accepts missing QQQ inputs as known provider limits."
+        ),
+        review_entries=[
+            {
+                "reason": "missing_fundamentals",
+                "symbol": "SPY",
+                "session_id": "paper-20260624",
+                "acceptance_reason": "Ticker typo should keep the review from clearing.",
+            },
+        ],
+        now=datetime(2026, 6, 24, 19, 15, tzinfo=timezone.utc),
+    )
+
+    assert review["status"] == "partial_data_gap_review"
+    assert review["summary"] == {
+        "blocker_count": 3,
+        "clearance_ready_count": 0,
+        "accepted_paper_limitation_count": 3,
+        "needs_evidence_count": 0,
+        "review_entry_issue_count": 1,
+    }
+    assert review["required_next_step"] == (
+        "Resolve remaining data-gap blockers or review-entry issues before another tuning gate."
+    )
+    assert "PAPER_STRATEGY_DATA_GAP_REVIEW_PARTIAL" in review["markdown"]
 
 
 def test_strategy_data_gap_review_cli_prints_artifact_paths(tmp_path: Path, monkeypatch) -> None:
