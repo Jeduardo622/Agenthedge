@@ -214,7 +214,7 @@ def test_strategy_tuning_gate_keeps_data_gap_hold_for_unresolved_review(
     assert "linked data-gap review still requires evidence" in data_gap["recommendation"]
 
 
-def test_strategy_tuning_gate_counts_direction_misses_only_for_catalyst_attribution(
+def test_strategy_tuning_gate_counts_direction_misses_only_for_catalyst_ids(
     tmp_path: Path, monkeypatch
 ) -> None:
     from cli import paper_strategy_tuning_gate
@@ -234,7 +234,19 @@ def test_strategy_tuning_gate_counts_direction_misses_only_for_catalyst_attribut
                 "horizon": "5min_after_fill",
             },
         },
-        {"session_id": "paper-20260623", "session_date": "2026-06-23"},
+        {
+            "session_id": "paper-20260623",
+            "session_date": "2026-06-23",
+            "expected_vs_actual_movement": {
+                "expected": 0.03,
+                "actual": -0.01,
+                "difference": -0.04,
+                "horizon": "5min_after_fill",
+            },
+            "strategy_inputs": {
+                "catalyst_attribution": {"artifact_id": "research-20260623-no-active-catalyst"}
+            },
+        },
         {
             "session_id": "paper-20260624",
             "session_date": "2026-06-24",

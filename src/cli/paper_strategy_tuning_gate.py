@@ -361,7 +361,8 @@ def _evaluated_window(report: Mapping[str, Any]) -> dict[str, Any]:
 def _catalyst_direction_misses(daily_reports: Iterable[Mapping[str, Any]]) -> int:
     misses = 0
     for daily in daily_reports:
-        if not _mapping(_mapping(daily.get("strategy_inputs")).get("catalyst_attribution")):
+        catalyst = _mapping(_mapping(daily.get("strategy_inputs")).get("catalyst_attribution"))
+        if not _catalyst_attribution_ids(catalyst):
             continue
         movement = _mapping(daily.get("expected_vs_actual_movement"))
         expected = movement.get("expected")
@@ -376,12 +377,18 @@ def _catalyst_ids(daily_reports: Iterable[Mapping[str, Any]]) -> set[str]:
     ids: set[str] = set()
     for daily in daily_reports:
         catalyst = _mapping(_mapping(daily.get("strategy_inputs")).get("catalyst_attribution"))
-        for value in catalyst.get("catalyst_ids") or []:
-            if isinstance(value, str) and value:
-                ids.add(value)
-        value = catalyst.get("catalyst_id")
-        if isinstance(value, str) and value:
-            ids.add(value)
+        ids.update(_catalyst_attribution_ids(catalyst))
+    return ids
+
+
+def _catalyst_attribution_ids(catalyst: Mapping[str, Any]) -> set[str]:
+    ids: set[str] = set()
+    for value in catalyst.get("catalyst_ids") or []:
+        if isinstance(value, str) and value.strip():
+            ids.add(value.strip())
+    value = catalyst.get("catalyst_id")
+    if isinstance(value, str) and value.strip():
+        ids.add(value.strip())
     return ids
 
 
