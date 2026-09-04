@@ -599,6 +599,53 @@ def test_catalyst_session_closeout_rejects_malformed_rejection_evidence(
         paper_catalyst_session_closeout.build_closeout(**kwargs)
 
 
+@pytest.mark.parametrize(
+    "observed_price",
+    [float("nan"), float("inf"), float("-inf"), 0.0, -1.0],
+)
+def test_catalyst_session_closeout_rejects_non_finite_or_non_positive_observed_price(
+    tmp_path: Path, observed_price: float
+) -> None:
+    from cli import paper_catalyst_session_closeout
+
+    kwargs = _valid_closeout_kwargs(tmp_path)
+    kwargs["observed_price"] = observed_price
+
+    with pytest.raises(typer.BadParameter, match="observed_price must be finite and positive"):
+        paper_catalyst_session_closeout.build_closeout(**kwargs)
+
+
+@pytest.mark.parametrize(
+    ("observed_at", "message"),
+    [
+        ("not-a-time", "observed_at must be a valid ISO 8601 timestamp"),
+        ("2026-06-29T20:00:00", "observed_at must include a UTC offset"),
+    ],
+)
+def test_catalyst_session_closeout_rejects_malformed_or_naive_observed_timestamp(
+    tmp_path: Path, observed_at: str, message: str
+) -> None:
+    from cli import paper_catalyst_session_closeout
+
+    kwargs = _valid_closeout_kwargs(tmp_path)
+    kwargs["observed_at"] = observed_at
+
+    with pytest.raises(typer.BadParameter, match=message):
+        paper_catalyst_session_closeout.build_closeout(**kwargs)
+
+
+def test_catalyst_session_closeout_rejects_wrong_session_date_for_same_session_close(
+    tmp_path: Path,
+) -> None:
+    from cli import paper_catalyst_session_closeout
+
+    kwargs = _valid_closeout_kwargs(tmp_path)
+    kwargs["observed_at"] = "2026-07-20T20:00:00Z"
+
+    with pytest.raises(typer.BadParameter, match="same_session_close observation date mismatch"):
+        paper_catalyst_session_closeout.build_closeout(**kwargs)
+
+
 def _valid_closeout_kwargs(tmp_path: Path) -> dict[str, Any]:
     source_dir = tmp_path / "source"
     artifact_dir = tmp_path / "audit"

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from datetime import date, datetime, time, timezone
 from pathlib import Path
 from typing import Any, Mapping
@@ -40,6 +41,12 @@ def build_closeout(
     artifact_root = Path(artifact_dir)
     target_date = _parse_date(session_date)
     session_id = _session_id(target_date)
+    observed_price_value = _validate_observed_price(observed_price)
+    observed_at_value = _validate_observed_at(
+        observed_at,
+        target_date=target_date,
+        movement_horizon=movement_horizon,
+    )
     current_time = now or datetime.now(timezone.utc)
     evidence_time = datetime.combine(target_date, time(23, 59), tzinfo=timezone.utc)
 
@@ -102,7 +109,7 @@ def build_closeout(
         fill=fill,
         broker_order=broker_order,
     )
-    actual_movement = round((float(observed_price) - fill_price) / fill_price, 10)
+    actual_movement = round((observed_price_value - fill_price) / fill_price, 10)
     prior_movement = _mapping(prior_capture_payload.get("expected_vs_actual_movement"))
     expected_movement = _float_or_none(prior_movement.get("expected"))
     difference = (
@@ -174,8 +181,8 @@ def build_closeout(
             "difference": difference,
             "horizon": movement_horizon,
             "unit": "return",
-            "observed_price": float(observed_price),
-            "observed_at": _validate_nonempty("observed_at", observed_at),
+            "observed_price": observed_price_value,
+            "observed_at": observed_at_value,
             "fill_price": fill_price,
         },
     )
@@ -268,8 +275,8 @@ def build_closeout(
             "difference": difference,
             "horizon": movement_horizon,
             "unit": "return",
-            "observed_price": float(observed_price),
-            "observed_at": observed_at,
+            "observed_price": observed_price_value,
+            "observed_at": observed_at_value,
             "fill_price": fill_price,
         },
         "provider_degradation_review": provider_review,
@@ -823,6 +830,31 @@ def _float_or_none(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _validate_observed_price(value: Any) -> float:
+    observed_price = _float_or_none(value)
+    if observed_price is None or not math.isfinite(observed_price) or observed_price <= 0:
+        raise typer.BadParameter("observed_price must be finite and positive")
+    return observed_price
+
+
+def _validate_observed_at(
+    value: str,
+    *,
+    target_date: date,
+    movement_horizon: str,
+) -> str:
+    observed_at = _validate_nonempty("observed_at", value)
+    try:
+        timestamp = datetime.fromisoformat(observed_at.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise typer.BadParameter("observed_at must be a valid ISO 8601 timestamp") from exc
+    if timestamp.tzinfo is None or timestamp.utcoffset() is None:
+        raise typer.BadParameter("observed_at must include a UTC offset")
+    if movement_horizon == "same_session_close" and timestamp.date() != target_date:
+        raise typer.BadParameter("same_session_close observation date mismatch")
+    return observed_at
 
 
 def _validate_nonempty(field: str, value: str) -> str:
