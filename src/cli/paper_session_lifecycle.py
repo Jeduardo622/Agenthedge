@@ -146,13 +146,16 @@ def _closeout_stage(session_id: str, packet: Mapping[str, Any] | None) -> dict[s
     if packet is None:
         return _stage(session_id, "closeout", "missing", None)
     summary = _mapping(packet.get("summary"))
-    status = (
-        "passed"
-        if summary.get("cancellation_status") == "passed"
+    canary_clean = (
+        summary.get("cancellation_status") == "passed"
         and summary.get("post_cancel_order_status") == "canceled"
         and summary.get("open_canary_orders_after_cleanup") == 0
-        else "attention_required"
     )
+    filled_order_clean = (
+        summary.get("paper_order_status") == "filled"
+        and summary.get("open_matching_orders_after_fill") == 0
+    )
+    status = "passed" if canary_clean or filled_order_clean else "attention_required"
     return _stage(
         session_id,
         "closeout",
@@ -161,6 +164,8 @@ def _closeout_stage(session_id: str, packet: Mapping[str, Any] | None) -> dict[s
         cancellation_status=summary.get("cancellation_status"),
         post_cancel_order_status=summary.get("post_cancel_order_status"),
         open_canary_orders_after_cleanup=summary.get("open_canary_orders_after_cleanup"),
+        paper_order_status=summary.get("paper_order_status"),
+        open_matching_orders_after_fill=summary.get("open_matching_orders_after_fill"),
     )
 
 
