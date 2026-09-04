@@ -3,22 +3,30 @@
 from __future__ import annotations
 
 import hashlib
+import importlib
 import json
+import os
 import threading
 import uuid
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping, MutableMapping
+from typing import Any, BinaryIO, Iterator, Mapping, MutableMapping
+
+_PATH_LOCKS: dict[str, threading.Lock] = {}
+_PATH_LOCKS_GUARD = threading.Lock()
 
 
 class JsonlAuditSink:
-    """Thread-safe JSONL writer for audit events."""
+    """Thread- and process-safe JSONL writer for audit events."""
 
     def __init__(self, path: str | Path) -> None:
         self._path = Path(path)
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._lock = threading.Lock()
-        self._last_hash = _initialize_last_hash(self._path)
+        self._canonical_path = self._path.resolve(strict=False)
+        self._lock = _path_lock(self._canonical_path)
+        with self._lock, _interprocess_lock(self._canonical_path):
+            self._last_hash = _initialize_last_hash(self._canonical_path)
 
     def __call__(
         self,
@@ -39,30 +47,97 @@ class JsonlAuditSink:
             if isinstance(payload_dict.get("data_metadata"), dict)
             else None
         )
-        record: MutableMapping[str, object] = {
-            "event_id": str(uuid.uuid4()),
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "agent_id": metadata_dict.get("agent_id"),
-            "run_id": metadata_dict.get("run_id"),
-            "environment": metadata_dict.get("environment"),
-            "event_type": action,
-            "context_ref": context_ref,
-            "inputs": inputs,
-            "approvals": approvals,
-            "action": action,
-            "payload": payload_dict,
-            "prev_hash": self._last_hash,
-        }
-        record_hash = _hash_record(record)
-        record["hash"] = record_hash
-        line = _serialize_record(record)
-        with self._lock, self._path.open("a", encoding="utf-8") as handle:
-            handle.write(f"{line}\n")
+        with self._lock, _interprocess_lock(self._canonical_path):
+            self._last_hash = _initialize_last_hash(self._canonical_path)
+            record: MutableMapping[str, object] = {
+                "event_id": str(uuid.uuid4()),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "agent_id": metadata_dict.get("agent_id"),
+                "run_id": metadata_dict.get("run_id"),
+                "environment": metadata_dict.get("environment"),
+                "event_type": action,
+                "context_ref": context_ref,
+                "inputs": inputs,
+                "approvals": approvals,
+                "action": action,
+                "payload": payload_dict,
+                "prev_hash": self._last_hash,
+            }
+            record_hash = _hash_record(record)
+            record["hash"] = record_hash
+            line = _serialize_record(record)
+            with self._canonical_path.open("a", encoding="utf-8") as handle:
+                handle.write(f"{line}\n")
+                handle.flush()
+                os.fsync(handle.fileno())
             self._last_hash = record_hash
 
     @property
     def path(self) -> Path:
         return self._path
+
+
+def _path_lock(path: Path) -> threading.Lock:
+    key = os.path.normcase(str(path))
+    with _PATH_LOCKS_GUARD:
+        lock = _PATH_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _PATH_LOCKS[key] = lock
+        return lock
+
+
+@contextmanager
+def _interprocess_lock(path: Path) -> Iterator[None]:
+    lock_path = path.with_name(f".{path.name}.lock")
+    try:
+        handle = lock_path.open("a+b")
+    except OSError as exc:
+        raise OSError(f"unable to open audit lock for {path}: {exc}") from exc
+    try:
+        _acquire_file_lock(handle)
+    except OSError as exc:
+        handle.close()
+        raise OSError(f"unable to acquire audit lock for {path}: {exc}") from exc
+    try:
+        yield
+    finally:
+        try:
+            _release_file_lock(handle)
+        finally:
+            handle.close()
+
+
+def _acquire_file_lock(handle: BinaryIO) -> None:
+    if os.name == "nt":
+        msvcrt = importlib.import_module("msvcrt")
+
+        handle.seek(0, os.SEEK_END)
+        if handle.tell() == 0:
+            handle.write(b"\0")
+            handle.flush()
+        handle.seek(0)
+        locking = getattr(msvcrt, "locking")
+        locking(handle.fileno(), getattr(msvcrt, "LK_LOCK"), 1)
+        return
+
+    fcntl = importlib.import_module("fcntl")
+    flock = getattr(fcntl, "flock")
+    flock(handle.fileno(), getattr(fcntl, "LOCK_EX"))
+
+
+def _release_file_lock(handle: BinaryIO) -> None:
+    if os.name == "nt":
+        msvcrt = importlib.import_module("msvcrt")
+
+        handle.seek(0)
+        locking = getattr(msvcrt, "locking")
+        locking(handle.fileno(), getattr(msvcrt, "LK_UNLCK"), 1)
+        return
+
+    fcntl = importlib.import_module("fcntl")
+    flock = getattr(fcntl, "flock")
+    flock(handle.fileno(), getattr(fcntl, "LOCK_UN"))
 
 
 def _resolve_context_ref(payload: Mapping[str, object]) -> str | None:
