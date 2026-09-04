@@ -13,6 +13,8 @@ REQUIRED_PREFIXES = ("cli/", "ops/", "observability/", "research_inputs/", "stra
 REQUIRED_PATHS = (
     "cli/broker_canary.py",
     "cli/paper_decision_log.py",
+    "cli/paper_catalyst_session_closeout.py",
+    "cli/paper_catalyst_postmortem.py",
     "cli/provider_readiness.py",
     "cli/paper_strategy_tuning_capture.py",
     "cli/paper_broker_health.py",
@@ -28,6 +30,7 @@ REQUIRED_PATHS = (
     "cli/paper_operator_status.py",
     "cli/paper_review_board.py",
     "cli/paper_stability_evidence_chain.py",
+    "cli/paper_strategy_tuning_evidence_chain.py",
     "cli/paper_strategy_data_gap_evidence.py",
     "cli/paper_strategy_data_gap_review.py",
     "cli/paper_strategy_tuning_gate.py",
@@ -50,6 +53,8 @@ REQUIRED_PATHS = (
 REQUIRED_IMPORTS = (
     "cli.broker_canary",
     "cli.paper_decision_log",
+    "cli.paper_catalyst_session_closeout",
+    "cli.paper_catalyst_postmortem",
     "cli.provider_readiness",
     "cli.paper_strategy_tuning_capture",
     "cli.paper_broker_health",
@@ -65,6 +70,7 @@ REQUIRED_IMPORTS = (
     "cli.paper_operator_status",
     "cli.paper_review_board",
     "cli.paper_stability_evidence_chain",
+    "cli.paper_strategy_tuning_evidence_chain",
     "cli.paper_strategy_data_gap_evidence",
     "cli.paper_strategy_data_gap_review",
     "cli.paper_strategy_tuning_gate",

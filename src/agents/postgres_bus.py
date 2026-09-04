@@ -82,13 +82,11 @@ class PostgresMessageBus(MessageBus):
                     raise RuntimeError("failed to insert bus event")
                 event_id = _as_int(row[0])
                 created_at = row[1]
-                cur.execute(
-                    """
+                cur.execute("""
                     SELECT subscription_id, topics_json
                     FROM ah_bus_subscriptions
                     WHERE active = TRUE
-                    """
-                )
+                    """)
                 for sub_row in cur.fetchall():
                     sub_id = str(sub_row[0])
                     topics_json = sub_row[1]

@@ -35,6 +35,7 @@ def build_tuning_gate_decision(
     report_path: str | Path,
     artifact_dir: str | Path | None = None,
     data_gap_review_path: str | Path | None = None,
+    catalyst_postmortem_path: str | Path | None = None,
     thresholds: Mapping[str, Any] | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
@@ -45,6 +46,11 @@ def build_tuning_gate_decision(
         if data_gap_review_path
         else None
     )
+    catalyst_postmortem = (
+        _load_catalyst_postmortem(Path(catalyst_postmortem_path))
+        if catalyst_postmortem_path
+        else None
+    )
     threshold_values = {**DEFAULT_THRESHOLDS, **dict(thresholds or {})}
     artifact_root = Path(artifact_dir) if artifact_dir is not None else source_path.parent
     artifact_root.mkdir(parents=True, exist_ok=True)
@@ -52,11 +58,19 @@ def build_tuning_gate_decision(
 
     recommendations = {
         "session_window": _session_window_recommendation(report, threshold_values),
-        "catalyst_quality": _catalyst_quality_recommendation(report, threshold_values),
+        "catalyst_quality": _catalyst_quality_recommendation(
+            report,
+            threshold_values,
+            catalyst_postmortem,
+        ),
         "consensus_misses": _consensus_miss_recommendation(report, threshold_values),
         "data_gap_blockers": _data_gap_recommendation(report, threshold_values, data_gap_review),
     }
-    threshold_evaluations = _threshold_evaluations(report, threshold_values)
+    threshold_evaluations = _threshold_evaluations(
+        report,
+        threshold_values,
+        data_gap_review,
+    )
     status = _overall_status(recommendations)
     timestamp = _timestamp()
     json_path = artifact_root / f"paper_strategy_tuning_gate_decision_{timestamp}.json"
@@ -82,6 +96,8 @@ def build_tuning_gate_decision(
     }
     if data_gap_review:
         decision["data_gap_review"] = str(data_gap_review_path)
+    if catalyst_postmortem:
+        decision["catalyst_postmortem"] = str(catalyst_postmortem_path)
     markdown = _render_markdown(decision)
     decision["markdown"] = markdown
     json_path.write_text(json.dumps(decision, indent=2, sort_keys=True), encoding="utf-8")
@@ -90,12 +106,15 @@ def build_tuning_gate_decision(
 
 
 def _catalyst_quality_recommendation(
-    report: Mapping[str, Any], thresholds: Mapping[str, Any]
+    report: Mapping[str, Any],
+    thresholds: Mapping[str, Any],
+    catalyst_postmortem: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     daily_reports = list(_daily_reports(report))
     hit_rate = _mapping(report.get("performance_summary")).get("hit_rate")
     misses = _catalyst_direction_misses(daily_reports)
     catalysts = sorted(_catalyst_ids(daily_reports))
+    postmortem_summary = _catalyst_postmortem_summary(catalyst_postmortem)
     if not catalysts:
         decision = "hold"
         recommendation = (
@@ -111,23 +130,51 @@ def _catalyst_quality_recommendation(
         thresholds["min_catalyst_hit_rate"]
     ) or misses > _int_or_zero(thresholds["max_catalyst_direction_misses"]):
         decision = "hold"
-        recommendation = (
-            "Keep catalyst changes paper-only; review catalyst selection and expected-return "
-            "calibration before another tuning gate."
-        )
+        if postmortem_summary.get("directional_result") == "miss":
+            recommendation = (
+                "Hold catalyst-quality signoff pending another paper-only catalyst sample; "
+                "keep catalyst changes paper-only and review timing, source strength, and "
+                "expected-return calibration before any separate strategy-threshold proposal."
+            )
+        else:
+            recommendation = (
+                "Keep catalyst changes paper-only; review catalyst selection and expected-return "
+                "calibration before another tuning gate."
+            )
     else:
         decision = "keep"
         recommendation = (
             "Keep the observed catalyst quality settings for the next paper-only review window."
         )
+    observations = {
+        "hit_rate": hit_rate,
+        "direction_misses": misses,
+        "evaluated_catalysts": catalysts,
+    }
+    if postmortem_summary:
+        observations["catalyst_postmortem"] = postmortem_summary
     return {
         "decision": decision,
         "recommendation": recommendation,
-        "observations": {
-            "hit_rate": hit_rate,
-            "direction_misses": misses,
-            "evaluated_catalysts": catalysts,
-        },
+        "observations": observations,
+    }
+
+
+def _catalyst_postmortem_summary(
+    catalyst_postmortem: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    if not catalyst_postmortem:
+        return {}
+    movement = _mapping(catalyst_postmortem.get("movement_review"))
+    return {
+        "artifact": str(catalyst_postmortem.get("_artifact_path") or ""),
+        "status": str(catalyst_postmortem.get("status") or ""),
+        "symbol": catalyst_postmortem.get("symbol"),
+        "catalyst_id": catalyst_postmortem.get("catalyst_id"),
+        "expected_return": movement.get("expected_return"),
+        "actual_movement": movement.get("actual_movement"),
+        "directional_result": movement.get("directional_result"),
+        "takeaway": catalyst_postmortem.get("catalyst_quality_takeaway"),
     }
 
 
@@ -272,7 +319,9 @@ def _data_gap_review_resolves_blockers(
 
 
 def _threshold_evaluations(
-    report: Mapping[str, Any], thresholds: Mapping[str, Any]
+    report: Mapping[str, Any],
+    thresholds: Mapping[str, Any],
+    data_gap_review: Mapping[str, Any] | None = None,
 ) -> dict[str, dict[str, Any]]:
     daily_reports = list(_daily_reports(report))
     sessions_reviewed = _int_or_zero(
@@ -286,10 +335,14 @@ def _threshold_evaluations(
         for rejected in _rejected_trades(report)
         if rejected.get("reason") == "consensus_threshold_not_met"
     )
-    data_gap_blockers = sum(
+    raw_data_gap_blockers = sum(
         1
         for rejected in _rejected_trades(report)
         if str(rejected.get("reason")) in DATA_GAP_REASONS
+    )
+    data_gap_blockers = _effective_data_gap_blockers(
+        raw_data_gap_blockers,
+        _data_gap_review_summary(data_gap_review),
     )
     return {
         "min_sessions_reviewed": _threshold_check(
@@ -311,6 +364,27 @@ def _threshold_evaluations(
             data_gap_blockers, thresholds["max_data_gap_blockers"], "<="
         ),
     }
+
+
+def _effective_data_gap_blockers(
+    raw_blocker_count: int,
+    review_summary: Mapping[str, Any],
+) -> int:
+    if not review_summary:
+        return raw_blocker_count
+    if _int_or_zero(review_summary.get("blocker_count")) != raw_blocker_count:
+        return raw_blocker_count
+    if _int_or_zero(review_summary.get("review_entry_issue_count")):
+        return raw_blocker_count
+    reviewed_count = _int_or_zero(review_summary.get("clearance_ready_count")) + _int_or_zero(
+        review_summary.get("accepted_paper_limitation_count")
+    )
+    if (
+        reviewed_count + _int_or_zero(review_summary.get("needs_evidence_count"))
+        != raw_blocker_count
+    ):
+        return raw_blocker_count
+    return _int_or_zero(review_summary.get("needs_evidence_count"))
 
 
 def _threshold_check(observed: Any, threshold: Any, operator: str) -> dict[str, Any]:
@@ -340,6 +414,14 @@ def _required_next_step(status: str, recommendations: Mapping[str, Mapping[str, 
         held = ", ".join(
             name for name, rec in recommendations.items() if rec.get("decision") == "hold"
         )
+        adjust = ", ".join(
+            name for name, rec in recommendations.items() if rec.get("decision") == "adjust"
+        )
+        if adjust:
+            return (
+                "Resolve held paper-only tuning areas and draft review notes for adjust areas "
+                f"before strategy changes: held={held}; adjust={adjust}."
+            )
         return f"Resolve held paper-only tuning areas before strategy changes: {held}."
     if status == "adjust":
         return (
@@ -493,6 +575,28 @@ def _load_data_gap_review(path: Path, source_report_path: Path) -> dict[str, Any
     return payload
 
 
+def _load_catalyst_postmortem(path: Path) -> dict[str, Any]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise typer.BadParameter(f"could not read catalyst postmortem: {path}") from exc
+    if not isinstance(payload, dict) or payload.get("artifact_type") != "paper_catalyst_postmortem":
+        raise typer.BadParameter("catalyst postmortem must be a paper_catalyst_postmortem artifact")
+    for key, expected in (
+        ("paper_only", True),
+        ("read_only", True),
+        ("live_trading_enabled", False),
+        ("broker_mutation", False),
+        ("strategy_behavior_changed", False),
+        ("strategy_thresholds_changed", False),
+        ("live_settings_changed", False),
+    ):
+        if payload.get(key) is not expected:
+            raise typer.BadParameter(f"catalyst postmortem has unsafe {key}")
+    payload["_artifact_path"] = str(path)
+    return payload
+
+
 def _mapping(value: Any = None) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
 
@@ -535,6 +639,11 @@ def main(
         "--data-gap-review",
         help="Optional paper_strategy_data_gap_review artifact for blocker clearance status.",
     ),
+    catalyst_postmortem: str | None = typer.Option(
+        None,
+        "--catalyst-postmortem",
+        help="Optional paper_catalyst_postmortem artifact for catalyst-quality context.",
+    ),
     min_sessions_reviewed: int = typer.Option(
         DEFAULT_THRESHOLDS["min_sessions_reviewed"],
         "--min-sessions-reviewed",
@@ -571,6 +680,7 @@ def main(
         report_path=report,
         artifact_dir=artifact_dir,
         data_gap_review_path=data_gap_review,
+        catalyst_postmortem_path=catalyst_postmortem,
         thresholds={
             "min_sessions_reviewed": min_sessions_reviewed,
             "min_catalyst_hit_rate": min_catalyst_hit_rate,

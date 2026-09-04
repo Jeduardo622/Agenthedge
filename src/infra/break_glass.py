@@ -145,15 +145,13 @@ class PostgresBreakGlassStore:
     def active_overrides(self) -> list[Mapping[str, object]]:
         with postgres_connection(self.dsn) as conn:
             with conn.cursor() as cur:
-                cur.execute(
-                    """
+                cur.execute("""
                     SELECT override_id, control_name, reason, expires_at, created_by, created_at
                     FROM ah_break_glass_overrides
                     WHERE revoked_at IS NULL
                       AND expires_at > NOW()
                     ORDER BY expires_at ASC
-                    """
-                )
+                    """)
                 rows = cur.fetchall()
         active: list[Mapping[str, object]] = []
         for row in rows:

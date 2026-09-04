@@ -328,6 +328,32 @@ Lifecycle stage definitions:
 
 This lifecycle report is read-only and does not replace the packet gate. It defines the daily paper session artifact contract so future decision logs and promotion-readiness reports can reference the same `session_id`.
 
+### Paper Catalyst Session Closeout
+Use `cli.paper_catalyst_session_closeout` when a filled paper catalyst sample needs same-session closeout evidence before tuning review. The command reads an existing runtime audit, decision log, prior strategy capture, broker health/history, audit-chain report, and read-only broker status/open-order evidence. It writes operator status, rollout rehearsal, rollout packet, lifecycle, strategy capture, and closeout artifacts for the session. The closeout path is paper-only and audit-only; it does not submit or cancel broker orders, mutate runtime configuration, change scheduler state, change strategy behavior, change thresholds, or enable live trading.
+
+```bash
+poetry run python -m cli.paper_catalyst_session_closeout \
+  --artifact-dir storage/audit \
+  --session-date YYYY-MM-DD \
+  --runtime-audit storage/audit/runtime_events_paper-YYYYMMDD.jsonl \
+  --decision-artifact storage/audit/paper_decision_log_paper-YYYYMMDD_<timestamp>.json \
+  --prior-capture storage/audit/paper_strategy_tuning_capture_paper-YYYYMMDD_<timestamp>.json \
+  --health-artifact storage/audit/paper_broker_health_<timestamp>.json \
+  --health-history storage/audit/paper_broker_health_history_<timestamp>.json \
+  --audit-chain-report storage/audit/reports/audit_chain_report_ok_<timestamp>.json \
+  --observed-price 741.0 \
+  --observed-at 2026-06-29T20:00:00Z \
+  --movement-horizon same_session_close \
+  --provider-degradation accepted \
+  --provider-degradation-reason "accepted as non-blocking for this paper-only sample"
+```
+
+The command writes:
+- `storage/audit/paper_catalyst_session_closeout_paper-YYYYMMDD_<timestamp>.json`
+- `storage/audit/paper_catalyst_session_closeout_paper-YYYYMMDD_<timestamp>.md`
+- refreshed `paper_session_lifecycle_paper-YYYYMMDD_<timestamp>.json`
+- refreshed `paper_strategy_tuning_capture_paper-YYYYMMDD_<timestamp>.json`
+
 ### Paper Session Repair
 Use `cli.paper_session_repair` when a review board or live-readiness workbench reports an incomplete paper session. The command is a read-only operator repair report. It does not contact the broker, submit or cancel orders, update scheduler state, mutate configuration, or enable live trading.
 
@@ -521,6 +547,35 @@ The decision register writes:
 Decision entries are audit-only and keep `trading_behavior_changed: False` and `live_trading_enabled: False`. A positive review outcome only authorizes preparing the supervised live-dry-run plan; it is not a live-readiness gate.
 
 ### Paper Strategy Tuning Report
+Use `cli.paper_strategy_tuning_evidence_chain` to produce the June 24 post-session tuning packet with one audit-only operator command. The command records a fresh paper decision log, reuses the latest existing strategy tuning capture when one is already present for the session, falls back to mining the session runtime audit when no capture exists, runs `cli.paper_strategy_tuning_report`, and writes a chain summary that links the full packet. It does not contact the broker, submit or cancel orders, change scheduler state, mutate runtime configuration, alter strategy behavior, set environment variables, invoke live switches, or enable live trading.
+
+```bash
+poetry run python -m cli.paper_strategy_tuning_evidence_chain \
+  --artifact-dir storage/audit \
+  --session-date 2026-06-24 \
+  --generated-at 2026-06-24T23:59:00+00:00 \
+  --start-date 2026-06-22 \
+  --min-sessions 3 \
+  --reason "June 24 post-session paper strategy tuning packet reviewed."
+```
+
+The command writes:
+- `storage/audit/paper_decision_log_paper-20260624_<timestamp>.json`
+- `storage/audit/paper_strategy_tuning_report_<timestamp>.json`
+- `storage/audit/paper_strategy_tuning_evidence_chain_paper-20260624_<timestamp>.json`
+- `storage/audit/paper_strategy_tuning_evidence_chain_paper-20260624_<timestamp>.md`
+
+Expected ready output:
+- `PAPER_STRATEGY_TUNING_EVIDENCE_CHAIN_READY`
+- `decision_artifact: storage/audit/paper_decision_log_paper-20260624_<timestamp>.json`
+- `strategy_capture_artifact: storage/audit/paper_strategy_tuning_capture_paper-20260624_<timestamp>.json`
+- `strategy_tuning_report_artifact: storage/audit/paper_strategy_tuning_report_<timestamp>.json`
+- `strategy_capture_source: latest_existing_capture` or `decision_log_capture`
+- `chain_artifact: storage/audit/paper_strategy_tuning_evidence_chain_paper-20260624_<timestamp>.json`
+- `live_trading_enabled: False`
+- `broker_mutation: False`
+- `strategy_behavior_changed: False`
+
 Use `cli.paper_strategy_tuning_capture` before the daily report when operators need to backfill per-decision strategy evidence outside the decision-log path. The command records the inputs needed to judge strategy quality: agent signal snapshots, rejected trade proposals and reasons, expected-vs-actual movement, drawdown, gross/net exposure, hit rate, and catalyst attribution. It is paper-only and audit-only; it does not contact the broker, submit or cancel orders, change scheduler state, mutate runtime configuration, alter strategy weights, or enable live trading.
 
 ```bash
@@ -577,12 +632,34 @@ The daily paper performance report answers:
 
 The report is explicitly paper-only with `paper_only: True`, `live_trading_enabled: False`, `broker_mutation: False`, and `strategy_behavior_changed: False`. It consumes the latest `paper_strategy_tuning_capture_paper-YYYYMMDD_<timestamp>.json` for each session when present. It also surfaces missing strategy-quality inputs such as `strategy_signal_snapshot`, `expected_vs_actual_movement`, `drawdown`, `exposure`, `hit_rate`, and `catalyst_attribution` so the next paper sessions can capture the evidence needed for cap, sizing, and strategy-rule review.
 
+Use `cli.paper_catalyst_postmortem` when a paper catalyst needs a single-session postmortem rather than a threshold decision. For the June 24 SPY `Investor day` miss, the command reads existing decision-log, paper strategy tuning capture, paper strategy tuning report, and runtime audit artifacts. It explains expected return, actual movement, risk/compliance context, and the catalyst-quality takeaway. It does not change strategy thresholds, broker wiring, runtime configuration, scheduler state, environment variables, or live settings.
+
+```bash
+poetry run python -m cli.paper_catalyst_postmortem \
+  --artifact-dir storage/audit \
+  --session-date 2026-06-24 \
+  --symbol SPY \
+  --catalyst-id "Investor day"
+```
+
+The command writes:
+- `storage/audit/paper_catalyst_postmortem_paper-20260624_<timestamp>.json`
+- `storage/audit/paper_catalyst_postmortem_paper-20260624_<timestamp>.md`
+
+Expected ready output:
+- `PAPER_CATALYST_POSTMORTEM_READY`
+- `expected_return: 0.04`
+- `actual_movement: -0.0011055002047223408`
+- `directional_result: miss`
+- `strategy_thresholds_changed: False`
+
 Use `cli.paper_strategy_tuning_gate` to turn the June 22-24, 2026 paper tuning report into an explicit paper-only decision artifact. The gate reads an existing `paper_strategy_tuning_report_<timestamp>.json` and evaluates catalyst quality, consensus misses, and data-gap blockers against explicit thresholds. It writes recommendations only; it does not contact the broker, submit or cancel orders, change scheduler state, mutate runtime configuration, alter strategy weights, adjust execution thresholds, or enable live trading.
 
 ```bash
 poetry run python -m cli.paper_strategy_tuning_gate \
   --report storage/audit/paper_strategy_tuning_report_20260624T185531Z.json \
   --artifact-dir storage/audit \
+  --catalyst-postmortem storage/audit/paper_catalyst_postmortem_paper-20260624_<timestamp>.json \
   --data-gap-review storage/audit/paper_strategy_data_gap_review_<timestamp>.json \
   --min-sessions-reviewed 3 \
   --min-catalyst-hit-rate 0.5 \
@@ -595,7 +672,7 @@ The command writes:
 - `storage/audit/paper_strategy_tuning_gate_decision_<timestamp>.json`
 - `storage/audit/paper_strategy_tuning_gate_decision_<timestamp>.md`
 
-Expected output for the June 22-24 report is `PAPER_STRATEGY_TUNING_GATE_HOLD` when the catalyst hit rate is below threshold, a catalyst expected-vs-actual directional miss is present, or missing-data rejected trades remain. The decision artifact records `threshold_evaluations` with each threshold's observed value, operator, threshold, and pass/fail result. `--data-gap-review` is optional; use it after `cli.paper_strategy_data_gap_review` has produced a clearance register. The gate keeps the data-gap recommendation on `hold` while the linked review has `needs_evidence_count` or `review_entry_issue_count`, and switches only the data-gap recommendation to `keep` when all report blockers are either `clearance_ready` or `accepted_paper_limitation`. The decision artifact keeps `paper_only: True`, `live_trading_enabled: False`, `broker_mutation: False`, and `strategy_behavior_changed: False`.
+Expected output for the June 22-24 report is `PAPER_STRATEGY_TUNING_GATE_HOLD` when the catalyst hit rate is below threshold, a catalyst expected-vs-actual directional miss is present, or missing-data rejected trades remain. The decision artifact records `threshold_evaluations` with each threshold's observed value, operator, threshold, and pass/fail result. `--catalyst-postmortem` is optional; use it after `cli.paper_catalyst_postmortem` has produced a paper-only miss review so the catalyst-quality recommendation can explicitly hold signoff pending another paper-only catalyst sample. `--data-gap-review` is optional; use it after `cli.paper_strategy_data_gap_review` has produced a clearance register. The gate keeps the data-gap recommendation on `hold` while the linked review has `needs_evidence_count` or `review_entry_issue_count`, and switches only the data-gap recommendation to `keep` when all report blockers are either `clearance_ready` or `accepted_paper_limitation`. The decision artifact keeps `paper_only: True`, `live_trading_enabled: False`, `broker_mutation: False`, and `strategy_behavior_changed: False`.
 
 Use `cli.paper_strategy_data_gap_review` after a held tuning gate to turn missing fundamentals, sentiment, and catalyst research inputs into an explicit clearance register. By default it does not accept any gap; it writes the required evidence needed before another tuning gate. Use `--acceptance-reason` only when a human reviewer explicitly accepts all listed gaps as paper-only limitations. The command remains audit-only and does not alter strategy behavior, execution thresholds, broker wiring, or live settings.
 
@@ -631,17 +708,18 @@ The command writes:
 
 Expected output is `PAPER_STRATEGY_DATA_GAP_EVIDENCE_READY` when all required fields are present. Missing requirements fail closed as `PAPER_STRATEGY_DATA_GAP_EVIDENCE_NEEDS_EVIDENCE`.
 
-When only some blockers have evidence or reviewer acceptance, prefer granular entries instead of the global acceptance flag:
+When only some blockers have evidence or reviewer acceptance, prefer granular entries instead of the global acceptance flag. Use `--evidence-artifact` for ready evidence artifacts and `--accept-blocker reason:symbol:session_id=acceptance_reason` for one explicit paper-only limitation:
 
 ```bash
 poetry run python -m cli.paper_strategy_data_gap_review \
   --gate-decision storage/audit/paper_strategy_tuning_gate_decision_<timestamp>.json \
   --artifact-dir storage/audit \
-  --review-entry-json '{"reason":"missing_fundamentals","symbol":"QQQ","session_id":"paper-20260624","evidence_artifact":"storage/audit/<fundamentals-review>.json","reviewer_note":"QQQ fundamentals evidence attached for paper-only tuning."}' \
-  --review-entry-json '{"reason":"missing_catalyst_research_input","symbol":"QQQ","session_id":"paper-20260624","acceptance_reason":"QQQ had no catalyst candidate in this paper-only window."}'
+  --evidence-artifact storage/audit/<fundamentals-review>.json \
+  --accept-blocker "missing_news_sentiment:QQQ:paper-20260624=QQQ sentiment samples were unavailable in the June 24 paper-only provider snapshot; accept for this audit-only tuning gate only." \
+  --accept-blocker "missing_catalyst_research_input:QQQ:paper-20260624=QQQ had no catalyst research input artifact in the June 24 paper-only window; accept for this audit-only tuning gate only."
 ```
 
-If any blocker remains unresolved, or if any review entry does not match a blocker, the command records `partial_data_gap_review` and prints `PAPER_STRATEGY_DATA_GAP_REVIEW_PARTIAL`. Evidence entries set that blocker to `clearance_ready` only when the referenced artifact is a `paper_strategy_data_gap_evidence` artifact with `status: evidence_ready`, matching `reason`, `symbol`, and `session_id`, and required evidence fields present (`ProfitMargin` and `PERatio` for fundamentals, `samples > 0` for sentiment, or `artifact_ref` for catalyst research input). Per-blocker `acceptance_reason` sets only that blocker to `accepted_paper_limitation`. Entries without `session_id` are accepted only when the report has a single blocker for that `reason` and `symbol`; multi-session reports should always include `session_id`. Duplicate entries for the same blocker fail closed with `duplicate_review_entries`; collapse conflicting reviewer notes into one entry before rerunning the review. Review entries that match no blocker are surfaced as `unmatched_review_entry` in `review_entry_issues` and do not clear or accept any blocker.
+If any blocker remains unresolved, or if any review entry does not match a blocker, the command records `partial_data_gap_review` and prints `PAPER_STRATEGY_DATA_GAP_REVIEW_PARTIAL`. Evidence entries set that blocker to `clearance_ready` only when the referenced artifact is a `paper_strategy_data_gap_evidence` artifact with `status: evidence_ready`, matching `reason`, `symbol`, and `session_id`, and required evidence fields present (`ProfitMargin` and `PERatio` for fundamentals, `samples > 0` for sentiment, or `artifact_ref` for catalyst research input). Per-blocker acceptance sets only that blocker to `accepted_paper_limitation`. `--review-entry-json` remains available for custom review metadata. Entries without `session_id` are accepted only when the report has a single blocker for that `reason` and `symbol`; multi-session reports should always include `session_id`. Duplicate entries for the same blocker fail closed with `duplicate_review_entries`; collapse conflicting reviewer notes into one entry before rerunning the review. Review entries that match no blocker are surfaced as `unmatched_review_entry` in `review_entry_issues` and do not clear or accept any blocker.
 
 ### Supervised Live-Dry-Run Command Center
 Use `cli.paper_supervised_live_dry_run build` only after the latest `paper_live_readiness_review_decision_<timestamp>.json` records `outcome: ready_for_supervised_paper_extension` and references the accepted workbench artifact. The command is a read-only planning command: it does not contact the broker, submit or cancel orders, change scheduler state, change environment variables, mutate config files, or enable live trading.
