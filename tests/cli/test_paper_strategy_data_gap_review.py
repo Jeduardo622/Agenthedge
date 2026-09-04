@@ -4,6 +4,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 
@@ -124,6 +125,11 @@ def test_strategy_data_gap_review_supports_per_blocker_review_entries(
             "symbol": "QQQ",
             "reason": "missing_fundamentals",
             "session_id": "paper-20260624",
+            "read_only": True,
+            "paper_only": True,
+            "live_trading_enabled": False,
+            "broker_mutation": False,
+            "strategy_behavior_changed": False,
             "fields": {"ProfitMargin": 0.21, "PERatio": 31.2},
         },
     )
@@ -194,6 +200,11 @@ def test_strategy_data_gap_review_rejects_unready_evidence_artifact(
             "symbol": "QQQ",
             "reason": "missing_news_sentiment",
             "session_id": "paper-20260624",
+            "read_only": True,
+            "paper_only": True,
+            "live_trading_enabled": False,
+            "broker_mutation": False,
+            "strategy_behavior_changed": False,
             "missing_requirements": ["samples>0"],
         },
     )
@@ -250,6 +261,11 @@ def test_strategy_data_gap_review_rejects_evidence_from_wrong_session(
             "symbol": "QQQ",
             "reason": "missing_fundamentals",
             "session_id": "paper-20260623",
+            "read_only": True,
+            "paper_only": True,
+            "live_trading_enabled": False,
+            "broker_mutation": False,
+            "strategy_behavior_changed": False,
             "fields": {"ProfitMargin": 0.21, "PERatio": 31.2},
         },
     )
@@ -296,6 +312,11 @@ def test_strategy_data_gap_review_rejects_claimed_ready_evidence_with_missing_fi
             "symbol": "QQQ",
             "reason": "missing_fundamentals",
             "session_id": "paper-20260624",
+            "read_only": True,
+            "paper_only": True,
+            "live_trading_enabled": False,
+            "broker_mutation": False,
+            "strategy_behavior_changed": False,
             "fields": {"ProfitMargin": 0.21},
         },
     )
@@ -321,6 +342,107 @@ def test_strategy_data_gap_review_rejects_claimed_ready_evidence_with_missing_fi
         "evidence_status": "evidence_ready",
         "validation_errors": ["missing_evidence_fields:PERatio"],
     }
+
+
+@pytest.mark.parametrize(
+    ("evidence_contract", "expected_errors"),
+    [
+        pytest.param(
+            {},
+            [
+                "unsafe_evidence_read_only",
+                "unsafe_evidence_paper_only",
+                "unsafe_evidence_live_trading_enabled",
+                "unsafe_evidence_broker_mutation",
+                "unsafe_evidence_strategy_behavior_changed",
+            ],
+            id="missing",
+        ),
+        pytest.param(
+            {
+                "read_only": "true",
+                "paper_only": "true",
+                "live_trading_enabled": "false",
+                "broker_mutation": "false",
+                "strategy_behavior_changed": "false",
+            },
+            [
+                "unsafe_evidence_read_only",
+                "unsafe_evidence_paper_only",
+                "unsafe_evidence_live_trading_enabled",
+                "unsafe_evidence_broker_mutation",
+                "unsafe_evidence_strategy_behavior_changed",
+            ],
+            id="malformed",
+        ),
+        pytest.param(
+            {
+                "read_only": False,
+                "paper_only": False,
+                "live_trading_enabled": True,
+                "broker_mutation": True,
+                "strategy_behavior_changed": True,
+            },
+            [
+                "unsafe_evidence_read_only",
+                "unsafe_evidence_paper_only",
+                "unsafe_evidence_live_trading_enabled",
+                "unsafe_evidence_broker_mutation",
+                "unsafe_evidence_strategy_behavior_changed",
+            ],
+            id="unsafe",
+        ),
+    ],
+)
+def test_strategy_data_gap_review_requires_explicit_safe_evidence_contract(
+    tmp_path: Path,
+    monkeypatch,
+    evidence_contract: dict[str, object],
+    expected_errors: list[str],
+) -> None:
+    """A readiness artifact cannot clear a blocker without the paper-only safety contract."""
+    from cli import paper_strategy_data_gap_review
+
+    artifact_dir = tmp_path / "audit"
+    report_path = artifact_dir / "paper_strategy_tuning_report_20260624T185531Z.json"
+    gate_path = artifact_dir / "paper_strategy_tuning_gate_decision_20260624T190000Z.json"
+    evidence_path = artifact_dir / "qqq_fundamentals_review_20260624.json"
+    _write_json(report_path, _june_22_24_report(report_path))
+    _write_json(gate_path, _gate_decision(gate_path, report_path))
+    _write_json(
+        evidence_path,
+        {
+            "artifact_type": "paper_strategy_data_gap_evidence",
+            "status": "evidence_ready",
+            "symbol": "QQQ",
+            "reason": "missing_fundamentals",
+            "session_id": "paper-20260624",
+            "fields": {"ProfitMargin": 0.21, "PERatio": 31.2},
+            **evidence_contract,
+        },
+    )
+    monkeypatch.setattr(paper_strategy_data_gap_review, "_timestamp", lambda: "20260624T191500Z")
+
+    review = paper_strategy_data_gap_review.build_data_gap_review(
+        gate_decision_path=gate_path,
+        artifact_dir=artifact_dir,
+        review_entries=[
+            {
+                "reason": "missing_fundamentals",
+                "symbol": "QQQ",
+                "evidence_artifact": str(evidence_path),
+            },
+        ],
+        now=datetime(2026, 6, 24, 19, 15, tzinfo=timezone.utc),
+    )
+
+    blockers = {blocker["reason"]: blocker for blocker in review["blockers"]}
+    assert review["status"] == "needs_data_gap_evidence"
+    assert review["summary"]["clearance_ready_count"] == 0
+    assert blockers["missing_fundamentals"]["clearance_status"] == "needs_evidence"
+    assert (
+        blockers["missing_fundamentals"]["review_evidence"]["validation_errors"] == expected_errors
+    )
 
 
 def test_strategy_data_gap_review_matches_review_entries_by_session_id(
@@ -362,6 +484,11 @@ def test_strategy_data_gap_review_matches_review_entries_by_session_id(
             "symbol": "QQQ",
             "reason": "missing_fundamentals",
             "session_id": "paper-20260624",
+            "read_only": True,
+            "paper_only": True,
+            "live_trading_enabled": False,
+            "broker_mutation": False,
+            "strategy_behavior_changed": False,
             "fields": {"ProfitMargin": 0.21, "PERatio": 31.2},
         },
     )
@@ -672,6 +799,11 @@ def test_strategy_data_gap_review_cli_accepts_review_entry_json(
             "reason": "missing_fundamentals",
             "symbol": "QQQ",
             "session_id": "paper-20260624",
+            "read_only": True,
+            "paper_only": True,
+            "live_trading_enabled": False,
+            "broker_mutation": False,
+            "strategy_behavior_changed": False,
             "fields": {"ProfitMargin": 0.21, "PERatio": 31.2},
         },
     )
@@ -701,6 +833,75 @@ def test_strategy_data_gap_review_cli_accepts_review_entry_json(
     review = json.loads(review_path.read_text(encoding="utf-8"))
     assert review["status"] == "partial_data_gap_review"
     assert review["summary"]["clearance_ready_count"] == 1
+
+
+def test_strategy_data_gap_review_cli_clears_blockers_with_evidence_and_acceptance_options(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from cli import paper_strategy_data_gap_review
+
+    artifact_dir = tmp_path / "audit"
+    report_path = artifact_dir / "paper_strategy_tuning_report_20260624T185531Z.json"
+    gate_path = artifact_dir / "paper_strategy_tuning_gate_decision_20260624T190000Z.json"
+    evidence_path = artifact_dir / "qqq_fundamentals_review_20260624.json"
+    _write_json(report_path, _june_22_24_report(report_path))
+    _write_json(gate_path, _gate_decision(gate_path, report_path))
+    _write_json(
+        evidence_path,
+        {
+            "artifact_type": "paper_strategy_data_gap_evidence",
+            "status": "evidence_ready",
+            "reason": "missing_fundamentals",
+            "symbol": "QQQ",
+            "session_id": "paper-20260624",
+            "read_only": True,
+            "paper_only": True,
+            "live_trading_enabled": False,
+            "broker_mutation": False,
+            "strategy_behavior_changed": False,
+            "fields": {"ProfitMargin": 0.21, "PERatio": 31.2},
+            "reviewer_note": "QQQ fundamentals evidence attached for paper-only tuning.",
+        },
+    )
+    monkeypatch.setattr(paper_strategy_data_gap_review, "_timestamp", lambda: "20260624T191500Z")
+
+    result = CliRunner().invoke(
+        paper_strategy_data_gap_review.app,
+        [
+            "--gate-decision",
+            str(gate_path),
+            "--artifact-dir",
+            str(artifact_dir),
+            "--evidence-artifact",
+            str(evidence_path),
+            "--accept-blocker",
+            (
+                "missing_news_sentiment:QQQ:paper-20260624="
+                "Paper-only QQQ sentiment gap accepted for June 24 tuning clearance only."
+            ),
+            "--accept-blocker",
+            (
+                "missing_catalyst_research_input:QQQ:paper-20260624="
+                "Paper-only QQQ catalyst research gap accepted for June 24 tuning clearance only."
+            ),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "PAPER_STRATEGY_DATA_GAP_REVIEW_ACCEPTED" in result.output
+    review_path = artifact_dir / "paper_strategy_data_gap_review_20260624T191500Z.json"
+    review = json.loads(review_path.read_text(encoding="utf-8"))
+    assert review["status"] == "accepted_paper_limitations"
+    assert review["summary"] == {
+        "blocker_count": 3,
+        "clearance_ready_count": 1,
+        "accepted_paper_limitation_count": 2,
+        "needs_evidence_count": 0,
+    }
+    assert review["paper_only"] is True
+    assert review["live_trading_enabled"] is False
+    assert review["broker_mutation"] is False
+    assert review["strategy_behavior_changed"] is False
 
 
 def _gate_decision(gate_path: Path, report_path: Path) -> dict:

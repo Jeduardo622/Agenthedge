@@ -214,6 +214,15 @@ def _review_evidence_payload(
         return {}, ["evidence_artifact_not_object"]
 
     validation_errors: list[str] = []
+    for field, expected in (
+        ("read_only", True),
+        ("paper_only", True),
+        ("live_trading_enabled", False),
+        ("broker_mutation", False),
+        ("strategy_behavior_changed", False),
+    ):
+        if payload.get(field) is not expected:
+            validation_errors.append(f"unsafe_evidence_{field}")
     if payload.get("artifact_type") != "paper_strategy_data_gap_evidence":
         validation_errors.append("invalid_evidence_artifact_type")
     if payload.get("status") != "evidence_ready":
@@ -487,6 +496,48 @@ def _parse_review_entries(raw_entries: Iterable[str]) -> list[Mapping[str, Any]]
     return parsed_entries
 
 
+def _parse_evidence_artifact_entries(raw_artifacts: Iterable[str]) -> list[Mapping[str, Any]]:
+    entries: list[Mapping[str, Any]] = []
+    for raw_artifact in raw_artifacts:
+        path = Path(raw_artifact)
+        payload = _load_json_artifact(path, "paper_strategy_data_gap_evidence")
+        entries.append(
+            {
+                "reason": payload.get("reason"),
+                "symbol": payload.get("symbol"),
+                "session_id": payload.get("session_id"),
+                "evidence_artifact": str(path),
+                "reviewer_note": payload.get("reviewer_note"),
+            }
+        )
+    return entries
+
+
+def _parse_accept_blocker_entries(raw_acceptances: Iterable[str]) -> list[Mapping[str, Any]]:
+    entries: list[Mapping[str, Any]] = []
+    for raw in raw_acceptances:
+        blocker_key, separator, acceptance_reason = raw.partition("=")
+        if not separator or not acceptance_reason.strip():
+            raise typer.BadParameter(
+                "--accept-blocker must use reason:symbol:session_id=acceptance_reason"
+            )
+        key_parts = blocker_key.split(":")
+        if len(key_parts) != 3 or not all(part.strip() for part in key_parts):
+            raise typer.BadParameter(
+                "--accept-blocker must use reason:symbol:session_id=acceptance_reason"
+            )
+        reason, symbol, session_id = (part.strip() for part in key_parts)
+        entries.append(
+            {
+                "reason": reason,
+                "symbol": symbol,
+                "session_id": session_id,
+                "acceptance_reason": acceptance_reason.strip(),
+            }
+        )
+    return entries
+
+
 def _mapping(value: Any = None) -> Mapping[str, Any]:
     return value if isinstance(value, Mapping) else {}
 
@@ -545,12 +596,33 @@ def main(
             "acceptance_reason. Repeat for multiple blockers."
         ),
     ),
+    evidence_artifact: list[str] | None = typer.Option(
+        None,
+        "--evidence-artifact",
+        help=(
+            "Path to a paper_strategy_data_gap_evidence artifact. The review validates that "
+            "it matches a blocker and is ready before clearing that blocker."
+        ),
+    ),
+    accept_blocker: list[str] | None = typer.Option(
+        None,
+        "--accept-blocker",
+        help=(
+            "Per-blocker paper-only acceptance in the form "
+            "reason:symbol:session_id=acceptance_reason. Repeat for multiple blockers."
+        ),
+    ),
 ) -> None:
+    review_entries = [
+        *_parse_review_entries(review_entry_json or []),
+        *_parse_evidence_artifact_entries(evidence_artifact or []),
+        *_parse_accept_blocker_entries(accept_blocker or []),
+    ]
     review = build_data_gap_review(
         gate_decision_path=gate_decision,
         artifact_dir=artifact_dir,
         acceptance_reason=acceptance_reason,
-        review_entries=_parse_review_entries(review_entry_json or []),
+        review_entries=review_entries,
     )
     _print_handoff(review)
 
