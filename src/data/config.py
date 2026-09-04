@@ -4,7 +4,14 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import Mapping, MutableMapping, cast
+from typing import Mapping, MutableMapping, Sequence, cast
+
+_PROVIDER_CREDENTIAL_REQUIREMENTS: Mapping[str, tuple[str, ...]] = {
+    "alpha_vantage": ("ALPHA_VANTAGE_API_KEY",),
+    "finnhub": ("FINNHUB_API_KEY",),
+    "fred": ("FRED_API_KEY",),
+    "newsapi": ("NEWSAPI_KEY",),
+}
 
 
 class ProviderConfigError(ValueError):
@@ -61,6 +68,53 @@ def _get_bool(source: Mapping[str, str], key: str, default: bool) -> bool:
     if lowered in {"0", "false", "no", "off"}:
         return False
     raise ProviderConfigError(f"{key} must be a boolean string, got {raw!r}")
+
+
+def build_provider_readiness(
+    *,
+    required_providers: Sequence[str],
+    env: Mapping[str, str] | None = None,
+) -> MutableMapping[str, object]:
+    """Report credential presence for explicit providers without exposing values."""
+
+    normalized: list[str] = []
+    for raw_name in required_providers:
+        name = raw_name.strip().lower()
+        if not name:
+            raise ProviderConfigError("required provider names must not be blank")
+        if name not in _PROVIDER_CREDENTIAL_REQUIREMENTS:
+            raise ProviderConfigError(f"unsupported provider: {name}")
+        if name not in normalized:
+            normalized.append(name)
+    if not normalized:
+        raise ProviderConfigError("at least one required provider must be specified")
+
+    source = _get_env(env)
+    providers: MutableMapping[str, object] = {}
+    missing_providers: list[str] = []
+    for name in normalized:
+        required_environment = _PROVIDER_CREDENTIAL_REQUIREMENTS[name]
+        missing_environment = [
+            key for key in required_environment if not (source.get(key) or "").strip()
+        ]
+        configured = not missing_environment
+        if not configured:
+            missing_providers.append(name)
+        providers[name] = {
+            "configured": configured,
+            "required_environment": list(required_environment),
+            "missing_environment": missing_environment,
+        }
+
+    return {
+        "status": "ready" if not missing_providers else "blocked",
+        "offline": True,
+        "dotenv_loaded": False,
+        "network_probes": False,
+        "required_providers": normalized,
+        "missing_providers": missing_providers,
+        "providers": providers,
+    }
 
 
 @dataclass(frozen=True)

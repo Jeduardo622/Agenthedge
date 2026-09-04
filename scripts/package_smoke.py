@@ -13,6 +13,7 @@ REQUIRED_PREFIXES = ("cli/", "ops/", "observability/", "research_inputs/", "stra
 REQUIRED_PATHS = (
     "cli/broker_canary.py",
     "cli/paper_decision_log.py",
+    "cli/provider_readiness.py",
     "cli/paper_strategy_tuning_capture.py",
     "cli/paper_broker_health.py",
     "cli/paper_broker_health_history.py",
@@ -49,6 +50,7 @@ REQUIRED_PATHS = (
 REQUIRED_IMPORTS = (
     "cli.broker_canary",
     "cli.paper_decision_log",
+    "cli.provider_readiness",
     "cli.paper_strategy_tuning_capture",
     "cli.paper_broker_health",
     "cli.paper_broker_health_history",
