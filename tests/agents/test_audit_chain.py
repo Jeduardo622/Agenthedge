@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import gc
 import json
 import multiprocessing
 import threading
 import time
+import weakref
 
 import pytest
 
@@ -80,6 +82,67 @@ def test_jsonl_audit_sink_refreshes_tail_across_independent_canonical_path_write
     assert records[1]["prev_hash"] == records[0]["hash"]
     assert ok is True
     assert errors == []
+
+
+def test_jsonl_audit_sink_collects_dead_path_locks_while_live_aliases_share_one(
+    tmp_path,
+) -> None:
+    path = tmp_path / "audit.jsonl"
+    alias_parent = tmp_path / "alias"
+    alias_parent.mkdir()
+    alias_path = alias_parent / ".." / path.name
+    first = JsonlAuditSink(path)
+    second = JsonlAuditSink(alias_path)
+
+    assert first._lock is second._lock
+
+    unique_root = tmp_path / "unique"
+    unique_root.mkdir()
+    transient_sinks = [
+        JsonlAuditSink(unique_root / f"audit-{index}.jsonl") for index in range(2_000)
+    ]
+    transient_lock_refs = [weakref.ref(sink._lock) for sink in transient_sinks]
+
+    del transient_sinks
+    gc.collect()
+
+    assert first._lock is second._lock
+    assert all(lock_ref() is None for lock_ref in transient_lock_refs)
+
+
+def test_jsonl_audit_sink_concurrent_construction_shares_live_path_lock(tmp_path) -> None:
+    path = tmp_path / "audit.jsonl"
+    alias_parent = tmp_path / "alias"
+    alias_parent.mkdir()
+    alias_path = alias_parent / ".." / path.name
+    worker_count = 24
+    start = threading.Barrier(worker_count)
+    results_lock = threading.Lock()
+    sinks = []
+    failures = []
+
+    def construct_sink(index) -> None:
+        try:
+            start.wait(timeout=10)
+            sink = JsonlAuditSink(path if index % 2 == 0 else alias_path)
+            with results_lock:
+                sinks.append(sink)
+        except BaseException as exc:
+            with results_lock:
+                failures.append(exc)
+
+    threads = [
+        threading.Thread(target=construct_sink, args=(index,)) for index in range(worker_count)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=15)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert failures == []
+    assert len(sinks) == worker_count
+    assert len({id(sink._lock) for sink in sinks}) == 1
 
 
 def test_jsonl_audit_sink_revalidates_tail_before_append(tmp_path) -> None:

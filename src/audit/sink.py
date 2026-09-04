@@ -12,8 +12,9 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, BinaryIO, Iterator, Mapping, MutableMapping
+from weakref import WeakValueDictionary
 
-_PATH_LOCKS: dict[str, threading.Lock] = {}
+_PATH_LOCKS: WeakValueDictionary[str, threading.Lock] = WeakValueDictionary()
 _PATH_LOCKS_GUARD = threading.Lock()
 
 
