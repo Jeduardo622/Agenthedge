@@ -9,6 +9,7 @@ from typing import Any, Mapping
 
 import typer
 
+from audit import verify_jsonl_hash_chain
 from cli import paper_session_lifecycle, paper_strategy_tuning_capture
 
 app = typer.Typer(
@@ -90,6 +91,7 @@ def build_closeout(
         decision=decision_payload,
         capture_path=capture_path,
         capture=prior_capture_payload,
+        health_path=health_path,
         health=health_payload,
         history=history_payload,
         chain=chain_payload,
@@ -195,8 +197,14 @@ def build_closeout(
         movement_horizon=movement_horizon,
         movement_unit=str(prior_movement.get("unit") or "return"),
         rejected_trades=(
-            _list_of_mappings(prior_capture_payload.get("rejected_trades"))
-            + _list_of_mappings(runtime_context.get("rejected_trades"))
+            _validated_mapping_list(
+                prior_capture_payload.get("rejected_trades"),
+                "prior_capture.rejected_trades",
+            )
+            + _validated_mapping_list(
+                runtime_context.get("rejected_trades"),
+                "runtime rejected trade evidence",
+            )
         ),
         drawdown=_float_or_none(
             _mapping(prior_capture_payload.get("performance_metrics")).get("drawdown")
@@ -288,11 +296,18 @@ def _runtime_context(path: Path) -> dict[str, Any]:
             fill = dict(payload)
         elif record.get("action") == "quant_consensus_rejected":
             rejected.extend(
-                dict(item) for item in _list_of_mappings(payload.get("rejected_trades"))
+                dict(item)
+                for item in _validated_mapping_list(
+                    payload.get("rejected_trades"),
+                    "runtime rejected_trades",
+                )
             )
             rejected.extend(
                 dict(item)
-                for item in _list_of_mappings(payload.get("non_participating_strategies"))
+                for item in _validated_mapping_list(
+                    payload.get("non_participating_strategies"),
+                    "runtime non_participating_strategies",
+                )
             )
     if fill is None:
         raise typer.BadParameter("runtime audit must include an execution_fill event")
@@ -335,6 +350,7 @@ def _validate_closeout_sources(
     decision: Mapping[str, Any],
     capture_path: Path,
     capture: Mapping[str, Any],
+    health_path: Path,
     health: Mapping[str, Any],
     history: Mapping[str, Any],
     chain: Mapping[str, Any],
@@ -343,6 +359,7 @@ def _validate_closeout_sources(
     _validate_safe_source("prior_capture", capture, require_paper_only=True)
     _validate_safe_source("health_artifact", health)
     _validate_safe_source("health_history", history)
+    _validated_mapping_list(capture.get("rejected_trades"), "prior_capture.rejected_trades")
 
     if decision.get("session_id") != session_id:
         raise typer.BadParameter("decision_artifact session_id mismatch")
@@ -373,6 +390,8 @@ def _validate_closeout_sources(
         raise typer.BadParameter("latest health status must be passed")
     if _mapping(history.get("summary")).get("unresolved_failures") not in (0, 0.0):
         raise typer.BadParameter("health history must have zero unresolved failures")
+    if not _paths_match(history.get("latest_health_artifact"), health_path):
+        raise typer.BadParameter("latest health artifact linkage mismatch")
 
     if chain.get("ok") is not True:
         raise typer.BadParameter("audit chain must be valid")
@@ -382,6 +401,10 @@ def _validate_closeout_sources(
         raise typer.BadParameter("audit chain must have zero errors")
     if not _paths_match(chain.get("target_path"), runtime_path):
         raise typer.BadParameter("audit chain target mismatch")
+    runtime_chain_ok, runtime_chain_errors = verify_jsonl_hash_chain(runtime_path)
+    if not runtime_chain_ok:
+        details = "; ".join(runtime_chain_errors[:3]) or "unknown verification failure"
+        raise typer.BadParameter(f"runtime audit chain is invalid: {details}")
 
 
 def _validate_safe_source(
@@ -422,6 +445,8 @@ def _validated_order_evidence(
     status_payload = dict(order_status)
     if status_payload.get("status") != "filled":
         raise typer.BadParameter("order status must be filled")
+    if broker_order.get("status") != "filled" or broker_order.get("raw_status") != "filled":
+        raise typer.BadParameter("runtime order status must be filled")
     if open_orders:
         raise typer.BadParameter("open order evidence must be empty")
 
@@ -779,6 +804,16 @@ def _list_of_mappings(value: Any = None) -> list[Mapping[str, Any]]:
     if not isinstance(value, list):
         return []
     return [item for item in value if isinstance(item, Mapping)]
+
+
+def _validated_mapping_list(value: Any, label: str) -> list[Mapping[str, Any]]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise typer.BadParameter(f"{label} must be a JSON array")
+    if not all(isinstance(item, Mapping) for item in value):
+        raise typer.BadParameter(f"{label} must contain only JSON objects")
+    return value
 
 
 def _float_or_none(value: Any) -> float | None:

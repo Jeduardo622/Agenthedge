@@ -9,6 +9,8 @@ import pytest
 import typer
 from typer.testing import CliRunner
 
+from audit import JsonlAuditSink
+
 
 def test_catalyst_session_closeout_closes_session_and_backfills_movement(
     tmp_path: Path, monkeypatch
@@ -103,6 +105,8 @@ def test_catalyst_session_closeout_closes_session_and_backfills_movement(
             "status": "passed",
             "latest_status": "passed",
             "read_only": True,
+            "latest_health_artifact": str(health_path),
+            "health_artifacts": [{"health_artifact": str(health_path), "status": "passed"}],
             "summary": {"unresolved_failures": 0, "recovered_after_retry": 0},
         },
     )
@@ -252,6 +256,8 @@ def test_catalyst_session_closeout_cli_prints_artifact_paths(tmp_path: Path, mon
             "status": "passed",
             "latest_status": "passed",
             "read_only": True,
+            "latest_health_artifact": str(health_path),
+            "health_artifacts": [{"health_artifact": str(health_path), "status": "passed"}],
             "summary": {"unresolved_failures": 0},
         },
     )
@@ -519,6 +525,80 @@ def test_catalyst_session_closeout_rejects_non_object_open_order_evidence() -> N
         paper_catalyst_session_closeout._json_list('["not-an-order"]')
 
 
+def test_catalyst_session_closeout_recomputes_chain_after_report_and_rejects_tamper(
+    tmp_path: Path,
+) -> None:
+    from cli import paper_catalyst_session_closeout
+
+    kwargs = _valid_closeout_kwargs(tmp_path)
+    runtime_path = Path(kwargs["runtime_audit"])
+    lines = runtime_path.read_text(encoding="utf-8").splitlines()
+    record = json.loads(lines[0])
+    record["payload"]["price"] = 700.0
+    lines[0] = json.dumps(record)
+    runtime_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    with pytest.raises(typer.BadParameter, match="runtime audit chain is invalid"):
+        paper_catalyst_session_closeout.build_closeout(**kwargs)
+
+
+def test_catalyst_session_closeout_rejects_non_filled_runtime_order_status(
+    tmp_path: Path,
+) -> None:
+    from cli import paper_catalyst_session_closeout
+
+    kwargs = _valid_closeout_kwargs(tmp_path)
+    _seed_runtime(Path(kwargs["runtime_audit"]), broker_status="canceled")
+
+    with pytest.raises(typer.BadParameter, match="runtime order status must be filled"):
+        paper_catalyst_session_closeout.build_closeout(**kwargs)
+
+
+def test_catalyst_session_closeout_rejects_mismatched_health_history_linkage(
+    tmp_path: Path,
+) -> None:
+    from cli import paper_catalyst_session_closeout
+
+    kwargs = _valid_closeout_kwargs(tmp_path)
+    history_path = Path(kwargs["health_history"])
+    history = _load_json(history_path)
+    history["latest_health_artifact"] = str(tmp_path / "unrelated-health.json")
+    _write_json(history_path, history)
+
+    with pytest.raises(typer.BadParameter, match="latest health artifact linkage mismatch"):
+        paper_catalyst_session_closeout.build_closeout(**kwargs)
+
+
+@pytest.mark.parametrize(
+    "malformed_source",
+    ["prior_capture", "runtime_rejected_trades", "runtime_non_participating"],
+)
+def test_catalyst_session_closeout_rejects_malformed_rejection_evidence(
+    tmp_path: Path, malformed_source: str
+) -> None:
+    from cli import paper_catalyst_session_closeout
+
+    kwargs = _valid_closeout_kwargs(tmp_path)
+    if malformed_source == "prior_capture":
+        capture_path = Path(kwargs["prior_capture"])
+        capture = _load_json(capture_path)
+        capture["rejected_trades"] = ["not-an-object"]
+        _write_json(capture_path, capture)
+    elif malformed_source == "runtime_rejected_trades":
+        _seed_runtime(
+            Path(kwargs["runtime_audit"]),
+            rejected_trades=["not-an-object"],
+        )
+    else:
+        _seed_runtime(
+            Path(kwargs["runtime_audit"]),
+            non_participating_strategies=["not-an-object"],
+        )
+
+    with pytest.raises(typer.BadParameter, match="must contain only JSON objects"):
+        paper_catalyst_session_closeout.build_closeout(**kwargs)
+
+
 def _valid_closeout_kwargs(tmp_path: Path) -> dict[str, Any]:
     source_dir = tmp_path / "source"
     artifact_dir = tmp_path / "audit"
@@ -578,6 +658,8 @@ def _valid_closeout_kwargs(tmp_path: Path) -> dict[str, Any]:
             "status": "passed",
             "latest_status": "passed",
             "read_only": True,
+            "latest_health_artifact": str(health_path),
+            "health_artifacts": [{"health_artifact": str(health_path), "status": "passed"}],
             "summary": {"unresolved_failures": 0},
         },
     )
@@ -610,7 +692,13 @@ def _valid_closeout_kwargs(tmp_path: Path) -> dict[str, Any]:
     }
 
 
-def _seed_runtime(path: Path) -> None:
+def _seed_runtime(
+    path: Path,
+    *,
+    broker_status: str = "filled",
+    rejected_trades: list[Any] | None = None,
+    non_participating_strategies: list[Any] | None = None,
+) -> None:
     records = [
         {
             "action": "execution_fill",
@@ -624,8 +712,8 @@ def _seed_runtime(path: Path) -> None:
                 "broker_order": {
                     "broker_order_id": "order-1",
                     "client_order_id": "client-1",
-                    "status": "filled",
-                    "raw_status": "filled",
+                    "status": broker_status,
+                    "raw_status": broker_status,
                     "filled_quantity": 41.0,
                     "average_fill_price": 737.87,
                     "quantity": 41.0,
@@ -640,21 +728,36 @@ def _seed_runtime(path: Path) -> None:
             "action": "quant_consensus_rejected",
             "payload": {
                 "symbol": "QQQ",
-                "rejected_trades": [
-                    {
-                        "symbol": "QQQ",
-                        "strategy": "momentum",
-                        "reason": "consensus_threshold_not_met",
-                    }
-                ],
-                "non_participating_strategies": [
-                    {"symbol": "QQQ", "strategy": "value", "reason": "missing_fundamentals"}
-                ],
+                "rejected_trades": (
+                    rejected_trades
+                    if rejected_trades is not None
+                    else [
+                        {
+                            "symbol": "QQQ",
+                            "strategy": "momentum",
+                            "reason": "consensus_threshold_not_met",
+                        }
+                    ]
+                ),
+                "non_participating_strategies": (
+                    non_participating_strategies
+                    if non_participating_strategies is not None
+                    else [
+                        {
+                            "symbol": "QQQ",
+                            "strategy": "value",
+                            "reason": "missing_fundamentals",
+                        }
+                    ]
+                ),
             },
         },
     ]
+    path.unlink(missing_ok=True)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text("\n".join(json.dumps(record) for record in records) + "\n", encoding="utf-8")
+    sink = JsonlAuditSink(path)
+    for record in records:
+        sink(record["action"], record["payload"])
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
