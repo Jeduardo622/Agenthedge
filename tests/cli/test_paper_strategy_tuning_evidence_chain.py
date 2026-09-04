@@ -63,6 +63,39 @@ def test_tuning_chain_reuses_existing_capture_before_report(tmp_path: Path, monk
     assert len(list(artifact_dir.glob("paper_strategy_tuning_capture_paper-20260624_*.json"))) == 1
 
 
+def test_tuning_chain_accepts_capture_decision_from_relative_artifact_dir(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from cli import (
+        paper_decision_log,
+        paper_strategy_tuning_evidence_chain,
+        paper_strategy_tuning_report,
+    )
+
+    monkeypatch.chdir(tmp_path)
+    artifact_dir = Path("audit")
+    _seed_closed_sessions(artifact_dir)
+    _seed_strategy_capture(artifact_dir)
+    monkeypatch.setattr(paper_decision_log, "_timestamp", lambda: "20260624T235901Z")
+    monkeypatch.setattr(paper_strategy_tuning_report, "_timestamp", lambda: "20260624T235902Z")
+    monkeypatch.setattr(
+        paper_strategy_tuning_evidence_chain,
+        "_timestamp",
+        lambda: "20260624T235903Z",
+    )
+
+    chain = paper_strategy_tuning_evidence_chain.build_tuning_evidence_chain(
+        artifact_dir=artifact_dir,
+        session_date="2026-06-24",
+        generated_at="2026-06-24T23:59:00+00:00",
+        start_date="2026-06-22",
+        min_sessions=3,
+    )
+
+    assert chain["status"] == "ready"
+    assert "PAPER_STRATEGY_TUNING_EVIDENCE_CHAIN_READY" in chain["markdown"]
+
+
 def test_tuning_chain_mines_strategy_audit_when_capture_is_missing(
     tmp_path: Path, monkeypatch
 ) -> None:

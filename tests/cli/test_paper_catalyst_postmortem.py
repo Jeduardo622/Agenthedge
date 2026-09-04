@@ -77,6 +77,28 @@ def test_catalyst_postmortem_explains_june_24_investor_day_miss(
     assert "strategy_thresholds_changed: False" in markdown
 
 
+def test_catalyst_postmortem_accepts_runtime_reference_from_relative_artifact_dir(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from cli import paper_catalyst_postmortem
+
+    monkeypatch.chdir(tmp_path)
+    artifact_dir = Path("audit")
+    _seed_june_24_artifacts(artifact_dir)
+    monkeypatch.setattr(paper_catalyst_postmortem, "_timestamp", lambda: "20260624T190000Z")
+
+    postmortem = paper_catalyst_postmortem.build_catalyst_postmortem(
+        artifact_dir=artifact_dir,
+        session_date="2026-06-24",
+        symbol="SPY",
+        catalyst_id="Investor day",
+        now=datetime(2026, 6, 24, 19, 0, tzinfo=timezone.utc),
+    )
+
+    assert postmortem["status"] == "miss_reviewed"
+    assert "PAPER_CATALYST_POSTMORTEM_READY" in postmortem["markdown"]
+
+
 def test_catalyst_postmortem_cli_prints_handoff(tmp_path: Path, monkeypatch) -> None:
     from cli import paper_catalyst_postmortem
 

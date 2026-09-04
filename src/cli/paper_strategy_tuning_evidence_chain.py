@@ -376,7 +376,23 @@ def _resolve_artifact_path(value: Any, artifact_root: Path) -> Path | None:
     if not isinstance(value, str) or not value.strip():
         return None
     path = Path(value)
-    return path if path.is_absolute() else artifact_root / path
+    candidates = (path,) if path.is_absolute() else (path, artifact_root / path)
+    return next(
+        (
+            candidate
+            for candidate in candidates
+            if _is_within_artifact_root(candidate, artifact_root) and candidate.is_file()
+        ),
+        None,
+    )
+
+
+def _is_within_artifact_root(path: Path, artifact_root: Path) -> bool:
+    try:
+        path.resolve().relative_to(artifact_root.resolve())
+    except ValueError:
+        return False
+    return True
 
 
 def _paths_match(value: Any, expected: Path, artifact_root: Path) -> bool:

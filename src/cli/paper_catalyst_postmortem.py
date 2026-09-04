@@ -613,10 +613,20 @@ def _print_handoff(postmortem: Mapping[str, Any]) -> None:
 def _existing_paths(paths: Iterable[Path], artifact_root: Path) -> list[Path]:
     existing: list[Path] = []
     for path in paths:
-        candidate = path if path.is_absolute() else artifact_root / path
-        if candidate.exists():
-            existing.append(candidate)
+        candidates = (path,) if path.is_absolute() else (path, artifact_root / path)
+        for candidate in candidates:
+            if _is_within_artifact_root(candidate, artifact_root) and candidate.exists():
+                existing.append(candidate)
+                break
     return existing
+
+
+def _is_within_artifact_root(path: Path, artifact_root: Path) -> bool:
+    try:
+        path.resolve().relative_to(artifact_root.resolve())
+    except ValueError:
+        return False
+    return True
 
 
 def _compact_event(record: Mapping[str, Any], payload: Mapping[str, Any]) -> dict[str, Any]:
