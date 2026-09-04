@@ -47,7 +47,11 @@ def build_tuning_gate_decision(
         else None
     )
     catalyst_postmortem = (
-        _load_catalyst_postmortem(Path(catalyst_postmortem_path))
+        _load_catalyst_postmortem(
+            Path(catalyst_postmortem_path),
+            source_path,
+            report,
+        )
         if catalyst_postmortem_path
         else None
     )
@@ -575,7 +579,11 @@ def _load_data_gap_review(path: Path, source_report_path: Path) -> dict[str, Any
     return payload
 
 
-def _load_catalyst_postmortem(path: Path) -> dict[str, Any]:
+def _load_catalyst_postmortem(
+    path: Path,
+    source_report_path: Path,
+    report: Mapping[str, Any],
+) -> dict[str, Any]:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
@@ -593,8 +601,75 @@ def _load_catalyst_postmortem(path: Path) -> dict[str, Any]:
     ):
         if payload.get(key) is not expected:
             raise typer.BadParameter(f"catalyst postmortem has unsafe {key}")
+    source_artifacts = _mapping(payload.get("source_artifacts"))
+    if not _paths_resolve_same(source_artifacts.get("strategy_tuning_report"), source_report_path):
+        raise typer.BadParameter(
+            "catalyst postmortem must reference the same tuning report as the gate"
+        )
+    target_daily = _postmortem_target_daily(payload, report)
+    if target_daily is None:
+        raise typer.BadParameter(
+            "catalyst postmortem target session is not represented by the tuning report"
+        )
+    _validate_postmortem_identity(payload, target_daily)
     payload["_artifact_path"] = str(path)
     return payload
+
+
+def _paths_resolve_same(value: Any, expected: Path) -> bool:
+    if not isinstance(value, str) or not value.strip():
+        return False
+    return Path(value).resolve() == expected.resolve()
+
+
+def _postmortem_target_daily(
+    postmortem: Mapping[str, Any], report: Mapping[str, Any]
+) -> Mapping[str, Any] | None:
+    session_id = postmortem.get("session_id")
+    session_date = postmortem.get("session_date")
+    if not isinstance(session_id, str) or not isinstance(session_date, str):
+        return None
+    for daily in _daily_reports(report):
+        if daily.get("session_id") == session_id and daily.get("session_date") == session_date:
+            return daily
+    return None
+
+
+def _validate_postmortem_identity(postmortem: Mapping[str, Any], daily: Mapping[str, Any]) -> None:
+    symbols = _daily_symbols(daily)
+    if symbols and postmortem.get("symbol") not in symbols:
+        raise typer.BadParameter("catalyst postmortem symbol does not match the target session")
+    catalyst = _mapping(_mapping(daily.get("strategy_inputs")).get("catalyst_attribution"))
+    catalyst_ids = _catalyst_attribution_ids(catalyst)
+    if catalyst_ids and postmortem.get("catalyst_id") not in catalyst_ids:
+        raise typer.BadParameter(
+            "catalyst postmortem catalyst_id does not match the target session"
+        )
+
+
+def _daily_symbols(daily: Mapping[str, Any]) -> set[str]:
+    symbols: set[str] = set()
+    direct_symbol = daily.get("symbol")
+    if isinstance(direct_symbol, str) and direct_symbol.strip():
+        symbols.add(direct_symbol.strip())
+    strategy_inputs = _mapping(daily.get("strategy_inputs"))
+    input_symbol = strategy_inputs.get("symbol")
+    if isinstance(input_symbol, str) and input_symbol.strip():
+        symbols.add(input_symbol.strip())
+    catalyst_symbol = _mapping(strategy_inputs.get("catalyst_attribution")).get("symbol")
+    if isinstance(catalyst_symbol, str) and catalyst_symbol.strip():
+        symbols.add(catalyst_symbol.strip())
+    snapshot = strategy_inputs.get("signal_snapshot")
+    candidates = (
+        [snapshot]
+        if isinstance(snapshot, Mapping)
+        else snapshot if isinstance(snapshot, list) else []
+    )
+    for item in candidates:
+        symbol = _mapping(item).get("symbol")
+        if isinstance(symbol, str) and symbol.strip():
+            symbols.add(symbol.strip())
+    return symbols
 
 
 def _mapping(value: Any = None) -> Mapping[str, Any]:

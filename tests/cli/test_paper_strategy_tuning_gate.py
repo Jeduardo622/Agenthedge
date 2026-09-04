@@ -4,6 +4,8 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
+import typer
 from typer.testing import CliRunner
 
 
@@ -188,7 +190,7 @@ def test_strategy_tuning_gate_uses_catalyst_postmortem_for_hold_context(
     report_path = artifact_dir / "paper_strategy_tuning_report_20260624T185531Z.json"
     postmortem_path = artifact_dir / "paper_catalyst_postmortem_paper-20260624_190000Z.json"
     _write_json(report_path, _june_22_24_report(report_path))
-    _write_json(postmortem_path, _june_24_catalyst_postmortem())
+    _write_json(postmortem_path, _june_24_catalyst_postmortem(report_path))
     monkeypatch.setattr(paper_strategy_tuning_gate, "_timestamp", lambda: "20260624T190000Z")
 
     decision = paper_strategy_tuning_gate.build_tuning_gate_decision(
@@ -218,6 +220,83 @@ def test_strategy_tuning_gate_uses_catalyst_postmortem_for_hold_context(
     assert decision["live_trading_enabled"] is False
     assert decision["broker_mutation"] is False
     assert decision["strategy_behavior_changed"] is False
+
+
+def test_strategy_tuning_gate_rejects_postmortem_for_different_tuning_report(
+    tmp_path: Path,
+) -> None:
+    from cli import paper_strategy_tuning_gate
+
+    artifact_dir = tmp_path / "audit"
+    report_path = artifact_dir / "paper_strategy_tuning_report_20260624T185531Z.json"
+    postmortem_path = artifact_dir / "paper_catalyst_postmortem_paper-20260624_190000Z.json"
+    _write_json(report_path, _june_22_24_report(report_path))
+    postmortem = _june_24_catalyst_postmortem(report_path)
+    postmortem["source_artifacts"]["strategy_tuning_report"] = str(
+        artifact_dir / "unrelated-report.json"
+    )
+    _write_json(postmortem_path, postmortem)
+
+    with pytest.raises(typer.BadParameter, match="same tuning report"):
+        paper_strategy_tuning_gate.build_tuning_gate_decision(
+            report_path=report_path,
+            artifact_dir=artifact_dir,
+            catalyst_postmortem_path=postmortem_path,
+        )
+
+
+def test_strategy_tuning_gate_rejects_postmortem_for_session_not_in_report(
+    tmp_path: Path,
+) -> None:
+    from cli import paper_strategy_tuning_gate
+
+    artifact_dir = tmp_path / "audit"
+    report_path = artifact_dir / "paper_strategy_tuning_report_20260624T185531Z.json"
+    postmortem_path = artifact_dir / "paper_catalyst_postmortem_paper-20990101_190000Z.json"
+    _write_json(report_path, _june_22_24_report(report_path))
+    postmortem = _june_24_catalyst_postmortem(report_path)
+    postmortem.update({"session_id": "paper-20990101", "session_date": "2099-01-01"})
+    _write_json(postmortem_path, postmortem)
+
+    with pytest.raises(typer.BadParameter, match="target session"):
+        paper_strategy_tuning_gate.build_tuning_gate_decision(
+            report_path=report_path,
+            artifact_dir=artifact_dir,
+            catalyst_postmortem_path=postmortem_path,
+        )
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("symbol", "QQQ", "symbol"),
+        ("catalyst_id", "Fed decision", "catalyst"),
+    ],
+)
+def test_strategy_tuning_gate_rejects_postmortem_identity_mismatch(
+    tmp_path: Path,
+    field: str,
+    value: str,
+    message: str,
+) -> None:
+    from cli import paper_strategy_tuning_gate
+
+    artifact_dir = tmp_path / "audit"
+    report_path = artifact_dir / "paper_strategy_tuning_report_20260624T185531Z.json"
+    postmortem_path = artifact_dir / "paper_catalyst_postmortem_paper-20260624_190000Z.json"
+    report = _june_22_24_report(report_path)
+    report["daily_reports"][-1]["symbol"] = "SPY"
+    _write_json(report_path, report)
+    postmortem = _june_24_catalyst_postmortem(report_path)
+    postmortem[field] = value
+    _write_json(postmortem_path, postmortem)
+
+    with pytest.raises(typer.BadParameter, match=message):
+        paper_strategy_tuning_gate.build_tuning_gate_decision(
+            report_path=report_path,
+            artifact_dir=artifact_dir,
+            catalyst_postmortem_path=postmortem_path,
+        )
 
 
 def test_strategy_tuning_gate_keeps_data_gap_hold_for_unresolved_review(
@@ -375,7 +454,7 @@ def test_strategy_tuning_gate_cli_prints_decision_paths(tmp_path: Path, monkeypa
             "--data-gap-review",
             str(review_path),
             "--catalyst-postmortem",
-            str(_write_catalyst_postmortem(artifact_dir)),
+            str(_write_catalyst_postmortem(artifact_dir, report_path)),
         ],
     )
 
@@ -436,7 +515,7 @@ def _june_22_24_report(report_path: Path) -> dict:
     }
 
 
-def _june_24_catalyst_postmortem() -> dict:
+def _june_24_catalyst_postmortem(report_path: Path) -> dict:
     return {
         "artifact_type": "paper_catalyst_postmortem",
         "status": "miss_reviewed",
@@ -450,8 +529,11 @@ def _june_24_catalyst_postmortem() -> dict:
         "strategy_behavior_changed": False,
         "strategy_thresholds_changed": False,
         "live_settings_changed": False,
+        "session_id": "paper-20260624",
+        "session_date": "2026-06-24",
         "symbol": "SPY",
         "catalyst_id": "Investor day",
+        "source_artifacts": {"strategy_tuning_report": str(report_path)},
         "movement_review": {
             "expected_return": 0.04,
             "actual_movement": -0.0011055002047223408,
@@ -461,9 +543,9 @@ def _june_24_catalyst_postmortem() -> dict:
     }
 
 
-def _write_catalyst_postmortem(artifact_dir: Path) -> Path:
+def _write_catalyst_postmortem(artifact_dir: Path, report_path: Path) -> Path:
     path = artifact_dir / "paper_catalyst_postmortem_paper-20260624_190000Z.json"
-    _write_json(path, _june_24_catalyst_postmortem())
+    _write_json(path, _june_24_catalyst_postmortem(report_path))
     return path
 
 
