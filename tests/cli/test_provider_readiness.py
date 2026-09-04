@@ -5,6 +5,7 @@ import json
 import subprocess
 import sys
 
+from click import unstyle
 from typer.testing import CliRunner
 
 
@@ -68,10 +69,12 @@ def test_provider_readiness_command_exits_nonzero_when_required_provider_missing
 def test_provider_readiness_command_requires_explicit_provider_set() -> None:
     provider_readiness_cli = _cli_module()
 
-    result = CliRunner().invoke(provider_readiness_cli.app, ["--raw"])
+    result = CliRunner().invoke(provider_readiness_cli.app, ["--raw"], color=True)
 
     assert result.exit_code != 0
-    assert "required-provider" in result.output.lower()
+    plain_output = unstyle(result.output).lower()
+    assert "at least one required provider must" in plain_output
+    assert "be specified" in plain_output
 
 
 def test_provider_readiness_import_has_no_runtime_or_dotenv_side_effects() -> None:
