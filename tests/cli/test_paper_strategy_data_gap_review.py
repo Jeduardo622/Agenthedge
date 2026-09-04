@@ -445,6 +445,154 @@ def test_strategy_data_gap_review_requires_explicit_safe_evidence_contract(
     )
 
 
+@pytest.mark.parametrize(
+    ("evidence_overrides", "expected_error"),
+    [
+        pytest.param(
+            {"fields": {"ProfitMargin": 0.21}},
+            "missing_evidence_fields:PERatio",
+            id="malformed",
+        ),
+        pytest.param(
+            {
+                "read_only": False,
+                "paper_only": False,
+                "live_trading_enabled": True,
+                "broker_mutation": True,
+                "strategy_behavior_changed": True,
+            },
+            "unsafe_evidence_read_only",
+            id="unsafe",
+        ),
+    ],
+)
+@pytest.mark.parametrize("acceptance_scope", ["per_entry", "global"])
+def test_strategy_data_gap_review_does_not_accept_invalid_evidence(
+    tmp_path: Path,
+    monkeypatch,
+    evidence_overrides: dict[str, object],
+    expected_error: str,
+    acceptance_scope: str,
+) -> None:
+    """Acceptance cannot override malformed or unsafe evidence supplied for its blocker."""
+    from cli import paper_strategy_data_gap_review
+
+    artifact_dir = tmp_path / "audit"
+    report_path = artifact_dir / "paper_strategy_tuning_report_20260624T185531Z.json"
+    gate_path = artifact_dir / "paper_strategy_tuning_gate_decision_20260624T190000Z.json"
+    evidence_path = artifact_dir / "qqq_fundamentals_review_20260624.json"
+    _write_json(report_path, _june_22_24_report(report_path))
+    _write_json(gate_path, _gate_decision(gate_path, report_path))
+    _write_json(
+        evidence_path,
+        {
+            "artifact_type": "paper_strategy_data_gap_evidence",
+            "status": "evidence_ready",
+            "symbol": "QQQ",
+            "reason": "missing_fundamentals",
+            "session_id": "paper-20260624",
+            "read_only": True,
+            "paper_only": True,
+            "live_trading_enabled": False,
+            "broker_mutation": False,
+            "strategy_behavior_changed": False,
+            "fields": {"ProfitMargin": 0.21, "PERatio": 31.2},
+            **evidence_overrides,
+        },
+    )
+    monkeypatch.setattr(paper_strategy_data_gap_review, "_timestamp", lambda: "20260624T191500Z")
+    review_entry = {
+        "reason": "missing_fundamentals",
+        "symbol": "QQQ",
+        "evidence_artifact": str(evidence_path),
+    }
+    acceptance_reason = "Paper-only acceptance must not clear invalid evidence."
+    if acceptance_scope == "per_entry":
+        review_entry["acceptance_reason"] = acceptance_reason
+
+    review = paper_strategy_data_gap_review.build_data_gap_review(
+        gate_decision_path=gate_path,
+        artifact_dir=artifact_dir,
+        acceptance_reason=acceptance_reason if acceptance_scope == "global" else None,
+        review_entries=[review_entry],
+        now=datetime(2026, 6, 24, 19, 15, tzinfo=timezone.utc),
+    )
+
+    blockers = {blocker["reason"]: blocker for blocker in review["blockers"]}
+    fundamentals = blockers["missing_fundamentals"]
+    assert fundamentals["clearance_status"] == "needs_evidence"
+    assert expected_error in fundamentals["review_evidence"]["validation_errors"]
+    assert review["summary"]["clearance_ready_count"] == 0
+    assert review["summary"]["accepted_paper_limitation_count"] == (
+        2 if acceptance_scope == "global" else 0
+    )
+
+
+def test_strategy_data_gap_review_invalid_entry_acceptance_does_not_reduce_tuning_gate_blockers(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """An invalid supplied artifact remains an effective data-gap blocker downstream."""
+    from cli import paper_strategy_data_gap_review, paper_strategy_tuning_gate
+
+    artifact_dir = tmp_path / "audit"
+    report_path = artifact_dir / "paper_strategy_tuning_report_20260624T185531Z.json"
+    gate_path = artifact_dir / "paper_strategy_tuning_gate_decision_20260624T190000Z.json"
+    evidence_path = artifact_dir / "qqq_fundamentals_review_20260624.json"
+    _write_json(report_path, _june_22_24_report(report_path))
+    _write_json(gate_path, _gate_decision(gate_path, report_path))
+    _write_json(
+        evidence_path,
+        {
+            "artifact_type": "paper_strategy_data_gap_evidence",
+            "status": "evidence_ready",
+            "symbol": "QQQ",
+            "reason": "missing_fundamentals",
+            "session_id": "paper-20260624",
+            "read_only": False,
+            "paper_only": False,
+            "live_trading_enabled": True,
+            "broker_mutation": True,
+            "strategy_behavior_changed": True,
+            "fields": {"ProfitMargin": 0.21, "PERatio": 31.2},
+        },
+    )
+    monkeypatch.setattr(paper_strategy_data_gap_review, "_timestamp", lambda: "20260624T191500Z")
+    monkeypatch.setattr(paper_strategy_tuning_gate, "_timestamp", lambda: "20260624T192000Z")
+
+    review = paper_strategy_data_gap_review.build_data_gap_review(
+        gate_decision_path=gate_path,
+        artifact_dir=artifact_dir,
+        review_entries=[
+            {
+                "reason": "missing_fundamentals",
+                "symbol": "QQQ",
+                "evidence_artifact": str(evidence_path),
+                "acceptance_reason": "Invalid evidence must not clear this paper-only blocker.",
+            },
+        ],
+        now=datetime(2026, 6, 24, 19, 15, tzinfo=timezone.utc),
+    )
+    decision = paper_strategy_tuning_gate.build_tuning_gate_decision(
+        report_path=report_path,
+        artifact_dir=artifact_dir,
+        data_gap_review_path=review["review_artifact"],
+        now=datetime(2026, 6, 24, 19, 20, tzinfo=timezone.utc),
+    )
+
+    assert review["summary"] == {
+        "blocker_count": 3,
+        "clearance_ready_count": 0,
+        "accepted_paper_limitation_count": 0,
+        "needs_evidence_count": 3,
+    }
+    assert decision["threshold_evaluations"]["max_data_gap_blockers"] == {
+        "observed": 3,
+        "threshold": 0,
+        "operator": "<=",
+        "passed": False,
+    }
+
+
 def test_strategy_data_gap_review_matches_review_entries_by_session_id(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -902,6 +1050,65 @@ def test_strategy_data_gap_review_cli_clears_blockers_with_evidence_and_acceptan
     assert review["live_trading_enabled"] is False
     assert review["broker_mutation"] is False
     assert review["strategy_behavior_changed"] is False
+
+
+def test_strategy_data_gap_review_cli_does_not_accept_duplicate_unsafe_evidence(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The transplanted CLI options fail closed when their entries collide on unsafe evidence."""
+    from cli import paper_strategy_data_gap_review
+
+    artifact_dir = tmp_path / "audit"
+    report_path = artifact_dir / "paper_strategy_tuning_report_20260624T185531Z.json"
+    gate_path = artifact_dir / "paper_strategy_tuning_gate_decision_20260624T190000Z.json"
+    evidence_path = artifact_dir / "qqq_fundamentals_review_20260624.json"
+    _write_json(report_path, _june_22_24_report(report_path))
+    _write_json(gate_path, _gate_decision(gate_path, report_path))
+    _write_json(
+        evidence_path,
+        {
+            "artifact_type": "paper_strategy_data_gap_evidence",
+            "status": "evidence_ready",
+            "reason": "missing_fundamentals",
+            "symbol": "QQQ",
+            "session_id": "paper-20260624",
+            "read_only": False,
+            "paper_only": False,
+            "live_trading_enabled": True,
+            "broker_mutation": True,
+            "strategy_behavior_changed": True,
+            "fields": {"ProfitMargin": 0.21, "PERatio": 31.2},
+        },
+    )
+    monkeypatch.setattr(paper_strategy_data_gap_review, "_timestamp", lambda: "20260624T191500Z")
+
+    result = CliRunner().invoke(
+        paper_strategy_data_gap_review.app,
+        [
+            "--gate-decision",
+            str(gate_path),
+            "--artifact-dir",
+            str(artifact_dir),
+            "--evidence-artifact",
+            str(evidence_path),
+            "--accept-blocker",
+            (
+                "missing_fundamentals:QQQ:paper-20260624="
+                "Duplicate acceptance cannot clear unsafe evidence."
+            ),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    review_path = artifact_dir / "paper_strategy_data_gap_review_20260624T191500Z.json"
+    review = json.loads(review_path.read_text(encoding="utf-8"))
+    assert review["status"] == "needs_data_gap_evidence"
+    assert review["summary"] == {
+        "blocker_count": 3,
+        "clearance_ready_count": 0,
+        "accepted_paper_limitation_count": 0,
+        "needs_evidence_count": 3,
+    }
 
 
 def _gate_decision(gate_path: Path, report_path: Path) -> dict:

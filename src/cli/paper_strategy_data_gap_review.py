@@ -129,7 +129,14 @@ def _blocker_register_entry(
     review_evidence = _review_evidence(review_map, reason, symbol, artifact_root, session_id)
     specific_acceptance = review_map.get("acceptance_reason")
     duplicate_entry = "duplicate_review_entries" in review_evidence.get("validation_errors", [])
-    accepted = bool(specific_acceptance or acceptance_reason) and not duplicate_entry
+    invalid_supplied_evidence = bool(review_evidence.get("evidence_artifact")) and bool(
+        review_evidence.get("validation_errors")
+    )
+    accepted = (
+        bool(specific_acceptance or acceptance_reason)
+        and not duplicate_entry
+        and not invalid_supplied_evidence
+    )
     evidence_ready = bool(review_evidence.get("evidence_artifact")) and not review_evidence.get(
         "validation_errors"
     )
