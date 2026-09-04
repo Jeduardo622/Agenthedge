@@ -332,6 +332,26 @@ def test_catalyst_postmortem_rejects_wrong_session_runtime_evidence(
         )
 
 
+def test_catalyst_postmortem_rejects_missing_nested_relative_runtime_reference(
+    tmp_path: Path,
+) -> None:
+    from cli import paper_catalyst_postmortem
+
+    artifact_dir = tmp_path / "audit"
+    paths = _seed_june_24_artifacts(artifact_dir)
+    decision = _read_json(paths["decision"])
+    decision["artifact_refs"] = [str(Path("nested") / paths["runtime"].name)]
+    _write_json(paths["decision"], decision)
+
+    with pytest.raises(typer.BadParameter, match="missing runtime audit evidence"):
+        paper_catalyst_postmortem.build_catalyst_postmortem(
+            artifact_dir=artifact_dir,
+            session_date="2026-06-24",
+            symbol="SPY",
+            catalyst_id="Investor day",
+        )
+
+
 @pytest.mark.parametrize("failure", ["insufficient_report", "blocked_report"])
 def test_catalyst_postmortem_cli_never_prints_ready_for_nonready_report(
     tmp_path: Path, failure: str

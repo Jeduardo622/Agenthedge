@@ -613,13 +613,9 @@ def _print_handoff(postmortem: Mapping[str, Any]) -> None:
 def _existing_paths(paths: Iterable[Path], artifact_root: Path) -> list[Path]:
     existing: list[Path] = []
     for path in paths:
-        candidates = [path]
-        if not path.is_absolute():
-            candidates.append(artifact_root / path.name)
-        for candidate in candidates:
-            if candidate.exists():
-                existing.append(candidate)
-                break
+        candidate = path if path.is_absolute() else artifact_root / path
+        if candidate.exists():
+            existing.append(candidate)
     return existing
 
 

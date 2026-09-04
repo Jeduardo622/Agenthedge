@@ -275,6 +275,87 @@ def test_tuning_chain_is_not_ready_for_malformed_strategy_evidence(
     assert "PAPER_STRATEGY_TUNING_EVIDENCE_CHAIN_READY" not in chain["markdown"]
 
 
+@pytest.mark.parametrize(
+    "invalid_signal",
+    [{}, {"strategy": "catalyst", "symbol": ""}],
+)
+def test_tuning_chain_is_not_ready_when_valid_signal_has_malformed_sibling(
+    tmp_path: Path, invalid_signal: dict[str, Any]
+) -> None:
+    from cli import paper_strategy_tuning_evidence_chain
+
+    artifact_dir = tmp_path / "audit"
+    _seed_closed_sessions(artifact_dir)
+    capture_path = _seed_strategy_capture(artifact_dir)
+    capture = _read_json(capture_path)
+    capture["strategy_signal_snapshot"].append(invalid_signal)
+    _write_json(capture_path, capture)
+
+    chain = paper_strategy_tuning_evidence_chain.build_tuning_evidence_chain(
+        artifact_dir=artifact_dir,
+        session_date="2026-06-24",
+        generated_at="2026-06-24T23:59:00+00:00",
+        start_date="2026-06-22",
+        min_sessions=3,
+    )
+
+    assert chain["status"] == "attention_required"
+    assert "target_strategy_signal_snapshot" in chain["evidence_gaps"]
+    assert "PAPER_STRATEGY_TUNING_EVIDENCE_CHAIN_READY" not in chain["markdown"]
+
+
+@pytest.mark.parametrize("missing_exposure", ["gross_exposure", "net_exposure"])
+def test_tuning_chain_preserves_valid_single_sided_exposure(
+    tmp_path: Path, missing_exposure: str
+) -> None:
+    from cli import paper_strategy_tuning_evidence_chain
+
+    artifact_dir = tmp_path / "audit"
+    _seed_closed_sessions(artifact_dir)
+    capture_path = _seed_strategy_capture(artifact_dir)
+    capture = _read_json(capture_path)
+    capture["performance_metrics"][missing_exposure] = None
+    _write_json(capture_path, capture)
+
+    chain = paper_strategy_tuning_evidence_chain.build_tuning_evidence_chain(
+        artifact_dir=artifact_dir,
+        session_date="2026-06-24",
+        generated_at="2026-06-24T23:59:00+00:00",
+        start_date="2026-06-22",
+        min_sessions=3,
+    )
+
+    assert chain["status"] == "ready"
+    assert "target_performance_metrics" not in chain["evidence_gaps"]
+    assert "PAPER_STRATEGY_TUNING_EVIDENCE_CHAIN_READY" in chain["markdown"]
+
+
+@pytest.mark.parametrize("nonfinite_exposure", ["gross_exposure", "net_exposure"])
+def test_tuning_chain_rejects_nonfinite_supplied_exposure(
+    tmp_path: Path, nonfinite_exposure: str
+) -> None:
+    from cli import paper_strategy_tuning_evidence_chain
+
+    artifact_dir = tmp_path / "audit"
+    _seed_closed_sessions(artifact_dir)
+    capture_path = _seed_strategy_capture(artifact_dir)
+    capture = _read_json(capture_path)
+    capture["performance_metrics"][nonfinite_exposure] = float("nan")
+    _write_json(capture_path, capture)
+
+    chain = paper_strategy_tuning_evidence_chain.build_tuning_evidence_chain(
+        artifact_dir=artifact_dir,
+        session_date="2026-06-24",
+        generated_at="2026-06-24T23:59:00+00:00",
+        start_date="2026-06-22",
+        min_sessions=3,
+    )
+
+    assert chain["status"] == "attention_required"
+    assert "target_performance_metrics" in chain["evidence_gaps"]
+    assert "PAPER_STRATEGY_TUNING_EVIDENCE_CHAIN_READY" not in chain["markdown"]
+
+
 @pytest.mark.parametrize("failure", ["target_blocker", "no_target_accepted_order"])
 def test_tuning_chain_is_not_ready_for_target_session_blockers_or_no_accepted_order(
     tmp_path: Path, failure: str
@@ -343,6 +424,29 @@ def test_tuning_chain_rejects_invalid_capture_source_decision_lineage(
         _write_json(capture_path, capture)
 
     with pytest.raises(typer.BadParameter, match="decision"):
+        paper_strategy_tuning_evidence_chain.build_tuning_evidence_chain(
+            artifact_dir=artifact_dir,
+            session_date="2026-06-24",
+            generated_at="2026-06-24T23:59:00+00:00",
+            start_date="2026-06-22",
+            min_sessions=3,
+        )
+
+
+def test_tuning_chain_rejects_missing_nested_relative_capture_decision_reference(
+    tmp_path: Path,
+) -> None:
+    from cli import paper_strategy_tuning_evidence_chain
+
+    artifact_dir = tmp_path / "audit"
+    _seed_closed_sessions(artifact_dir)
+    capture_path = _seed_strategy_capture(artifact_dir)
+    capture = _read_json(capture_path)
+    decision_name = Path(capture["decision_artifact"]).name
+    capture["decision_artifact"] = str(Path("nested") / decision_name)
+    _write_json(capture_path, capture)
+
+    with pytest.raises(typer.BadParameter, match="decision artifact is missing"):
         paper_strategy_tuning_evidence_chain.build_tuning_evidence_chain(
             artifact_dir=artifact_dir,
             session_date="2026-06-24",

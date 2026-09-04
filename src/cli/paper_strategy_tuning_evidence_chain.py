@@ -328,7 +328,7 @@ def _valid_strategy_signals(value: Any) -> bool:
         return False
     if not all(isinstance(signal, Mapping) for signal in value):
         return False
-    return any(
+    return all(
         isinstance(signal.get("strategy"), str)
         and bool(signal["strategy"].strip())
         and isinstance(signal.get("symbol"), str)
@@ -338,15 +338,23 @@ def _valid_strategy_signals(value: Any) -> bool:
 
 
 def _valid_performance_metrics(metrics: Mapping[str, Any]) -> bool:
-    if not all(
-        _finite_number(metrics.get(field))
-        for field in ("drawdown", "gross_exposure", "net_exposure", "hit_rate")
-    ):
+    if not all(_finite_number(metrics.get(field)) for field in ("drawdown", "hit_rate")):
+        return False
+    exposures = [
+        metrics.get(field)
+        for field in ("gross_exposure", "net_exposure")
+        if metrics.get(field) is not None
+    ]
+    if not exposures or not all(_finite_number(value) for value in exposures):
         return False
     drawdown = float(metrics["drawdown"])
-    gross_exposure = float(metrics["gross_exposure"])
     hit_rate = float(metrics["hit_rate"])
-    return drawdown >= 0.0 and gross_exposure >= 0.0 and 0.0 <= hit_rate <= 1.0
+    gross_exposure = metrics.get("gross_exposure")
+    return (
+        drawdown >= 0.0
+        and (gross_exposure is None or float(gross_exposure) >= 0.0)
+        and 0.0 <= hit_rate <= 1.0
+    )
 
 
 def _valid_catalyst_attribution(value: Any) -> bool:
@@ -368,10 +376,7 @@ def _resolve_artifact_path(value: Any, artifact_root: Path) -> Path | None:
     if not isinstance(value, str) or not value.strip():
         return None
     path = Path(value)
-    candidates = [path]
-    if not path.is_absolute():
-        candidates.extend((artifact_root / path, artifact_root / path.name))
-    return next((candidate for candidate in candidates if candidate.is_file()), path)
+    return path if path.is_absolute() else artifact_root / path
 
 
 def _paths_match(value: Any, expected: Path, artifact_root: Path) -> bool:
