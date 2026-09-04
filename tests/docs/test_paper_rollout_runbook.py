@@ -39,6 +39,8 @@ def test_paper_rollout_runbook_documents_health_history_closeout_checklist() -> 
         "paper_session_lifecycle_paper-YYYYMMDD_<timestamp>.json",
         "readiness, run start, run result, reconciliation, and closeout",
         "poetry run python -m cli.paper_catalyst_session_closeout",
+        "--order-status-json",
+        "--open-orders-json",
         "paper_catalyst_session_closeout_paper-YYYYMMDD_<timestamp>.json",
         "--provider-degradation accepted",
         "same_session_close",

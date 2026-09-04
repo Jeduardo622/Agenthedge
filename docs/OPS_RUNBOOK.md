@@ -341,12 +341,16 @@ poetry run python -m cli.paper_catalyst_session_closeout \
   --health-artifact storage/audit/paper_broker_health_<timestamp>.json \
   --health-history storage/audit/paper_broker_health_history_<timestamp>.json \
   --audit-chain-report storage/audit/reports/audit_chain_report_ok_<timestamp>.json \
+  --order-status-json '{"broker_order_id":"<broker-order-id>","client_order_id":"<client-order-id>","status":"filled","filled_quantity":41.0,"average_fill_price":737.87,"symbol":"SPY"}' \
+  --open-orders-json '[]' \
   --observed-price 741.0 \
   --observed-at 2026-06-29T20:00:00Z \
   --movement-horizon same_session_close \
   --provider-degradation accepted \
   --provider-degradation-reason "accepted as non-blocking for this paper-only sample"
 ```
+
+Replace the order identifiers, quantity, average fill price, and symbol with values that exactly match the filled order in the linked runtime audit. The empty `--open-orders-json` array is explicit read-only evidence that no matching paper order remains open; do not use it unless the broker status snapshot actually confirms that state.
 
 The command writes:
 - `storage/audit/paper_catalyst_session_closeout_paper-YYYYMMDD_<timestamp>.json`
