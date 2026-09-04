@@ -33,6 +33,8 @@ STRATEGY_EVIDENCE_FIELDS = {
     "catalyst_attribution": ("catalyst_attribution", "catalyst"),
 }
 
+_PAPER_ORDER_STATUS_PRESENT = "_paper_order_status_present"
+
 
 def build_strategy_tuning_report(
     *,
@@ -65,6 +67,7 @@ def build_strategy_tuning_report(
     evidence_gaps = _evidence_gaps(daily_reports)
     session_window = _session_window(sessions, daily_reports, min_sessions)
     status = _report_status(session_window, performance)
+    _remove_internal_daily_fields(daily_reports)
 
     timestamp = _timestamp()
     json_path = artifact_root / f"paper_strategy_tuning_report_{timestamp}.json"
@@ -97,7 +100,7 @@ def build_strategy_tuning_report(
 
 
 def _latest_session_lifecycles(artifact_root: Path) -> list[dict[str, Any]]:
-    latest: dict[str, tuple[datetime, dict[str, Any]]] = {}
+    latest: dict[str, tuple[datetime, str, dict[str, Any]]] = {}
     for path in artifact_root.glob("paper_session_lifecycle_*.json"):
         payload = _load_json(path)
         if payload.get("artifact_type") != "paper_session_lifecycle":
@@ -110,13 +113,13 @@ def _latest_session_lifecycles(artifact_root: Path) -> list[dict[str, Any]]:
             continue
         payload["_artifact_path"] = str(path)
         current = latest.get(session_id)
-        if current is None or created_at > current[0]:
-            latest[session_id] = (created_at, payload)
-    return [payload for _, payload in sorted(latest.values(), key=lambda item: item[0])]
+        if current is None or (created_at, path.name) > (current[0], current[1]):
+            latest[session_id] = (created_at, path.name, payload)
+    return [payload for _, _, payload in sorted(latest.values(), key=lambda item: item[0])]
 
 
 def _latest_decisions_by_session(artifact_root: Path) -> dict[str, dict[str, Any]]:
-    latest: dict[str, tuple[datetime, dict[str, Any]]] = {}
+    latest: dict[str, tuple[datetime, str, dict[str, Any]]] = {}
     for path in artifact_root.glob("paper_decision_log_*.json"):
         payload = _load_json(path)
         if payload.get("artifact_type") != "paper_decision_log":
@@ -129,13 +132,13 @@ def _latest_decisions_by_session(artifact_root: Path) -> dict[str, dict[str, Any
             continue
         payload["_artifact_path"] = str(path)
         current = latest.get(session_id)
-        if current is None or created_at > current[0]:
-            latest[session_id] = (created_at, payload)
-    return {session_id: payload for session_id, (_, payload) in latest.items()}
+        if current is None or (created_at, path.name) > (current[0], current[1]):
+            latest[session_id] = (created_at, path.name, payload)
+    return {session_id: payload for session_id, (_, _, payload) in latest.items()}
 
 
 def _latest_captures_by_session(artifact_root: Path) -> dict[str, dict[str, Any]]:
-    latest: dict[str, tuple[datetime, dict[str, Any]]] = {}
+    latest: dict[str, tuple[datetime, str, dict[str, Any]]] = {}
     for path in artifact_root.glob("paper_strategy_tuning_capture_*.json"):
         payload = _load_json(path)
         if payload.get("artifact_type") != "paper_strategy_tuning_capture":
@@ -148,9 +151,9 @@ def _latest_captures_by_session(artifact_root: Path) -> dict[str, dict[str, Any]
             continue
         payload["_artifact_path"] = str(path)
         current = latest.get(session_id)
-        if current is None or created_at > current[0]:
-            latest[session_id] = (created_at, payload)
-    return {session_id: payload for session_id, (_, payload) in latest.items()}
+        if current is None or (created_at, path.name) > (current[0], current[1]):
+            latest[session_id] = (created_at, path.name, payload)
+    return {session_id: payload for session_id, (_, _, payload) in latest.items()}
 
 
 def _filter_sessions(
@@ -182,6 +185,7 @@ def _daily_report(
     closeout = _mapping(stages.get("closeout"))
     packet = _load_referenced_artifact(artifact_root, run_result.get("artifact"))
     packet_summary = _mapping(packet.get("summary"))
+    paper_order_status_present = "paper_order_status" in packet_summary
     risk_blocks = _risk_compliance_blocks(session, decision, packet)
     strategy_inputs = _strategy_inputs(packet, decision, capture)
     movement = _movement(packet, decision, capture)
@@ -204,6 +208,10 @@ def _daily_report(
             "run_result_status": run_result.get("status"),
             "canary_order_status": packet_summary.get("canary_order_status")
             or run_result.get("canary_order_status"),
+            "paper_order_status": packet_summary.get("paper_order_status"),
+            _PAPER_ORDER_STATUS_PRESENT: paper_order_status_present,
+            "paper_order_filled_quantity": packet_summary.get("paper_order_filled_quantity"),
+            "paper_order_average_fill_price": packet_summary.get("paper_order_average_fill_price"),
             "post_cancel_order_status": packet_summary.get("post_cancel_order_status")
             or closeout.get("post_cancel_order_status"),
             "final_reconciliation_mismatches": _int_or_zero(
@@ -217,6 +225,10 @@ def _daily_report(
             "open_canary_orders_after_cleanup": _int_or_zero(
                 packet_summary.get("open_canary_orders_after_cleanup")
                 or closeout.get("open_canary_orders_after_cleanup")
+            ),
+            "open_matching_orders_after_fill": _int_or_zero(
+                packet_summary.get("open_matching_orders_after_fill")
+                or closeout.get("open_matching_orders_after_fill")
             ),
             "market_is_open": packet_summary.get("market_is_open"),
             "health_unresolved_failures": _int_or_zero(readiness.get("unresolved_failures")),
@@ -275,6 +287,13 @@ def _strategy_inputs(
         "catalyst_attribution": catalyst,
         "available": _has_content(signals) or _has_content(catalyst),
     }
+
+
+def _remove_internal_daily_fields(daily_reports: list[dict[str, Any]]) -> None:
+    for report in daily_reports:
+        outcome = _mapping(report.get("what_happened_after_decision"))
+        if isinstance(outcome, dict):
+            outcome.pop(_PAPER_ORDER_STATUS_PRESENT, None)
 
 
 def _movement(
@@ -338,10 +357,14 @@ def _performance_summary(daily_reports: list[dict[str, Any]]) -> dict[str, Any]:
     health_failures = 0
     for report in daily_reports:
         outcome = _mapping(report.get("what_happened_after_decision"))
-        order_status = outcome.get("canary_order_status")
-        if order_status == "accepted":
+        canary_order_status = outcome.get("canary_order_status")
+        paper_order_status = outcome.get("paper_order_status")
+        if outcome.get(_PAPER_ORDER_STATUS_PRESENT):
+            if paper_order_status == "filled":
+                accepted += 1
+        elif canary_order_status == "accepted":
             accepted += 1
-        if order_status == "rejected":
+        if canary_order_status == "rejected":
             rejected.append(
                 {
                     "session_id": report.get("session_id"),
@@ -496,6 +519,7 @@ def _render_markdown(report: Mapping[str, Any]) -> str:
             f"{daily.get('session_id')}: wanted={daily.get('what_did_agents_want_to_do')}, "
             f"blocked={len(blocks)}, "
             f"canary={outcome.get('canary_order_status')}, "
+            f"paper_order={outcome.get('paper_order_status')}, "
             f"mismatches={outcome.get('final_reconciliation_mismatches')}"
         )
     lines.append("")

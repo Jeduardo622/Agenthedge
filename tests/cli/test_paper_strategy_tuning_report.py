@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import pytest
 from typer.testing import CliRunner
 
 
@@ -92,6 +93,123 @@ def test_strategy_tuning_report_summarizes_paper_decisions_and_evidence_gaps(
     assert "paper_only: True" in markdown
     assert "live_trading_enabled: False" in markdown
     assert "expected_vs_actual_movement" in markdown
+
+
+def test_strategy_tuning_report_counts_filled_paper_order_closeout(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from cli import paper_strategy_tuning_report
+
+    artifact_dir = tmp_path / "audit"
+    _write_session(
+        artifact_dir,
+        session_id="paper-20260629",
+        created_at="2026-06-29T23:59:00+00:00",
+        decision_reason="Closed filled paper catalyst session.",
+        packet_summary={
+            "canary_order_status": "accepted",
+            "paper_order_status": "filled",
+            "paper_order_filled_quantity": 41.0,
+            "paper_order_average_fill_price": 737.87,
+            "post_cancel_order_status": "not_applicable_filled_order",
+            "final_reconciliation_mismatches": 0,
+            "market_is_open": True,
+            "open_canary_orders_before_run": 0,
+            "open_canary_orders_after_cleanup": 0,
+            "open_matching_orders_after_fill": 0,
+        },
+    )
+    monkeypatch.setattr(paper_strategy_tuning_report, "_timestamp", lambda: "20260630T150000Z")
+
+    report = paper_strategy_tuning_report.build_strategy_tuning_report(
+        artifact_dir=artifact_dir,
+        start_date="2026-06-29",
+        end_date="2026-06-29",
+        min_sessions=1,
+        now=datetime(2026, 6, 30, 15, 0, tzinfo=timezone.utc),
+    )
+
+    assert report["status"] == "ready_for_paper_tuning"
+    assert report["performance_summary"]["accepted_paper_orders"] == 1
+    outcome = report["daily_reports"][0]["what_happened_after_decision"]
+    assert outcome["paper_order_status"] == "filled"
+    assert outcome["paper_order_filled_quantity"] == 41.0
+    assert outcome["paper_order_average_fill_price"] == 737.87
+    assert outcome["open_matching_orders_after_fill"] == 0
+
+
+@pytest.mark.parametrize(
+    "actual_status",
+    ["rejected", "cancelled", "failed", "", None, [], {}],
+)
+def test_strategy_tuning_report_actual_order_status_overrides_accepted_canary(
+    tmp_path: Path, monkeypatch, actual_status: Any
+) -> None:
+    from cli import paper_strategy_tuning_report
+
+    artifact_dir = tmp_path / "audit"
+    _write_session(
+        artifact_dir,
+        session_id="paper-20260701",
+        created_at="2026-07-01T23:59:00+00:00",
+        decision_reason="Actual paper order did not fill.",
+        packet_summary={
+            "canary_order_status": "accepted",
+            "paper_order_status": actual_status,
+            "final_reconciliation_mismatches": 0,
+            "market_is_open": True,
+            "open_canary_orders_before_run": 0,
+            "open_canary_orders_after_cleanup": 0,
+        },
+    )
+    monkeypatch.setattr(paper_strategy_tuning_report, "_timestamp", lambda: "20260702T150000Z")
+
+    report = paper_strategy_tuning_report.build_strategy_tuning_report(
+        artifact_dir=artifact_dir,
+        start_date="2026-07-01",
+        end_date="2026-07-01",
+        min_sessions=1,
+        now=datetime(2026, 7, 2, 15, 0, tzinfo=timezone.utc),
+    )
+
+    assert report["performance_summary"]["accepted_paper_orders"] == 0
+    assert report["daily_reports"][0]["what_happened_after_decision"]["paper_order_status"] == (
+        actual_status
+    )
+
+
+def test_strategy_tuning_report_uses_accepted_canary_when_actual_order_status_absent(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from cli import paper_strategy_tuning_report
+
+    artifact_dir = tmp_path / "audit"
+    _write_session(
+        artifact_dir,
+        session_id="paper-20260702",
+        created_at="2026-07-02T23:59:00+00:00",
+        decision_reason="Legacy canary-only paper session.",
+        packet_summary={
+            "canary_order_status": "accepted",
+            "final_reconciliation_mismatches": 0,
+            "market_is_open": True,
+            "open_canary_orders_before_run": 0,
+            "open_canary_orders_after_cleanup": 0,
+        },
+    )
+    monkeypatch.setattr(paper_strategy_tuning_report, "_timestamp", lambda: "20260703T150000Z")
+
+    report = paper_strategy_tuning_report.build_strategy_tuning_report(
+        artifact_dir=artifact_dir,
+        start_date="2026-07-02",
+        end_date="2026-07-02",
+        min_sessions=1,
+        now=datetime(2026, 7, 3, 15, 0, tzinfo=timezone.utc),
+    )
+
+    outcome = report["daily_reports"][0]["what_happened_after_decision"]
+    assert outcome["paper_order_status"] is None
+    assert report["performance_summary"]["accepted_paper_orders"] == 1
 
 
 def test_strategy_tuning_report_cli_prints_artifact_paths(tmp_path: Path, monkeypatch) -> None:
@@ -182,6 +300,50 @@ def test_strategy_tuning_report_consumes_strategy_capture_artifacts(
             "catalyst_attribution": {"catalyst_id": "spy-earnings-preview"},
         },
     )
+    _write_json(
+        artifact_dir / "paper_strategy_tuning_capture_paper-20260625_20260625T141000Z.json",
+        {
+            "artifact_type": "paper_strategy_tuning_capture",
+            "created_at": "2026-06-25T14:00:00+00:00",
+            "session_id": "paper-20260625",
+            "read_only": True,
+            "paper_only": True,
+            "live_trading_enabled": False,
+            "strategy_signal_snapshot": [
+                {
+                    "agent": "quant",
+                    "strategy": "catalyst",
+                    "symbol": "SPY",
+                    "direction": "buy",
+                    "confidence": 0.72,
+                    "expected_return": 0.018,
+                    "usefulness": "useful",
+                }
+            ],
+            "expected_vs_actual_movement": {
+                "expected": 0.018,
+                "actual": 0.013,
+                "difference": -0.005,
+                "horizon": "same_session_close",
+                "unit": "return",
+            },
+            "rejected_trades": [
+                {
+                    "symbol": "QQQ",
+                    "strategy": "momentum",
+                    "reason": "below confidence threshold",
+                    "blocked_by": "risk",
+                }
+            ],
+            "performance_metrics": {
+                "drawdown": 0.0,
+                "gross_exposure": 100.0,
+                "net_exposure": 100.0,
+                "hit_rate": 1.0,
+            },
+            "catalyst_attribution": {"catalyst_id": "spy-earnings-preview"},
+        },
+    )
     monkeypatch.setattr(paper_strategy_tuning_report, "_timestamp", lambda: "20260625T141500Z")
 
     report = paper_strategy_tuning_report.build_strategy_tuning_report(
@@ -193,11 +355,11 @@ def test_strategy_tuning_report_consumes_strategy_capture_artifacts(
 
     daily = report["daily_reports"][0]
     assert daily["strategy_capture_artifact"].endswith(
-        "paper_strategy_tuning_capture_paper-20260625_20260625T140000Z.json"
+        "paper_strategy_tuning_capture_paper-20260625_20260625T141000Z.json"
     )
     assert daily["strategy_inputs"]["available"] is True
     assert daily["strategy_inputs"]["signal_snapshot"][0]["strategy"] == "catalyst"
-    assert daily["expected_vs_actual_movement"]["difference"] == -0.007
+    assert daily["expected_vs_actual_movement"]["difference"] == -0.005
     assert daily["rejected_trades"][0]["blocked_by"] == "risk"
     assert report["performance_summary"]["rejected_trades"] == 1
     assert report["performance_summary"]["drawdown"] == 0.0
