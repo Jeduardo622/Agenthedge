@@ -270,6 +270,15 @@ def test_gate_review_cli_prints_artifact_paths(tmp_path: Path, monkeypatch) -> N
             },
         )
     monkeypatch.setattr(paper_live_readiness_gate_review, "_timestamp", lambda: "20260620T180000Z")
+    build_gate_review = paper_live_readiness_gate_review.build_gate_review
+    monkeypatch.setattr(
+        paper_live_readiness_gate_review,
+        "build_gate_review",
+        lambda **kwargs: build_gate_review(
+            **kwargs,
+            now=datetime(2026, 6, 20, 18, 0, tzinfo=timezone.utc),
+        ),
+    )
 
     result = CliRunner().invoke(
         paper_live_readiness_gate_review.app,
