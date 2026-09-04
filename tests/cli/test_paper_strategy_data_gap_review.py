@@ -593,6 +593,164 @@ def test_strategy_data_gap_review_invalid_entry_acceptance_does_not_reduce_tunin
     }
 
 
+@pytest.mark.parametrize(
+    "invalid_reference",
+    [
+        pytest.param(7, id="int"),
+        pytest.param(True, id="bool"),
+        pytest.param({}, id="object"),
+        pytest.param([], id="list"),
+        pytest.param(None, id="json-null"),
+    ],
+)
+@pytest.mark.parametrize("acceptance_scope", ["per_entry", "global"])
+def test_strategy_data_gap_review_does_not_accept_present_invalid_evidence_reference(
+    tmp_path: Path, monkeypatch, invalid_reference: object, acceptance_scope: str
+) -> None:
+    """Only an absent reference is absent; every present non-string reference is invalid."""
+    from cli import paper_strategy_data_gap_review
+
+    artifact_dir = tmp_path / "audit"
+    report_path = artifact_dir / "paper_strategy_tuning_report_20260624T185531Z.json"
+    gate_path = artifact_dir / "paper_strategy_tuning_gate_decision_20260624T190000Z.json"
+    _write_json(report_path, _june_22_24_report(report_path))
+    _write_json(gate_path, _gate_decision(gate_path, report_path))
+    monkeypatch.setattr(paper_strategy_data_gap_review, "_timestamp", lambda: "20260624T191500Z")
+    acceptance_reason = "Acceptance cannot clear a malformed supplied reference."
+    review_entry: dict[str, object] = {
+        "reason": "missing_fundamentals",
+        "symbol": "QQQ",
+        "evidence_artifact": invalid_reference,
+    }
+    if acceptance_scope == "per_entry":
+        review_entry["acceptance_reason"] = acceptance_reason
+
+    review = paper_strategy_data_gap_review.build_data_gap_review(
+        gate_decision_path=gate_path,
+        artifact_dir=artifact_dir,
+        acceptance_reason=acceptance_reason if acceptance_scope == "global" else None,
+        review_entries=[review_entry],
+        now=datetime(2026, 6, 24, 19, 15, tzinfo=timezone.utc),
+    )
+
+    blockers = {blocker["reason"]: blocker for blocker in review["blockers"]}
+    fundamentals = blockers["missing_fundamentals"]
+    assert fundamentals["clearance_status"] == "needs_evidence"
+    assert (
+        "invalid_evidence_artifact_reference"
+        in fundamentals["review_evidence"]["validation_errors"]
+    )
+    assert review["summary"]["clearance_ready_count"] == 0
+    assert review["summary"]["accepted_paper_limitation_count"] == (
+        2 if acceptance_scope == "global" else 0
+    )
+
+
+@pytest.mark.parametrize(
+    ("acceptance_scope", "invalid_acceptance"),
+    [
+        pytest.param("per_entry", None, id="per-entry-json-null"),
+        pytest.param("per_entry", "", id="per-entry-empty"),
+        pytest.param("per_entry", "   ", id="per-entry-whitespace"),
+        pytest.param("per_entry", 7, id="per-entry-int"),
+        pytest.param("per_entry", True, id="per-entry-bool"),
+        pytest.param("per_entry", {}, id="per-entry-object"),
+        pytest.param("per_entry", [], id="per-entry-list"),
+        pytest.param("global", "", id="global-empty"),
+        pytest.param("global", "   ", id="global-whitespace"),
+        pytest.param("global", 7, id="global-int"),
+        pytest.param("global", True, id="global-bool"),
+        pytest.param("global", {}, id="global-object"),
+        pytest.param("global", [], id="global-list"),
+    ],
+)
+def test_strategy_data_gap_review_rejects_malformed_acceptance_reason(
+    tmp_path: Path, monkeypatch, acceptance_scope: str, invalid_acceptance: object
+) -> None:
+    """Acceptance must be a nonempty string, with entry JSON null treated as malformed."""
+    from cli import paper_strategy_data_gap_review
+
+    artifact_dir = tmp_path / "audit"
+    report_path = artifact_dir / "paper_strategy_tuning_report_20260624T185531Z.json"
+    gate_path = artifact_dir / "paper_strategy_tuning_gate_decision_20260624T190000Z.json"
+    _write_json(report_path, _june_22_24_report(report_path))
+    _write_json(gate_path, _gate_decision(gate_path, report_path))
+    monkeypatch.setattr(paper_strategy_data_gap_review, "_timestamp", lambda: "20260624T191500Z")
+    review_entry: dict[str, object] = {
+        "reason": "missing_fundamentals",
+        "symbol": "QQQ",
+    }
+    if acceptance_scope == "per_entry":
+        review_entry["acceptance_reason"] = invalid_acceptance
+
+    review = paper_strategy_data_gap_review.build_data_gap_review(
+        gate_decision_path=gate_path,
+        artifact_dir=artifact_dir,
+        acceptance_reason=invalid_acceptance if acceptance_scope == "global" else None,
+        review_entries=[review_entry],
+        now=datetime(2026, 6, 24, 19, 15, tzinfo=timezone.utc),
+    )
+
+    blockers = {blocker["reason"]: blocker for blocker in review["blockers"]}
+    fundamentals = blockers["missing_fundamentals"]
+    assert fundamentals["clearance_status"] == "needs_evidence"
+    assert fundamentals["review_evidence"]["validation_errors"] == ["invalid_acceptance_reason"]
+    assert review["summary"] == {
+        "blocker_count": 3,
+        "clearance_ready_count": 0,
+        "accepted_paper_limitation_count": 0,
+        "needs_evidence_count": 3,
+    }
+
+
+def test_strategy_data_gap_review_wrong_type_reference_keeps_global_gate_blocked(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A global acceptance retains the malformed-reference blocker in the tuning gate."""
+    from cli import paper_strategy_data_gap_review, paper_strategy_tuning_gate
+
+    artifact_dir = tmp_path / "audit"
+    report_path = artifact_dir / "paper_strategy_tuning_report_20260624T185531Z.json"
+    gate_path = artifact_dir / "paper_strategy_tuning_gate_decision_20260624T190000Z.json"
+    _write_json(report_path, _june_22_24_report(report_path))
+    _write_json(gate_path, _gate_decision(gate_path, report_path))
+    monkeypatch.setattr(paper_strategy_data_gap_review, "_timestamp", lambda: "20260624T191500Z")
+    monkeypatch.setattr(paper_strategy_tuning_gate, "_timestamp", lambda: "20260624T192000Z")
+
+    review = paper_strategy_data_gap_review.build_data_gap_review(
+        gate_decision_path=gate_path,
+        artifact_dir=artifact_dir,
+        acceptance_reason="Global acceptance cannot clear a malformed supplied reference.",
+        review_entries=[
+            {
+                "reason": "missing_fundamentals",
+                "symbol": "QQQ",
+                "evidence_artifact": 7,
+            },
+        ],
+        now=datetime(2026, 6, 24, 19, 15, tzinfo=timezone.utc),
+    )
+    decision = paper_strategy_tuning_gate.build_tuning_gate_decision(
+        report_path=report_path,
+        artifact_dir=artifact_dir,
+        data_gap_review_path=review["review_artifact"],
+        now=datetime(2026, 6, 24, 19, 20, tzinfo=timezone.utc),
+    )
+
+    assert review["summary"] == {
+        "blocker_count": 3,
+        "clearance_ready_count": 0,
+        "accepted_paper_limitation_count": 2,
+        "needs_evidence_count": 1,
+    }
+    assert decision["threshold_evaluations"]["max_data_gap_blockers"] == {
+        "observed": 1,
+        "threshold": 0,
+        "operator": "<=",
+        "passed": False,
+    }
+
+
 def test_strategy_data_gap_review_matches_review_entries_by_session_id(
     tmp_path: Path, monkeypatch
 ) -> None:

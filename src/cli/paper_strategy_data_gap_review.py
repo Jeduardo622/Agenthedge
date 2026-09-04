@@ -127,15 +127,27 @@ def _blocker_register_entry(
     metadata = _mapping(rejected_trade.get("metadata"))
     review_map = _mapping(review_entry)
     review_evidence = _review_evidence(review_map, reason, symbol, artifact_root, session_id)
-    specific_acceptance = review_map.get("acceptance_reason")
+    specific_acceptance, invalid_specific_acceptance = _acceptance_reason(
+        review_map.get("acceptance_reason"), "acceptance_reason" in review_map
+    )
+    global_acceptance, invalid_global_acceptance = _acceptance_reason(
+        acceptance_reason, acceptance_reason is not None
+    )
+    invalid_acceptance = invalid_specific_acceptance or invalid_global_acceptance
+    if invalid_acceptance:
+        review_evidence["validation_errors"] = [
+            *review_evidence.get("validation_errors", []),
+            "invalid_acceptance_reason",
+        ]
     duplicate_entry = "duplicate_review_entries" in review_evidence.get("validation_errors", [])
-    invalid_supplied_evidence = bool(review_evidence.get("evidence_artifact")) and bool(
+    invalid_supplied_evidence = "evidence_artifact" in review_evidence and bool(
         review_evidence.get("validation_errors")
     )
     accepted = (
-        bool(specific_acceptance or acceptance_reason)
+        bool(specific_acceptance or global_acceptance)
         and not duplicate_entry
         and not invalid_supplied_evidence
+        and not invalid_acceptance
     )
     evidence_ready = bool(review_evidence.get("evidence_artifact")) and not review_evidence.get(
         "validation_errors"
@@ -153,7 +165,7 @@ def _blocker_register_entry(
         "reason": reason,
         "clearance_status": clearance_status,
         "required_evidence": [DATA_GAP_REQUIREMENTS[reason]],
-        "acceptance_reason": specific_acceptance or acceptance_reason,
+        "acceptance_reason": specific_acceptance or global_acceptance,
         "source_evidence": _source_evidence(rejected_trade, report_path),
     }
     if review_evidence:
@@ -180,27 +192,41 @@ def _review_evidence(
         errors = [str(error) for error in review_entry_errors if str(error)]
         if errors:
             evidence["validation_errors"] = errors
-    evidence_artifact = review_entry.get("evidence_artifact")
-    if isinstance(evidence_artifact, str) and evidence_artifact:
+    if "evidence_artifact" in review_entry:
+        evidence_artifact = review_entry.get("evidence_artifact")
         evidence["evidence_artifact"] = evidence_artifact
-        payload, validation_errors = _review_evidence_payload(
-            evidence_artifact,
-            artifact_root,
-            expected_reason,
-            expected_symbol,
-            expected_session_id,
-        )
-        if payload:
-            evidence["evidence_status"] = str(payload.get("status") or "")
-        if validation_errors:
+        if not isinstance(evidence_artifact, str) or not evidence_artifact.strip():
             evidence["validation_errors"] = [
                 *evidence.get("validation_errors", []),
-                *validation_errors,
+                "invalid_evidence_artifact_reference",
             ]
+        else:
+            payload, validation_errors = _review_evidence_payload(
+                evidence_artifact,
+                artifact_root,
+                expected_reason,
+                expected_symbol,
+                expected_session_id,
+            )
+            if payload:
+                evidence["evidence_status"] = str(payload.get("status") or "")
+            if validation_errors:
+                evidence["validation_errors"] = [
+                    *evidence.get("validation_errors", []),
+                    *validation_errors,
+                ]
     reviewer_note = review_entry.get("reviewer_note")
     if isinstance(reviewer_note, str) and reviewer_note:
         evidence["reviewer_note"] = reviewer_note
     return evidence
+
+
+def _acceptance_reason(value: Any, present: bool) -> tuple[str | None, bool]:
+    if not present:
+        return None, False
+    if not isinstance(value, str) or not value.strip():
+        return None, True
+    return value.strip(), False
 
 
 def _review_evidence_payload(
