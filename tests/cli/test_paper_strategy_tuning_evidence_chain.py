@@ -418,6 +418,77 @@ def test_tuning_chain_is_not_ready_for_target_session_blockers_or_no_accepted_or
     assert chain["evidence_gaps"]
 
 
+@pytest.mark.parametrize(
+    "actual_status",
+    ["rejected", "cancelled", "failed", "", None, [], {}],
+)
+def test_tuning_chain_present_nonfilled_actual_order_overrides_accepted_canary(
+    tmp_path: Path, actual_status: Any
+) -> None:
+    from cli import paper_strategy_tuning_evidence_chain
+
+    artifact_dir = tmp_path / "audit"
+    _seed_closed_sessions(artifact_dir)
+    _seed_strategy_capture(artifact_dir)
+    packet_path = artifact_dir / "paper_rollout_packet_20260624T152000Z.json"
+    packet = _read_json(packet_path)
+    packet["summary"]["paper_order_status"] = actual_status
+    _write_json(packet_path, packet)
+
+    chain = paper_strategy_tuning_evidence_chain.build_tuning_evidence_chain(
+        artifact_dir=artifact_dir,
+        session_date="2026-06-24",
+        generated_at="2026-06-24T23:59:00+00:00",
+        start_date="2026-06-22",
+        min_sessions=3,
+    )
+
+    assert chain["status"] == "attention_required"
+    assert "target_accepted_paper_order" in chain["evidence_gaps"]
+
+
+def test_tuning_chain_uses_accepted_canary_when_actual_order_status_absent(tmp_path: Path) -> None:
+    from cli import paper_strategy_tuning_evidence_chain
+
+    artifact_dir = tmp_path / "audit"
+    _seed_closed_sessions(artifact_dir)
+    _seed_strategy_capture(artifact_dir)
+
+    chain = paper_strategy_tuning_evidence_chain.build_tuning_evidence_chain(
+        artifact_dir=artifact_dir,
+        session_date="2026-06-24",
+        generated_at="2026-06-24T23:59:00+00:00",
+        start_date="2026-06-22",
+        min_sessions=3,
+    )
+
+    assert chain["status"] == "ready"
+    assert "target_accepted_paper_order" not in chain["evidence_gaps"]
+
+
+def test_tuning_chain_accepts_filled_actual_order_over_rejected_canary(tmp_path: Path) -> None:
+    from cli import paper_strategy_tuning_evidence_chain
+
+    artifact_dir = tmp_path / "audit"
+    _seed_closed_sessions(artifact_dir)
+    _seed_strategy_capture(artifact_dir)
+    packet_path = artifact_dir / "paper_rollout_packet_20260624T152000Z.json"
+    packet = _read_json(packet_path)
+    packet["summary"].update({"canary_order_status": "rejected", "paper_order_status": "filled"})
+    _write_json(packet_path, packet)
+
+    chain = paper_strategy_tuning_evidence_chain.build_tuning_evidence_chain(
+        artifact_dir=artifact_dir,
+        session_date="2026-06-24",
+        generated_at="2026-06-24T23:59:00+00:00",
+        start_date="2026-06-22",
+        min_sessions=3,
+    )
+
+    assert chain["status"] == "ready"
+    assert "target_accepted_paper_order" not in chain["evidence_gaps"]
+
+
 def test_tuning_chain_rejects_capture_self_link_mismatch(tmp_path: Path) -> None:
     from cli import paper_strategy_tuning_evidence_chain
 

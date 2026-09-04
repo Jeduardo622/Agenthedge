@@ -87,7 +87,7 @@ def build_tuning_evidence_chain(
         capture_artifact=capture_artifact,
         artifact_root=artifact_root,
     )
-    evidence_gaps = _chain_evidence_gaps(report, capture, target_daily)
+    evidence_gaps = _chain_evidence_gaps(report, capture, target_daily, artifact_root)
     ready = (
         bool(capture)
         and report.get("status") == "ready_for_paper_tuning"
@@ -276,6 +276,7 @@ def _chain_evidence_gaps(
     report: Mapping[str, Any],
     capture: Mapping[str, Any],
     target_daily: Mapping[str, Any],
+    artifact_root: Path,
 ) -> list[str]:
     gaps = [str(gap) for gap in report.get("evidence_gaps") or []]
     for field, required in (
@@ -315,12 +316,24 @@ def _chain_evidence_gaps(
         if target_daily.get("what_risk_compliance_blocked"):
             gaps.append("target_risk_compliance_blockers")
         outcome = _mapping(target_daily.get("what_happened_after_decision"))
-        if not (
-            outcome.get("paper_order_status") == "filled"
-            or outcome.get("canary_order_status") == "accepted"
-        ):
+        if not _has_accepted_target_paper_order(outcome, target_daily, artifact_root):
             gaps.append("target_accepted_paper_order")
     return list(dict.fromkeys(gaps))
+
+
+def _has_accepted_target_paper_order(
+    outcome: Mapping[str, Any], target_daily: Mapping[str, Any], artifact_root: Path
+) -> bool:
+    packet_path = _resolve_artifact_path(target_daily.get("packet_artifact"), artifact_root)
+    if packet_path is None:
+        return False
+    packet = _load_json(packet_path)
+    if packet.get("artifact_type") != "paper_rollout_packet":
+        return False
+    summary = _mapping(packet.get("summary"))
+    if "paper_order_status" in summary:
+        return summary.get("paper_order_status") == "filled"
+    return outcome.get("canary_order_status") == "accepted"
 
 
 def _valid_strategy_signals(value: Any) -> bool:
