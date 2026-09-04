@@ -45,6 +45,7 @@ Informed by the Technical Implementation Plan (CI/CD, sanity checks) and the arc
 - **Production (paper trading):** Feature flags and shadow modes; no untested code promoted.
 
 ## Sanity Check Scripts
+- `poetry run python -m cli.provider_readiness --required-provider alpha_vantage --required-provider finnhub --required-provider fred --required-provider newsapi --raw` performs a secret-free offline credential-presence check against the current process environment. It does not load `.env`, bootstrap the runtime, contact providers, or print credential values, and exits nonzero if any explicitly required provider is missing.
 - `poetry run python -m cli.runtime health --raw` ensures agents + providers are bootstrappable.
 - `poetry run python -m cli.scheduler run-once midday_check` runs a quick risk/compliance heartbeat.
 - `poetry run python -m cli.scheduler run-once reconciliation_check` runs execution reconciliation and fails closed on mismatches.

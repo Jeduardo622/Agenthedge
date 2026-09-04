@@ -173,6 +173,15 @@ def test_dry_run_command_center_cli_prints_artifact_paths(tmp_path: Path, monkey
         },
     )
     monkeypatch.setattr(paper_supervised_live_dry_run, "_timestamp", lambda: "20260619T200000Z")
+    build_command_center = paper_supervised_live_dry_run.build_command_center
+    monkeypatch.setattr(
+        paper_supervised_live_dry_run,
+        "build_command_center",
+        lambda **kwargs: build_command_center(
+            **kwargs,
+            now=datetime(2026, 6, 19, 20, 0, tzinfo=timezone.utc),
+        ),
+    )
 
     result = CliRunner().invoke(
         paper_supervised_live_dry_run.app,

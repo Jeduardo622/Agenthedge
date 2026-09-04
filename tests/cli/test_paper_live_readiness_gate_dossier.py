@@ -350,6 +350,15 @@ def test_gate_dossier_cli_prints_packet_paths(tmp_path: Path, monkeypatch) -> No
         },
     )
     monkeypatch.setattr(paper_live_readiness_gate_dossier, "_timestamp", lambda: "20260620T173000Z")
+    build_dossier = paper_live_readiness_gate_dossier.build_dossier
+    monkeypatch.setattr(
+        paper_live_readiness_gate_dossier,
+        "build_dossier",
+        lambda **kwargs: build_dossier(
+            **kwargs,
+            now=datetime(2026, 6, 20, 17, 30, tzinfo=timezone.utc),
+        ),
+    )
 
     result = CliRunner().invoke(
         paper_live_readiness_gate_dossier.app,
