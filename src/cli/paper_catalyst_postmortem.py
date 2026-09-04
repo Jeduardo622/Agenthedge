@@ -10,6 +10,8 @@ from typing import Any, Iterable, Mapping
 
 import typer
 
+from audit import verify_jsonl_hash_chain
+
 app = typer.Typer(
     help=(
         "Build a paper-only catalyst postmortem from decision, capture, and runtime audit "
@@ -222,6 +224,14 @@ def _validate_source_evidence(
 
     decision_path = _artifact_path(decision)
     capture_path = _artifact_path(capture)
+    report_path = _artifact_path(report)
+    for payload, field, expected in (
+        (decision, "decision_artifact", decision_path),
+        (capture, "capture_artifact", capture_path),
+        (report, "report_artifact", report_path),
+    ):
+        if not _paths_match(payload.get(field), expected, artifact_root):
+            raise typer.BadParameter(f"{field} self-link does not match the consumed artifact")
     if not _paths_match(capture.get("decision_artifact"), decision_path, artifact_root):
         raise typer.BadParameter("capture artifact does not link to the consumed decision")
     daily = _daily_report(report, session_id)
@@ -231,6 +241,14 @@ def _validate_source_evidence(
         raise typer.BadParameter("tuning report does not link to the consumed decision")
     if not _paths_match(daily.get("strategy_capture_artifact"), capture_path, artifact_root):
         raise typer.BadParameter("tuning report does not link to the consumed capture")
+    if report.get("status") != "ready_for_paper_tuning":
+        raise typer.BadParameter("tuning report is not ready for paper tuning")
+    report_gaps = report.get("evidence_gaps")
+    if not isinstance(report_gaps, list) or report_gaps:
+        raise typer.BadParameter("tuning report contains evidence gaps")
+    blockers = daily.get("what_risk_compliance_blocked")
+    if not isinstance(blockers, list) or blockers:
+        raise typer.BadParameter("tuning report contains target-session blockers")
 
     movement = _mapping(capture.get("expected_vs_actual_movement"))
     for field in ("expected", "actual"):
@@ -287,8 +305,44 @@ def _runtime_audits(
         existing = _existing_paths(refs, artifact_root)
         if len(existing) != len(refs):
             raise typer.BadParameter("decision references missing runtime audit evidence")
+        for path in existing:
+            _validate_runtime_audit(path, session_date)
         return existing
     raise typer.BadParameter("decision does not reference runtime audit evidence")
+
+
+def _validate_runtime_audit(path: Path, session_date: date) -> None:
+    session_id = _session_id(session_date)
+    compact = session_date.strftime("%Y%m%d")
+    if f"paper-{compact}" not in path.name:
+        raise typer.BadParameter("runtime audit filename does not match the target session")
+    chain_ok, chain_errors = verify_jsonl_hash_chain(path)
+    if not chain_ok:
+        details = "; ".join(chain_errors[:3]) or "unknown verification failure"
+        raise typer.BadParameter(f"runtime audit chain is invalid: {details}")
+    records = _load_jsonl(path)
+    if not records:
+        raise typer.BadParameter("runtime audit has no records")
+    for record in records:
+        timestamp = _parse_runtime_timestamp(record.get("timestamp"))
+        if timestamp.date() != session_date:
+            raise typer.BadParameter("runtime audit record timestamp does not match the session")
+        payload = _mapping(record.get("payload"))
+        explicit_sessions = (record.get("session_id"), payload.get("session_id"))
+        if any(value is not None and value != session_id for value in explicit_sessions):
+            raise typer.BadParameter("runtime audit record session does not match the target")
+
+
+def _parse_runtime_timestamp(value: Any) -> datetime:
+    if not isinstance(value, str) or not value:
+        raise typer.BadParameter("runtime audit record timestamp is missing")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise typer.BadParameter("runtime audit record timestamp is invalid") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise typer.BadParameter("runtime audit record timestamp must include an offset")
+    return parsed.astimezone(timezone.utc)
 
 
 def _runtime_context(

@@ -215,6 +215,66 @@ def test_tuning_chain_is_not_ready_without_complete_safe_target_capture(
     assert chain["evidence_gaps"]
 
 
+@pytest.mark.parametrize(
+    ("field", "value", "expected_gap"),
+    [
+        (
+            "strategy_signal_snapshot",
+            [{}],
+            "target_strategy_signal_snapshot",
+        ),
+        (
+            "strategy_signal_snapshot",
+            [{"strategy": "catalyst"}],
+            "target_strategy_signal_snapshot",
+        ),
+        (
+            "expected_vs_actual_movement",
+            {"expected": float("nan"), "actual": float("inf")},
+            "target_expected_vs_actual_movement",
+        ),
+        (
+            "performance_metrics",
+            {
+                "drawdown": float("nan"),
+                "gross_exposure": float("inf"),
+                "net_exposure": 1.0,
+                "hit_rate": 2.0,
+            },
+            "target_performance_metrics",
+        ),
+        (
+            "catalyst_attribution",
+            {"unrelated": "value"},
+            "target_catalyst_attribution",
+        ),
+    ],
+)
+def test_tuning_chain_is_not_ready_for_malformed_strategy_evidence(
+    tmp_path: Path, field: str, value: Any, expected_gap: str
+) -> None:
+    from cli import paper_strategy_tuning_evidence_chain
+
+    artifact_dir = tmp_path / "audit"
+    _seed_closed_sessions(artifact_dir)
+    capture_path = _seed_strategy_capture(artifact_dir)
+    capture = _read_json(capture_path)
+    capture[field] = value
+    _write_json(capture_path, capture)
+
+    chain = paper_strategy_tuning_evidence_chain.build_tuning_evidence_chain(
+        artifact_dir=artifact_dir,
+        session_date="2026-06-24",
+        generated_at="2026-06-24T23:59:00+00:00",
+        start_date="2026-06-22",
+        min_sessions=3,
+    )
+
+    assert chain["status"] == "attention_required"
+    assert expected_gap in chain["evidence_gaps"]
+    assert "PAPER_STRATEGY_TUNING_EVIDENCE_CHAIN_READY" not in chain["markdown"]
+
+
 @pytest.mark.parametrize("failure", ["target_blocker", "no_target_accepted_order"])
 def test_tuning_chain_is_not_ready_for_target_session_blockers_or_no_accepted_order(
     tmp_path: Path, failure: str
@@ -255,6 +315,34 @@ def test_tuning_chain_rejects_capture_self_link_mismatch(tmp_path: Path) -> None
     _write_json(capture_path, capture)
 
     with pytest.raises(typer.BadParameter):
+        paper_strategy_tuning_evidence_chain.build_tuning_evidence_chain(
+            artifact_dir=artifact_dir,
+            session_date="2026-06-24",
+            generated_at="2026-06-24T23:59:00+00:00",
+            start_date="2026-06-22",
+            min_sessions=3,
+        )
+
+
+@pytest.mark.parametrize("failure", ["missing", "cross_session"])
+def test_tuning_chain_rejects_invalid_capture_source_decision_lineage(
+    tmp_path: Path, failure: str
+) -> None:
+    from cli import paper_strategy_tuning_evidence_chain
+
+    artifact_dir = tmp_path / "audit"
+    _seed_closed_sessions(artifact_dir)
+    capture_path = _seed_strategy_capture(artifact_dir)
+    capture = _read_json(capture_path)
+    if failure == "missing":
+        Path(capture["decision_artifact"]).unlink()
+    else:
+        capture["decision_artifact"] = str(
+            artifact_dir / "paper_decision_log_paper-20260623_20260623T154500Z.json"
+        )
+        _write_json(capture_path, capture)
+
+    with pytest.raises(typer.BadParameter, match="decision"):
         paper_strategy_tuning_evidence_chain.build_tuning_evidence_chain(
             artifact_dir=artifact_dir,
             session_date="2026-06-24",
@@ -403,8 +491,9 @@ def _seed_closed_session(artifact_dir: Path, iso_day: str, compact_day: str) -> 
             ],
         },
     )
+    decision_path = artifact_dir / f"paper_decision_log_{session_id}_{compact_day}T154500Z.json"
     _write_json(
-        artifact_dir / f"paper_decision_log_{session_id}_{compact_day}T154500Z.json",
+        decision_path,
         {
             "artifact_type": "paper_decision_log",
             "created_at": f"{iso_day}T15:45:00+00:00",
@@ -412,6 +501,12 @@ def _seed_closed_session(artifact_dir: Path, iso_day: str, compact_day: str) -> 
             "decision": "proceed",
             "reason": "Prior paper session closed cleanly.",
             "artifact_refs": [str(lifecycle_path), str(packet_path)],
+            "read_only": True,
+            "paper_only": True,
+            "live_trading_enabled": False,
+            "broker_mutation": False,
+            "trading_behavior_changed": False,
+            "decision_artifact": str(decision_path),
         },
     )
     _write_json(

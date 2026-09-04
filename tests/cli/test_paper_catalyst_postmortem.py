@@ -4,10 +4,13 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 import typer
 from typer.testing import CliRunner
+
+from audit import JsonlAuditSink
 
 
 def test_catalyst_postmortem_explains_june_24_investor_day_miss(
@@ -273,6 +276,117 @@ def test_catalyst_postmortem_cli_never_prints_ready_for_incomplete_evidence(
     assert "PAPER_CATALYST_POSTMORTEM_READY" not in result.output
 
 
+def test_catalyst_postmortem_rejects_tampered_runtime_hash_chain(tmp_path: Path) -> None:
+    from cli import paper_catalyst_postmortem
+
+    artifact_dir = tmp_path / "audit"
+    paths = _seed_june_24_artifacts(artifact_dir)
+    lines = paths["runtime"].read_text(encoding="utf-8").splitlines()
+    record = json.loads(lines[1])
+    record["payload"]["decision_id"] = "tampered"
+    lines[1] = json.dumps(record)
+    paths["runtime"].write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    with pytest.raises(typer.BadParameter, match="audit chain is invalid"):
+        paper_catalyst_postmortem.build_catalyst_postmortem(
+            artifact_dir=artifact_dir,
+            session_date="2026-06-24",
+            symbol="SPY",
+            catalyst_id="Investor day",
+        )
+
+
+@pytest.mark.parametrize("mismatch", ["filename", "record_timestamp"])
+def test_catalyst_postmortem_rejects_wrong_session_runtime_evidence(
+    tmp_path: Path, mismatch: str
+) -> None:
+    from cli import paper_catalyst_postmortem
+
+    artifact_dir = tmp_path / "audit"
+    paths = _seed_june_24_artifacts(artifact_dir)
+    decision = _read_json(paths["decision"])
+    if mismatch == "filename":
+        wrong_runtime = artifact_dir / "runtime_events_paper-20260623-catalyst-fill.jsonl"
+        paths["runtime"].replace(wrong_runtime)
+    else:
+        wrong_runtime = paths["runtime"]
+        records = [
+            json.loads(line) for line in wrong_runtime.read_text(encoding="utf-8").splitlines()
+        ]
+        payloads = [(record["action"], record["payload"]) for record in records]
+        wrong_runtime.unlink()
+        _write_runtime_records(
+            wrong_runtime,
+            payloads,
+            datetime(2026, 6, 23, 18, 46, tzinfo=timezone.utc),
+        )
+    decision["artifact_refs"] = [str(wrong_runtime)]
+    _write_json(paths["decision"], decision)
+
+    with pytest.raises(typer.BadParameter, match="session"):
+        paper_catalyst_postmortem.build_catalyst_postmortem(
+            artifact_dir=artifact_dir,
+            session_date="2026-06-24",
+            symbol="SPY",
+            catalyst_id="Investor day",
+        )
+
+
+@pytest.mark.parametrize("failure", ["insufficient_report", "blocked_report"])
+def test_catalyst_postmortem_cli_never_prints_ready_for_nonready_report(
+    tmp_path: Path, failure: str
+) -> None:
+    from cli import paper_catalyst_postmortem
+
+    artifact_dir = tmp_path / "audit"
+    paths = _seed_june_24_artifacts(artifact_dir)
+    report = _read_json(paths["report"])
+    if failure == "insufficient_report":
+        report["status"] = "insufficient_evidence"
+        report["evidence_gaps"] = ["target_strategy_signal_snapshot"]
+    else:
+        report["daily_reports"][0]["what_risk_compliance_blocked"] = [
+            {"source": "required_check", "name": "risk", "status": "failed"}
+        ]
+    _write_json(paths["report"], report)
+
+    result = CliRunner().invoke(
+        paper_catalyst_postmortem.app,
+        ["--artifact-dir", str(artifact_dir), "--session-date", "2026-06-24"],
+    )
+
+    assert result.exit_code != 0
+    assert "PAPER_CATALYST_POSTMORTEM_READY" not in result.output
+
+
+@pytest.mark.parametrize(
+    ("source_name", "self_link"),
+    [
+        ("decision", "decision_artifact"),
+        ("capture", "capture_artifact"),
+        ("report", "report_artifact"),
+    ],
+)
+def test_catalyst_postmortem_rejects_source_self_link_mismatch(
+    tmp_path: Path, source_name: str, self_link: str
+) -> None:
+    from cli import paper_catalyst_postmortem
+
+    artifact_dir = tmp_path / "audit"
+    paths = _seed_june_24_artifacts(artifact_dir)
+    payload = _read_json(paths[source_name])
+    payload[self_link] = str(artifact_dir / f"different-{source_name}.json")
+    _write_json(paths[source_name], payload)
+
+    with pytest.raises(typer.BadParameter, match="self-link"):
+        paper_catalyst_postmortem.build_catalyst_postmortem(
+            artifact_dir=artifact_dir,
+            session_date="2026-06-24",
+            symbol="SPY",
+            catalyst_id="Investor day",
+        )
+
+
 def _seed_june_24_artifacts(artifact_dir: Path) -> dict[str, Path]:
     runtime_audit = artifact_dir / "runtime_events_paper-20260624-catalyst-fill-threshold040.jsonl"
     decision = artifact_dir / "paper_decision_log_paper-20260624_20260624T185517Z.json"
@@ -295,6 +409,7 @@ def _seed_june_24_artifacts(artifact_dir: Path) -> dict[str, Path]:
             "live_trading_enabled": False,
             "broker_mutation": False,
             "trading_behavior_changed": False,
+            "decision_artifact": str(decision),
         },
     )
     _write_json(
@@ -309,6 +424,7 @@ def _seed_june_24_artifacts(artifact_dir: Path) -> dict[str, Path]:
             "live_trading_enabled": False,
             "broker_mutation": False,
             "strategy_behavior_changed": False,
+            "capture_artifact": str(capture),
             "strategy_signal_snapshot": [
                 {
                     "agent": "quant",
@@ -352,6 +468,7 @@ def _seed_june_24_artifacts(artifact_dir: Path) -> dict[str, Path]:
             "artifact_type": "paper_strategy_tuning_report",
             "created_at": "2026-06-24T18:55:31+00:00",
             "status": "ready_for_paper_tuning",
+            "evidence_gaps": [],
             "daily_reports": [
                 {
                     "session_id": "paper-20260624",
@@ -373,24 +490,22 @@ def _seed_june_24_artifacts(artifact_dir: Path) -> dict[str, Path]:
             "live_trading_enabled": False,
             "broker_mutation": False,
             "strategy_behavior_changed": False,
+            "report_artifact": str(report),
         },
     )
-    runtime_audit.parent.mkdir(parents=True, exist_ok=True)
     records = [
-        {
-            "action": "quant_consensus",
-            "timestamp": "2026-06-24T18:46:32+00:00",
-            "payload": {
+        (
+            "quant_consensus",
+            {
                 "symbol": "SPY",
                 "proposal_id": "proposal-1",
                 "decision_id": "decision-1",
                 "strategies": [_catalyst_strategy()],
             },
-        },
-        {
-            "action": "director_approval",
-            "timestamp": "2026-06-24T18:46:32+00:00",
-            "payload": {
+        ),
+        (
+            "director_approval",
+            {
                 "symbol": "SPY",
                 "proposal_id": "proposal-1",
                 "decision_id": "decision-1",
@@ -407,11 +522,10 @@ def _seed_june_24_artifacts(artifact_dir: Path) -> dict[str, Path]:
                 },
                 "strategies": [_catalyst_strategy()],
             },
-        },
-        {
-            "action": "execution_fill",
-            "timestamp": "2026-06-24T18:47:55+00:00",
-            "payload": {
+        ),
+        (
+            "execution_fill",
+            {
                 "symbol": "SPY",
                 "proposal_id": "proposal-1",
                 "decision_id": "decision-1",
@@ -426,11 +540,12 @@ def _seed_june_24_artifacts(artifact_dir: Path) -> dict[str, Path]:
                 },
                 "strategies": [_catalyst_strategy()],
             },
-        },
+        ),
     ]
-    runtime_audit.write_text(
-        "\n".join(json.dumps(record) for record in records) + "\n",
-        encoding="utf-8",
+    _write_runtime_records(
+        runtime_audit,
+        records,
+        datetime(2026, 6, 24, 18, 46, tzinfo=timezone.utc),
     )
     return {
         "decision": decision,
@@ -464,3 +579,20 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
 
 def _read_json(path: Path) -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _write_runtime_records(
+    path: Path,
+    records: list[tuple[str, dict[str, Any]]],
+    timestamp: datetime,
+) -> None:
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return timestamp if tz is not None else timestamp.replace(tzinfo=None)
+
+    path.unlink(missing_ok=True)
+    with patch("audit.sink.datetime", FixedDatetime):
+        sink = JsonlAuditSink(path)
+        for action, payload in records:
+            sink(action, payload)

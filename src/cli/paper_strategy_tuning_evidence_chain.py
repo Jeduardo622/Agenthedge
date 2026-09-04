@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from datetime import date, datetime, time, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping
@@ -204,7 +205,32 @@ def _load_capture_for_chain(
     self_link = payload.get("capture_artifact")
     if self_link is not None and not _paths_match(self_link, path, artifact_root):
         raise typer.BadParameter("capture artifact self-link does not match the consumed file")
+    _validate_capture_decision_lineage(payload, artifact_root, session_id)
     return payload
+
+
+def _validate_capture_decision_lineage(
+    capture: Mapping[str, Any], artifact_root: Path, session_id: str
+) -> None:
+    decision_path = _resolve_artifact_path(capture.get("decision_artifact"), artifact_root)
+    if decision_path is None or not decision_path.is_file():
+        raise typer.BadParameter("capture source decision artifact is missing")
+    decision = _load_json(decision_path)
+    if decision.get("artifact_type") != "paper_decision_log":
+        raise typer.BadParameter("capture source decision artifact is invalid")
+    if decision.get("session_id") != session_id or session_id not in decision_path.name:
+        raise typer.BadParameter("capture source decision does not match the target session")
+    for field, required in (
+        ("read_only", True),
+        ("paper_only", True),
+        ("live_trading_enabled", False),
+        ("broker_mutation", False),
+        ("trading_behavior_changed", False),
+    ):
+        if decision.get(field) is not required:
+            raise typer.BadParameter(f"capture source decision is unsafe: {field}")
+    if not _paths_match(decision.get("decision_artifact"), decision_path, artifact_root):
+        raise typer.BadParameter("capture source decision self-link is invalid")
 
 
 def _target_daily_report(
@@ -272,23 +298,15 @@ def _chain_evidence_gaps(
             gaps.append(f"target_strategy_capture_{field}")
 
     signals = capture.get("strategy_signal_snapshot")
-    if (
-        not isinstance(signals, list)
-        or not signals
-        or not all(isinstance(signal, Mapping) for signal in signals)
-    ):
+    if not _valid_strategy_signals(signals):
         gaps.append("target_strategy_signal_snapshot")
     movement = _mapping(capture.get("expected_vs_actual_movement"))
-    if movement.get("expected") is None or movement.get("actual") is None:
+    if not all(_finite_number(movement.get(field)) for field in ("expected", "actual")):
         gaps.append("target_expected_vs_actual_movement")
     metrics = _mapping(capture.get("performance_metrics"))
-    if (
-        metrics.get("drawdown") is None
-        or metrics.get("hit_rate") is None
-        or (metrics.get("gross_exposure") is None and metrics.get("net_exposure") is None)
-    ):
+    if not _valid_performance_metrics(metrics):
         gaps.append("target_performance_metrics")
-    if not _mapping(capture.get("catalyst_attribution")):
+    if not _valid_catalyst_attribution(capture.get("catalyst_attribution")):
         gaps.append("target_catalyst_attribution")
 
     if not target_daily:
@@ -303,6 +321,57 @@ def _chain_evidence_gaps(
         ):
             gaps.append("target_accepted_paper_order")
     return list(dict.fromkeys(gaps))
+
+
+def _valid_strategy_signals(value: Any) -> bool:
+    if not isinstance(value, list) or not value:
+        return False
+    if not all(isinstance(signal, Mapping) for signal in value):
+        return False
+    return any(
+        isinstance(signal.get("strategy"), str)
+        and bool(signal["strategy"].strip())
+        and isinstance(signal.get("symbol"), str)
+        and bool(signal["symbol"].strip())
+        for signal in value
+    )
+
+
+def _valid_performance_metrics(metrics: Mapping[str, Any]) -> bool:
+    if not all(
+        _finite_number(metrics.get(field))
+        for field in ("drawdown", "gross_exposure", "net_exposure", "hit_rate")
+    ):
+        return False
+    drawdown = float(metrics["drawdown"])
+    gross_exposure = float(metrics["gross_exposure"])
+    hit_rate = float(metrics["hit_rate"])
+    return drawdown >= 0.0 and gross_exposure >= 0.0 and 0.0 <= hit_rate <= 1.0
+
+
+def _valid_catalyst_attribution(value: Any) -> bool:
+    attribution = _mapping(value)
+    catalyst_id = attribution.get("catalyst_id")
+    if isinstance(catalyst_id, str) and catalyst_id.strip():
+        return True
+    catalyst_ids = attribution.get("catalyst_ids")
+    return isinstance(catalyst_ids, list) and any(
+        isinstance(item, str) and item.strip() for item in catalyst_ids
+    )
+
+
+def _finite_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def _resolve_artifact_path(value: Any, artifact_root: Path) -> Path | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    path = Path(value)
+    candidates = [path]
+    if not path.is_absolute():
+        candidates.extend((artifact_root / path, artifact_root / path.name))
+    return next((candidate for candidate in candidates if candidate.is_file()), path)
 
 
 def _paths_match(value: Any, expected: Path, artifact_root: Path) -> bool:
