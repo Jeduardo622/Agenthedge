@@ -68,11 +68,13 @@ def build_closeout(
     runtime_context = _runtime_context(runtime_path)
     fill = _mapping(runtime_context.get("fill"))
     broker_order = _mapping(fill.get("broker_order"))
-    fill_price = _float_or_none(fill.get("price")) or _float_or_none(
-        broker_order.get("average_fill_price")
+    fill_price_source = fill.get("price")
+    if fill_price_source is None:
+        fill_price_source = broker_order.get("average_fill_price")
+    fill_price = _validate_positive_float(
+        fill_price_source,
+        "runtime audit fill price",
     )
-    if fill_price is None or fill_price <= 0:
-        raise typer.BadParameter("runtime audit must include a positive fill price")
     decision_payload = _source_json(decision_path, "decision_artifact", "paper_decision_log")
     prior_capture_payload = _source_json(
         capture_path,
@@ -466,16 +468,29 @@ def _validated_order_evidence(
     if not approval_id or approval_id != broker_order.get("client_order_id"):
         raise typer.BadParameter("runtime fill order linkage mismatch")
 
-    filled_quantity = _float_or_none(status_payload.get("filled_quantity"))
-    runtime_quantity = _float_or_none(broker_order.get("filled_quantity"))
-    if filled_quantity is None or filled_quantity <= 0:
-        raise typer.BadParameter("order status must include a positive filled quantity")
-    if runtime_quantity is None or filled_quantity != runtime_quantity:
+    filled_quantity = _validate_positive_float(
+        status_payload.get("filled_quantity"),
+        "order status filled_quantity",
+    )
+    runtime_quantity = _validate_positive_float(
+        broker_order.get("filled_quantity"),
+        "runtime order filled_quantity",
+    )
+    if filled_quantity != runtime_quantity:
         raise typer.BadParameter("order linkage mismatch for filled_quantity")
-    average_fill_price = _float_or_none(status_payload.get("average_fill_price"))
-    runtime_fill_price = _float_or_none(broker_order.get("average_fill_price"))
-    if average_fill_price is None or average_fill_price <= 0:
-        raise typer.BadParameter("order status must include a positive average fill price")
+    average_fill_price = _validate_positive_float(
+        status_payload.get("average_fill_price"),
+        "order status average_fill_price",
+    )
+    runtime_fill_price_value = broker_order.get("average_fill_price")
+    runtime_fill_price = (
+        None
+        if runtime_fill_price_value is None
+        else _validate_positive_float(
+            runtime_fill_price_value,
+            "runtime order average_fill_price",
+        )
+    )
     if runtime_fill_price is not None and average_fill_price != runtime_fill_price:
         raise typer.BadParameter("order linkage mismatch for average_fill_price")
     return status_payload, list(open_orders)
@@ -832,11 +847,15 @@ def _float_or_none(value: Any) -> float | None:
         return None
 
 
+def _validate_positive_float(value: Any, label: str) -> float:
+    parsed = _float_or_none(value)
+    if parsed is None or not math.isfinite(parsed) or parsed <= 0:
+        raise typer.BadParameter(f"{label} must be finite and positive")
+    return parsed
+
+
 def _validate_observed_price(value: Any) -> float:
-    observed_price = _float_or_none(value)
-    if observed_price is None or not math.isfinite(observed_price) or observed_price <= 0:
-        raise typer.BadParameter("observed_price must be finite and positive")
-    return observed_price
+    return _validate_positive_float(value, "observed_price")
 
 
 def _validate_observed_at(

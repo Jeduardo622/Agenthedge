@@ -615,6 +615,62 @@ def test_catalyst_session_closeout_rejects_non_finite_or_non_positive_observed_p
         paper_catalyst_session_closeout.build_closeout(**kwargs)
 
 
+@pytest.mark.parametrize("invalid_value", [float("nan"), float("inf"), float("-inf")])
+@pytest.mark.parametrize(
+    ("numeric_field", "message"),
+    [
+        ("runtime_fill_price", "runtime audit fill price must be finite and positive"),
+        (
+            "runtime_average_fill_price",
+            "runtime order average_fill_price must be finite and positive",
+        ),
+        (
+            "runtime_filled_quantity",
+            "runtime order filled_quantity must be finite and positive",
+        ),
+        (
+            "order_average_fill_price",
+            "order status average_fill_price must be finite and positive",
+        ),
+        (
+            "order_filled_quantity",
+            "order status filled_quantity must be finite and positive",
+        ),
+    ],
+)
+def test_catalyst_session_closeout_rejects_non_finite_runtime_and_order_evidence(
+    tmp_path: Path,
+    numeric_field: str,
+    message: str,
+    invalid_value: float,
+) -> None:
+    from cli import paper_catalyst_session_closeout
+
+    kwargs = _valid_closeout_kwargs(tmp_path)
+    runtime_fill_price = 737.87
+    runtime_average_fill_price = 737.87
+    runtime_filled_quantity = 41.0
+    if numeric_field == "runtime_fill_price":
+        runtime_fill_price = invalid_value
+    elif numeric_field == "runtime_average_fill_price":
+        runtime_average_fill_price = invalid_value
+    elif numeric_field == "runtime_filled_quantity":
+        runtime_filled_quantity = invalid_value
+    elif numeric_field == "order_average_fill_price":
+        kwargs["order_status"]["average_fill_price"] = invalid_value
+    else:
+        kwargs["order_status"]["filled_quantity"] = invalid_value
+    _seed_runtime(
+        Path(kwargs["runtime_audit"]),
+        fill_price=runtime_fill_price,
+        average_fill_price=runtime_average_fill_price,
+        filled_quantity=runtime_filled_quantity,
+    )
+
+    with pytest.raises(typer.BadParameter, match=message):
+        paper_catalyst_session_closeout.build_closeout(**kwargs)
+
+
 @pytest.mark.parametrize(
     ("observed_at", "message"),
     [
@@ -743,6 +799,9 @@ def _seed_runtime(
     path: Path,
     *,
     broker_status: str = "filled",
+    fill_price: float = 737.87,
+    average_fill_price: float = 737.87,
+    filled_quantity: float = 41.0,
     rejected_trades: list[Any] | None = None,
     non_participating_strategies: list[Any] | None = None,
 ) -> None:
@@ -752,7 +811,7 @@ def _seed_runtime(
             "payload": {
                 "symbol": "SPY",
                 "quantity": 41.0,
-                "price": 737.87,
+                "price": fill_price,
                 "decision_id": "decision-1",
                 "proposal_id": "proposal-1",
                 "director_approval_id": "client-1",
@@ -761,8 +820,8 @@ def _seed_runtime(
                     "client_order_id": "client-1",
                     "status": broker_status,
                     "raw_status": broker_status,
-                    "filled_quantity": 41.0,
-                    "average_fill_price": 737.87,
+                    "filled_quantity": filled_quantity,
+                    "average_fill_price": average_fill_price,
                     "quantity": 41.0,
                     "symbol": "SPY",
                     "side": "buy",
