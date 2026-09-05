@@ -43,7 +43,7 @@ class TTLCache(Generic[T]):
         if not self._enabled:
             return value
         with self._lock:
-            self._prune_locked()
+            self._prune_locked(key)
             self._store[key] = CacheEntry(expires_at=time.time() + self._ttl_seconds, value=value)
         return value
 
@@ -55,9 +55,9 @@ class TTLCache(Generic[T]):
         with self._lock:
             self._store.clear()
 
-    def _prune_locked(self) -> None:
+    def _prune_locked(self, key: str) -> None:
         self._evict_expired_locked()
-        if len(self._store) < self._max_items:
+        if key in self._store or len(self._store) < self._max_items:
             return
         # Remove the stalest entry.
         stalest_key = min(self._store.items(), key=lambda item: item[1].expires_at)[0]
