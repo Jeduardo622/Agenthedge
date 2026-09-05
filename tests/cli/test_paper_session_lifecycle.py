@@ -13,9 +13,72 @@ def test_session_lifecycle_links_daily_artifacts_by_session_id(tmp_path: Path, m
 
     artifact_dir = tmp_path / "audit"
     operator_status_path = artifact_dir / "paper_operator_status_20260619T150000Z.json"
+    provider_readiness_path = artifact_dir / "provider_readiness_20260619T145500Z.json"
     rehearsal_path = artifact_dir / "paper_rollout_rehearsal_20260619T151000Z.json"
     packet_path = artifact_dir / "paper_rollout_packet_20260619T152000Z.json"
 
+    _write_json(
+        provider_readiness_path,
+        {
+            "artifact_type": "provider_readiness",
+            "created_at": "2026-06-19T14:55:00+00:00",
+            "status": "blocked",
+            "read_only": True,
+            "redacted": True,
+            "credential_values_included": False,
+            "offline": True,
+            "dotenv_loaded": False,
+            "network_probes": False,
+            "required_providers": ["alpha_vantage", "finnhub"],
+            "missing_providers": ["finnhub"],
+            "provider_readiness_artifact": str(provider_readiness_path),
+            "providers": {
+                "alpha_vantage": {
+                    "configured": True,
+                    "required_environment": ["ALPHA_VANTAGE_API_KEY"],
+                    "missing_environment": [],
+                },
+                "finnhub": {
+                    "configured": False,
+                    "required_environment": ["FINNHUB_API_KEY"],
+                    "missing_environment": ["FINNHUB_API_KEY"],
+                },
+            },
+        },
+    )
+    later_provider_path = artifact_dir / "provider_readiness_20260619T150500Z.json"
+    _write_json(
+        later_provider_path,
+        {
+            "artifact_type": "provider_readiness",
+            "created_at": "2026-06-19T15:05:00+00:00",
+            "status": "ready",
+            "read_only": True,
+            "redacted": True,
+            "credential_values_included": False,
+            "offline": True,
+            "dotenv_loaded": False,
+            "network_probes": False,
+            "required_providers": ["fred"],
+            "missing_providers": [],
+            "providers": {
+                "fred": {
+                    "configured": True,
+                    "required_environment": ["FRED_API_KEY"],
+                    "missing_environment": [],
+                }
+            },
+            "provider_readiness_artifact": str(later_provider_path),
+        },
+    )
+    _write_json(
+        artifact_dir / "provider_readiness_20260620T145500Z.json",
+        {
+            "artifact_type": "provider_readiness",
+            "created_at": "2026-06-20T14:55:00+00:00",
+            "status": "ready",
+        },
+    )
     _write_json(
         operator_status_path,
         {
@@ -23,6 +86,7 @@ def test_session_lifecycle_links_daily_artifacts_by_session_id(tmp_path: Path, m
             "created_at": "2026-06-19T15:00:00+00:00",
             "status": "passed",
             "read_only": True,
+            "provider_readiness_artifact": str(provider_readiness_path),
             "paper_health": {"status": "passed", "unresolved_failures": 0},
             "last_clean_preflight": {"artifact": str(rehearsal_path), "status": "passed"},
             "canary_state": {"status": "passed", "packet_artifact": str(packet_path)},
@@ -73,6 +137,7 @@ def test_session_lifecycle_links_daily_artifacts_by_session_id(tmp_path: Path, m
     assert report["session_id"] == "paper-20260619"
     assert report["session_date"] == "2026-06-19"
     assert report["status"] == "closed"
+    assert report["provider_readiness_artifact"] == str(provider_readiness_path)
     assert report["lifecycle_artifact"].endswith(
         "paper_session_lifecycle_paper-20260619_20260619T153000Z.json"
     )
@@ -85,6 +150,7 @@ def test_session_lifecycle_links_daily_artifacts_by_session_id(tmp_path: Path, m
     assert stages["readiness"]["session_id"] == "paper-20260619"
     assert stages["readiness"]["status"] == "passed"
     assert stages["readiness"]["artifact"] == str(operator_status_path)
+    assert stages["readiness"]["provider_readiness_artifact"] == str(provider_readiness_path)
     assert stages["run_start"]["artifact"] == str(rehearsal_path)
     assert stages["run_result"]["artifact"] == str(packet_path)
     assert stages["reconciliation"]["status"] == "clean"
@@ -95,6 +161,10 @@ def test_session_lifecycle_links_daily_artifacts_by_session_id(tmp_path: Path, m
     assert "PAPER_SESSION_CLOSED" in markdown
     assert "session_id: paper-20260619" in markdown
     assert f"readiness: passed ({operator_status_path})" in markdown
+    assert f"provider_readiness_artifact: {provider_readiness_path}" in markdown
+    lifecycle_json = Path(report["lifecycle_artifact"]).read_text(encoding="utf-8")
+    assert str(later_provider_path) not in lifecycle_json
+    assert str(later_provider_path) not in markdown
 
 
 def test_session_lifecycle_cli_prints_daily_session_id(tmp_path: Path, monkeypatch) -> None:

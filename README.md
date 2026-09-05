@@ -18,14 +18,16 @@ The project uses a `src/` layout; tests auto-discover via `pytest` with `PYTHONP
 poetry run python -m cli.runtime run-once   # single tick
 poetry run python -m cli.runtime run-loop   # start persistent scheduler (Ctrl+C to stop)
 poetry run python -m cli.runtime health     # bootstrap + emit structured health JSON
-poetry run python -m cli.provider_readiness --required-provider alpha_vantage --required-provider finnhub --raw
+poetry run python -m cli.provider_readiness --required-provider alpha_vantage --required-provider finnhub --artifact-dir storage/audit --raw
 ```
 
 Runtime bootstrap and live-probe commands load `.env` automatically (via `python-dotenv`).
 `provider-readiness` is an offline exception: it reads only the current process environment,
 never loads `.env`, never starts the runtime, never calls a provider, and prints no credential values.
 Repeat `--required-provider` with any explicit subset of `alpha_vantage`, `finnhub`, `fred`,
-and `newsapi`; the command exits nonzero when a required provider is not configured.
+and `newsapi`; the command exits nonzero when a required provider is not configured. Passing
+`--artifact-dir` writes a timestamped, redacted readiness artifact for the paper evidence flow;
+omitting it preserves stdout-only behavior.
 
 Provider health checks now use live lightweight probes (cached by TTL) instead of static `ping()`:
 - `PROVIDER_HEALTH_TTL_SECONDS` (default `300`)
