@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
+from newsapi.utils import stringify_date_param
 
 from data.cache import TTLCache
 from data.config import DataProviderConfig
@@ -10,6 +12,22 @@ from data.providers.alpha_vantage import AlphaVantageProvider
 from data.providers.base import DataProviderError, TransientProviderError
 from data.providers.finnhub import FinnhubProvider
 from data.providers.news import NewsProvider
+
+
+@pytest.mark.parametrize("zone", [None, timezone.utc, timezone(timedelta(hours=-7))])
+def test_news_topic_dates_are_compatible_with_sdk(zone):
+    requested = datetime(2026, 9, 5, 10, 30, 0, 123456, tzinfo=zone)
+    expected_hour = 17 if zone == timezone(timedelta(hours=-7)) else 10
+    expected = f"2026-09-05T{expected_hour:02d}:30:00"
+
+    class Client:
+        def get_everything(self, **kwargs):
+            assert stringify_date_param(kwargs["from_param"]) == expected
+            assert stringify_date_param(kwargs["to"]) == expected
+            return {"status": "ok", "articles": []}
+
+    provider = NewsProvider(_config(), client=Client())
+    assert provider.search_topic("markets", from_datetime=requested, to_datetime=requested) == []
 
 
 class _TimeseriesStub:

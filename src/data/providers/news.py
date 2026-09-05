@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Mapping
 
 try:  # pragma: no cover
@@ -13,6 +13,14 @@ except ImportError:  # pragma: no cover
 from ..cache import TTLCache
 from ..config import DataProviderConfig
 from .base import BaseProvider, DataProviderError, MissingApiKeyError, TransientProviderError
+
+
+def _newsapi_timestamp(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    if value.tzinfo is not None:
+        value = value.astimezone(timezone.utc).replace(tzinfo=None)
+    return value.isoformat(timespec="seconds")
 
 
 class NewsProvider(BaseProvider):
@@ -85,8 +93,8 @@ class NewsProvider(BaseProvider):
                 self._client.get_everything,
                 q=query,
                 language=language,
-                from_param=from_datetime.isoformat() if from_datetime else None,
-                to=to_datetime.isoformat() if to_datetime else None,
+                from_param=_newsapi_timestamp(from_datetime),
+                to=_newsapi_timestamp(to_datetime),
                 page_size=page_size,
                 sort_by="relevancy",
             ),
