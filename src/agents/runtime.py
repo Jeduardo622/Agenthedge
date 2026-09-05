@@ -214,10 +214,10 @@ class AgentRuntime:
         self._release_runtime_lease()
         self.logger.info("agent runtime stopped")
 
-    def run_once(self) -> None:
+    def run_once(self, *, include_provider_health: bool = True) -> None:
         if not self._agents:
             self.bootstrap()
-        self._run_iteration()
+        self._run_iteration(include_provider_health=include_provider_health)
 
     def _run_loop(self) -> None:
         while not self._stop_event.is_set():
@@ -228,7 +228,7 @@ class AgentRuntime:
                 continue
             time.sleep(self.config.tick_interval_seconds)
 
-    def _run_iteration(self) -> None:
+    def _run_iteration(self, *, include_provider_health: bool = True) -> None:
         self._refresh_acl_policy()
         if not self._renew_runtime_lease():
             self._engage_kill_switch(
@@ -265,7 +265,8 @@ class AgentRuntime:
         self._check_heartbeats()
         self._tick_count += 1
         self._state_sink.heartbeat(status="running")
-        self._state_sink.record_provider_health(self.ingestion.providers_health())
+        if include_provider_health:
+            self._state_sink.record_provider_health(self.ingestion.providers_health())
         self._bus_checkpoint = self._resolve_bus_checkpoint()
         self._record_reliability_metrics(target_event_id=target_event_id)
         self._persist_checkpoint()
@@ -285,7 +286,7 @@ class AgentRuntime:
             },
         )
 
-    def health(self) -> Mapping[str, object]:
+    def health(self, *, include_providers: bool = True) -> Mapping[str, object]:
         return {
             "agents": [agent.name for agent in self._agents],
             "tick_count": self._tick_count,
@@ -293,7 +294,7 @@ class AgentRuntime:
             "bus_subscriptions": self.bus.list_subscriptions(),
             "portfolio": self.portfolio_store.snapshot_dict(),
             "pipeline": self._agent_names,
-            "providers": self.ingestion.providers_health(),
+            "providers": self.ingestion.providers_health() if include_providers else {},
             "alerts": {
                 "enabled": self.alert_notifier is not None,
                 "min_severity": self.alert_notifier.min_severity if self.alert_notifier else None,

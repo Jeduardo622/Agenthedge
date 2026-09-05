@@ -31,6 +31,49 @@ class FakeIngestion:
         return {"alpha_vantage": {"available": True, "rate_limit_per_minute": 5}}
 
 
+def test_health_can_skip_network_probes(tmp_path, monkeypatch):
+    ingestion = FakeIngestion()
+
+    def forbidden_probe():
+        pytest.fail("local runtime snapshot must not contact providers")
+
+    monkeypatch.setattr(ingestion, "providers_health", forbidden_probe)
+    runtime = AgentRuntime(
+        registry=AgentRegistry(),
+        ingestion=ingestion,
+        config=AgentRuntimeConfig(),
+        audit_sink=JsonlAuditSink(tmp_path / "audit.jsonl"),
+        portfolio_store=PortfolioStore(tmp_path / "portfolio.json"),
+    )
+    try:
+        assert runtime.health(include_providers=False)["providers"] == {}
+    finally:
+        runtime.stop()
+
+
+def test_tick_can_defer_provider_health_to_dashboard_worker(tmp_path, monkeypatch):
+    ingestion = FakeIngestion()
+
+    def forbidden_probe():
+        pytest.fail("dashboard tick must defer health probes")
+
+    monkeypatch.setattr(ingestion, "providers_health", forbidden_probe)
+    registry = AgentRegistry()
+    registry.register("idle", IdleAgent)
+    runtime = AgentRuntime(
+        registry=registry,
+        ingestion=ingestion,
+        config=AgentRuntimeConfig(),
+        audit_sink=JsonlAuditSink(tmp_path / "audit.jsonl"),
+        portfolio_store=PortfolioStore(tmp_path / "portfolio.json"),
+    )
+    try:
+        runtime.run_once(include_provider_health=False)
+        assert runtime.health(include_providers=False)["tick_count"] == 1
+    finally:
+        runtime.stop()
+
+
 class FailingAgent(BaseAgent):
     def tick(self) -> None:
         raise RuntimeError("boom")
