@@ -284,6 +284,26 @@ operator handoff checklist:
 - Before handoff, run `poetry run python -m cli.scheduler run-once paper_broker_health_history` and record the generated `storage/audit/paper_broker_health_history_<timestamp>.json` path.
 - Treat unresolved failures in the history report as operator follow-up for the next paper run, not a promotion gate.
 
+### Offline Provider Readiness Evidence
+Before generating the daily paper operator status, record credential-presence evidence for the
+providers required by that paper session:
+
+```bash
+poetry run python -m cli.provider_readiness \
+  --required-provider alpha_vantage \
+  --required-provider finnhub \
+  --required-provider fred \
+  --required-provider newsapi \
+  --artifact-dir storage/audit \
+  --raw
+```
+
+The command reads only the current process environment and writes
+`storage/audit/provider_readiness_<timestamp>.json`. The artifact contains provider and environment
+variable names plus presence booleans, but never credential values. It does not load `.env`, start
+the runtime, or contact providers. A blocked result is still written for operator evidence and exits
+nonzero; it does not change trading behavior or automatically gate a paper session.
+
 ### Paper Operator Status
 Use `cli.paper_operator_status` as the daily read-only operator summary after the scheduler has produced paper broker health history and after any preflight or packet artifacts exist. The command does not contact the broker, submit orders, cancel orders, or update scheduler configuration. It reads existing `storage/audit` artifacts and writes:
 - `storage/audit/paper_operator_status_<timestamp>.json`
@@ -300,6 +320,9 @@ Expected output when current artifacts need operator attention:
 - `unresolved_failures: <count>`
 
 Operator interpretation:
+- `provider_readiness` links and summarizes the latest valid same-day redacted
+  `provider_readiness_<timestamp>.json`; missing or blocked provider evidence does not alter the
+  operator status calculation.
 - `paper_health` summarizes the latest `paper_broker_health_history_<timestamp>.json`, including unresolved failures and the latest health artifact.
 - `last_clean_preflight` points to the latest passing `paper_rollout_rehearsal*_*.json` with zero open canary orders before run.
 - `canary_state` summarizes the latest packet's canary acceptance, cancellation, post-cancel status, and cleanup count.
@@ -320,7 +343,9 @@ The command writes:
 - `storage/audit/paper_session_lifecycle_paper-YYYYMMDD_<timestamp>.md`
 
 Lifecycle stage definitions:
-- `readiness`: latest `paper_operator_status_<timestamp>.json` for the session date.
+- `readiness`: latest `paper_operator_status_<timestamp>.json` for the session date, with the
+  validated `provider_readiness_<timestamp>.json` link captured by that operator snapshot when
+  present.
 - `run_start`: latest `paper_rollout_rehearsal_<timestamp>.json` for the session date, including preflight state.
 - `run_result`: latest `paper_rollout_packet_<timestamp>.json` for the session date.
 - `reconciliation`: reconciliation status from the operator status report when present, otherwise the packet reconciliation summary.
