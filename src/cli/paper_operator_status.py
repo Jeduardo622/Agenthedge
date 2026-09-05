@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 import typer
 
+from cli.provider_readiness import is_safe_provider_readiness_artifact
 from observability.state import get_observability_state
 
 app = typer.Typer(
@@ -25,9 +26,18 @@ def build_operator_status(
 ) -> dict[str, Any]:
     artifact_root = Path(artifact_dir)
     artifact_root.mkdir(parents=True, exist_ok=True)
-    current_time = now or datetime.now(timezone.utc)
+    current_time = _as_utc(now or datetime.now(timezone.utc))
 
     health_history = _latest_payload(artifact_root, "paper_broker_health_history_*.json")
+    provider_readiness_payload = _latest_payload(
+        artifact_root,
+        "provider_readiness_*.json",
+        artifact_type="provider_readiness",
+        target_date=current_time.date(),
+        not_after=current_time,
+        validator=is_safe_provider_readiness_artifact,
+    )
+    provider_readiness = _provider_readiness(provider_readiness_payload)
     last_clean_preflight = _last_clean_preflight(artifact_root)
     latest_packet = _latest_payload(artifact_root, "paper_rollout_packet_*.json")
     scheduler_jobs = _scheduler_jobs(
@@ -52,6 +62,8 @@ def build_operator_status(
         "operator_status_artifact": str(json_path),
         "operator_status_markdown_artifact": str(markdown_path),
         "artifact_dir": str(artifact_root),
+        "provider_readiness_artifact": provider_readiness.get("artifact"),
+        "provider_readiness": provider_readiness,
         "paper_health": paper_health,
         "last_clean_preflight": last_clean_preflight,
         "canary_state": canary_state,
@@ -63,6 +75,32 @@ def build_operator_status(
     json_path.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
     markdown_path.write_text(markdown, encoding="utf-8")
     return report
+
+
+def _provider_readiness(payload: Mapping[str, Any] | None) -> dict[str, Any]:
+    if payload is None or payload.get("artifact_type") != "provider_readiness":
+        return {
+            "status": "missing",
+            "artifact": None,
+            "created_at": None,
+            "redacted": None,
+            "offline": None,
+            "dotenv_loaded": None,
+            "network_probes": None,
+            "required_providers": [],
+            "missing_providers": [],
+        }
+    return {
+        "status": str(payload.get("status") or "unknown"),
+        "artifact": payload.get("_artifact_path"),
+        "created_at": payload.get("created_at"),
+        "redacted": payload.get("redacted"),
+        "offline": payload.get("offline"),
+        "dotenv_loaded": payload.get("dotenv_loaded"),
+        "network_probes": payload.get("network_probes"),
+        "required_providers": list(payload.get("required_providers") or []),
+        "missing_providers": list(payload.get("missing_providers") or []),
+    }
 
 
 def _paper_health(health_history: Mapping[str, Any] | None) -> dict[str, Any]:
@@ -269,14 +307,30 @@ def _overall_status(
     return "passed"
 
 
-def _latest_payload(artifact_root: Path, pattern: str) -> dict[str, Any] | None:
+def _latest_payload(
+    artifact_root: Path,
+    pattern: str,
+    *,
+    artifact_type: str | None = None,
+    target_date: date | None = None,
+    not_after: datetime | None = None,
+    validator: Callable[[Mapping[str, Any]], bool] | None = None,
+) -> dict[str, Any] | None:
     candidates: list[tuple[datetime, Path, dict[str, Any]]] = []
     for path in artifact_root.glob(pattern):
         payload = _load_json(path)
+        if artifact_type is not None and payload.get("artifact_type") != artifact_type:
+            continue
         created_at = _parse_created_at(payload.get("created_at"))
         if created_at is None:
             continue
         payload["_artifact_path"] = str(path)
+        if target_date is not None and created_at.date() != target_date:
+            continue
+        if not_after is not None and created_at > not_after:
+            continue
+        if validator is not None and not validator(payload):
+            continue
         candidates.append((created_at, path, payload))
     if not candidates:
         return None
@@ -298,6 +352,7 @@ def _render_markdown(report: Mapping[str, Any]) -> str:
     canary = _mapping(report.get("canary_state"))
     reconciliation = _mapping(report.get("reconciliation_state"))
     scheduler = _mapping(report.get("scheduler_jobs"))
+    provider_readiness = _mapping(report.get("provider_readiness"))
     return "\n".join(
         [
             label,
@@ -311,6 +366,12 @@ def _render_markdown(report: Mapping[str, Any]) -> str:
             f"operator_status_artifact: {report.get('operator_status_artifact')}",
             "operator_status_markdown_artifact: "
             f"{report.get('operator_status_markdown_artifact')}",
+            "",
+            "### Provider Readiness",
+            f"provider_readiness_status: {provider_readiness.get('status')}",
+            f"provider_readiness_artifact: {report.get('provider_readiness_artifact')}",
+            f"provider_readiness_redacted: {provider_readiness.get('redacted')}",
+            f"provider_readiness_offline: {provider_readiness.get('offline')}",
             "",
             "### Paper Health",
             f"health_status: {health.get('status')}",
@@ -358,6 +419,7 @@ def _print_handoff(report: Mapping[str, Any]) -> None:
     typer.echo(
         "operator_status_markdown_artifact: " f"{report['operator_status_markdown_artifact']}"
     )
+    typer.echo(f"provider_readiness_artifact: {report.get('provider_readiness_artifact')}")
     typer.echo(f"health_status: {health.get('status')}")
     typer.echo(f"unresolved_failures: {health.get('unresolved_failures')}")
     typer.echo(f"operator_next_action: {report.get('operator_next_action')}")
@@ -382,6 +444,12 @@ def _parse_created_at(value: Any) -> datetime | None:
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
+
+
+def _as_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
 
 
 def _mapping(value: Any = None) -> Mapping[str, Any]:

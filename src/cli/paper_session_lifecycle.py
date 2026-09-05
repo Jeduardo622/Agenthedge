@@ -5,9 +5,11 @@ from __future__ import annotations
 import json
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 import typer
+
+from cli.provider_readiness import is_safe_provider_readiness_artifact
 
 app = typer.Typer(
     help="Build a read-only paper session lifecycle report from audit artifacts",
@@ -30,6 +32,12 @@ def build_session_lifecycle(
     operator_status = _latest_payload_for_date(
         artifact_root, "paper_operator_status_*.json", "paper_operator_status", target_date
     )
+    provider_readiness = _provider_readiness_for_operator(
+        artifact_root=artifact_root,
+        operator_status=operator_status,
+        target_date=target_date,
+        current_time=current_time,
+    )
     rehearsal = _latest_payload_for_date(
         artifact_root, "paper_rollout_rehearsal_*.json", "paper_rollout_rehearsal", target_date
     )
@@ -38,7 +46,7 @@ def build_session_lifecycle(
     )
 
     stages = [
-        _readiness_stage(session_id, operator_status),
+        _readiness_stage(session_id, operator_status, provider_readiness),
         _run_start_stage(session_id, rehearsal),
         _run_result_stage(session_id, packet),
         _reconciliation_stage(session_id, operator_status, packet),
@@ -57,6 +65,7 @@ def build_session_lifecycle(
         "read_only": True,
         "lifecycle_artifact": str(json_path),
         "lifecycle_markdown_artifact": str(markdown_path),
+        "provider_readiness_artifact": _mapping(provider_readiness).get("_artifact_path"),
         "stages": stages,
     }
     markdown = _render_markdown(report)
@@ -66,9 +75,20 @@ def build_session_lifecycle(
     return report
 
 
-def _readiness_stage(session_id: str, operator_status: Mapping[str, Any] | None) -> dict[str, Any]:
+def _readiness_stage(
+    session_id: str,
+    operator_status: Mapping[str, Any] | None,
+    provider_readiness: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    provider_artifact = _mapping(provider_readiness).get("_artifact_path")
     if operator_status is None:
-        return _stage(session_id, "readiness", "missing", None)
+        return _stage(
+            session_id,
+            "readiness",
+            "missing",
+            None,
+            provider_readiness_artifact=provider_artifact,
+        )
     paper_health = _mapping(operator_status.get("paper_health"))
     return _stage(
         session_id,
@@ -77,6 +97,7 @@ def _readiness_stage(session_id: str, operator_status: Mapping[str, Any] | None)
         operator_status.get("_artifact_path"),
         created_at=operator_status.get("created_at"),
         unresolved_failures=paper_health.get("unresolved_failures"),
+        provider_readiness_artifact=provider_artifact,
     )
 
 
@@ -193,7 +214,13 @@ def _session_status(stages: Sequence[Mapping[str, Any]]) -> str:
 
 
 def _latest_payload_for_date(
-    artifact_root: Path, pattern: str, artifact_type: str, target_date: date
+    artifact_root: Path,
+    pattern: str,
+    artifact_type: str,
+    target_date: date,
+    *,
+    not_after: datetime | None = None,
+    validator: Callable[[Mapping[str, Any]], bool] | None = None,
 ) -> dict[str, Any] | None:
     candidates: list[tuple[datetime, dict[str, Any]]] = []
     for path in artifact_root.glob(pattern):
@@ -206,10 +233,70 @@ def _latest_payload_for_date(
         if created_at is None or created_at.date() != target_date:
             continue
         payload["_artifact_path"] = str(path)
+        if not_after is not None and created_at > not_after:
+            continue
+        if validator is not None and not validator(payload):
+            continue
         candidates.append((created_at, payload))
     if not candidates:
         return None
     return sorted(candidates, key=lambda item: item[0])[-1][1]
+
+
+def _provider_readiness_for_operator(
+    *,
+    artifact_root: Path,
+    operator_status: Mapping[str, Any] | None,
+    target_date: date,
+    current_time: datetime,
+) -> dict[str, Any] | None:
+    cutoff = _as_utc(current_time)
+    operator_created_at = _parse_created_at(_mapping(operator_status).get("created_at"))
+    if operator_created_at is not None and operator_created_at < cutoff:
+        cutoff = operator_created_at
+
+    linked_ref = _mapping(operator_status).get("provider_readiness_artifact")
+    linked_payload = _load_linked_provider_readiness(artifact_root, linked_ref)
+    linked_created_at = _parse_created_at(_mapping(linked_payload).get("created_at"))
+    if (
+        linked_payload is not None
+        and linked_created_at is not None
+        and linked_created_at.date() == target_date
+        and linked_created_at <= cutoff
+    ):
+        return linked_payload
+
+    return _latest_payload_for_date(
+        artifact_root,
+        "provider_readiness_*.json",
+        "provider_readiness",
+        target_date,
+        not_after=cutoff,
+        validator=is_safe_provider_readiness_artifact,
+    )
+
+
+def _load_linked_provider_readiness(
+    artifact_root: Path,
+    artifact_ref: Any,
+) -> dict[str, Any] | None:
+    if not isinstance(artifact_ref, str) or not artifact_ref:
+        return None
+    linked_path = Path(artifact_ref)
+    resolved_path = linked_path.resolve()
+    if not resolved_path.is_relative_to(artifact_root.resolve()):
+        return None
+    payload = _load_json(resolved_path)
+    payload["_artifact_path"] = str(linked_path)
+    if not is_safe_provider_readiness_artifact(payload):
+        return None
+    return payload
+
+
+def _as_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
 
 
 def _normalize_stage_status(value: Any) -> str:
@@ -240,6 +327,7 @@ def _render_markdown(report: Mapping[str, Any]) -> str:
         f"read_only: {report.get('read_only')}",
         f"lifecycle_artifact: {report.get('lifecycle_artifact')}",
         f"lifecycle_markdown_artifact: {report.get('lifecycle_markdown_artifact')}",
+        f"provider_readiness_artifact: {report.get('provider_readiness_artifact')}",
         "",
         "### Stages",
     ]
@@ -265,6 +353,7 @@ def _print_handoff(report: Mapping[str, Any]) -> None:
     typer.echo(f"session_id: {report['session_id']}")
     typer.echo(f"lifecycle_artifact: {report['lifecycle_artifact']}")
     typer.echo(f"lifecycle_markdown_artifact: {report['lifecycle_markdown_artifact']}")
+    typer.echo(f"provider_readiness_artifact: {report.get('provider_readiness_artifact')}")
     typer.echo(f"status: {report['status']}")
 
 
