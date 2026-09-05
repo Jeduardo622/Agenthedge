@@ -14,6 +14,25 @@ The project uses a `src/` layout; tests auto-discover via `pytest` with `PYTHONP
 
 ## Runtime CLI
 
+### Local operator UI
+
+Run `poetry run python -m cli.dashboard`, then open <http://127.0.0.1:8501>.
+Click **Start simulation** to run the agent pipeline with configured live data providers
+and simulated execution. **Stop simulation** waits for the current tick to finish;
+the UI continues refreshing every two seconds while a tick or provider probe is pending.
+The session survives browser refreshes and is shared by tabs connected to this local server.
+Restarting the server ends the session. Start/stop does not reset the simulated portfolio.
+
+The launcher reads the repository `.env` without changing it, forces simulated execution,
+uses the in-memory backend, disables alert webhooks, and stores its portfolio/audit data
+under `.cache/dashboard/`. It binds the UI to loopback only. Use `--port` and
+`--metrics-port` if the default ports (8501 and 9464) are occupied.
+Simulation ticks pause for 60 seconds between completed cycles. Alpha Vantage gets one
+attempt per operation with no retry backoff; its existing rate limiter and data fallbacks
+remain active, avoiding lengthy nested retries when the free-tier quota is exhausted.
+Provider outages and rate limits remain visible limitations; running does not imply all
+providers are healthy. The dashboard never offers a live or paper-broker trading switch.
+
 ```
 poetry run python -m cli.runtime run-once   # single tick
 poetry run python -m cli.runtime run-loop   # start persistent scheduler (Ctrl+C to stop)
