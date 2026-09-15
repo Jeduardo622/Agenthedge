@@ -1450,6 +1450,144 @@ def test_alpaca_paper_adapter_normalizes_versioned_base_url(
     assert called_urls == ["https://paper-api.alpaca.markets/v2/orders"]
 
 
+def test_alpaca_requests_never_follow_redirects_with_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: List[Dict[str, object]] = []
+
+    class Response:
+        status_code = 200
+        text = ""
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> Dict[str, object]:
+            return {
+                "id": "paper-1",
+                "client_order_id": "client-1",
+                "symbol": "SPY",
+                "qty": "1",
+                "side": "buy",
+                "status": "accepted",
+                "filled_qty": "0",
+            }
+
+    def record_request(url: str, **kwargs: object) -> Response:
+        calls.append({"url": url, **kwargs})
+        return Response()
+
+    monkeypatch.setattr("portfolio.broker.requests.get", record_request)
+    monkeypatch.setattr("portfolio.broker.requests.post", record_request)
+    monkeypatch.setattr("portfolio.broker.requests.delete", record_request)
+    adapter = AlpacaPaperBrokerAdapter(api_key_id="fake", api_secret_key="fake")
+
+    adapter.get_account()
+    adapter.submit_order(
+        BrokerOrder(
+            client_order_id="client-1",
+            symbol="SPY",
+            quantity=1,
+            side="buy",
+        )
+    )
+    adapter.cancel_order("paper-1")
+
+    assert len(calls) == 4
+    assert all(call["allow_redirects"] is False for call in calls)
+
+
+@pytest.mark.parametrize(
+    ("raw_status", "expected_status"),
+    [
+        ("new", "accepted"),
+        ("pending_new", "accepted"),
+        ("accepted_for_bidding", "accepted"),
+        ("pending_replace", "accepted"),
+        ("pending_cancel", "pending_cancel"),
+        ("stopped", "unknown"),
+        ("suspended", "unknown"),
+        ("unexpected_broker_state", "unknown"),
+        (None, "unknown"),
+    ],
+)
+def test_alpaca_status_mapping_preserves_pending_and_unknown_states(
+    monkeypatch: pytest.MonkeyPatch,
+    raw_status: str | None,
+    expected_status: str,
+) -> None:
+    class Response:
+        status_code = 200
+        text = ""
+
+        def json(self) -> Dict[str, object]:
+            return {
+                "id": "paper-1",
+                "client_order_id": "client-1",
+                "symbol": "SPY",
+                "qty": "1",
+                "side": "buy",
+                "status": raw_status,
+                "filled_qty": "0",
+            }
+
+    monkeypatch.setattr("portfolio.broker.requests.get", lambda *args, **kwargs: Response())
+    adapter = AlpacaPaperBrokerAdapter(api_key_id="fake", api_secret_key="fake")
+
+    status = adapter.get_order_status("paper-1")
+
+    assert status.status == expected_status
+    assert status.raw_status == (raw_status.lower() if raw_status else "unknown")
+
+
+@pytest.mark.parametrize(
+    ("raw_status", "expected_status"),
+    [("pending_cancel", "pending_cancel"), ("canceled", "canceled")],
+)
+def test_alpaca_cancel_returns_broker_readback_instead_of_fabricated_terminal_status(
+    monkeypatch: pytest.MonkeyPatch,
+    raw_status: str,
+    expected_status: str,
+) -> None:
+    class DeleteResponse:
+        status_code = 204
+        text = ""
+
+    class ReadbackResponse:
+        status_code = 200
+        text = ""
+
+        def json(self) -> Dict[str, object]:
+            return {
+                "id": "paper-1",
+                "client_order_id": "client-1",
+                "symbol": "SPY",
+                "qty": "2",
+                "side": "sell",
+                "status": raw_status,
+                "filled_qty": "1",
+                "filled_avg_price": "501.25",
+            }
+
+    monkeypatch.setattr(
+        "portfolio.broker.requests.delete", lambda *args, **kwargs: DeleteResponse()
+    )
+    monkeypatch.setattr("portfolio.broker.requests.get", lambda *args, **kwargs: ReadbackResponse())
+    adapter = AlpacaPaperBrokerAdapter(api_key_id="fake", api_secret_key="fake")
+
+    status = adapter.cancel_order("paper-1")
+
+    assert status.broker_order_id == "paper-1"
+    assert status.client_order_id == "client-1"
+    assert status.symbol == "SPY"
+    assert status.quantity == 2
+    assert status.side == "sell"
+    assert status.status == expected_status
+    assert status.filled_quantity == 1
+    assert status.average_fill_price == 501.25
+    assert status.raw_status == raw_status
+
+
 def test_alpaca_paper_adapter_retries_safe_account_reads(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

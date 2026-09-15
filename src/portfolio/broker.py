@@ -7,6 +7,7 @@ import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Literal, Mapping, Protocol
+from urllib.parse import urlsplit
 
 import requests
 
@@ -20,6 +21,7 @@ OrderStatus = Literal[
     "rejected",
     "canceled",
     "pending_cancel",
+    "unknown",
 ]
 
 
@@ -289,11 +291,11 @@ class AlpacaPaperBrokerAdapter:
             raise ValueError(
                 "Alpaca paper broker requires ALPACA_API_KEY_ID and ALPACA_API_SECRET_KEY"
             )
-        self._base_url = base_url.rstrip("/")
-        if self._base_url.endswith("/v2"):
-            self._base_url = self._base_url[: -len("/v2")]
-        if "paper-api.alpaca.markets" not in self._base_url:
-            raise ValueError("AlpacaPaperBrokerAdapter only accepts the Alpaca paper base URL")
+        self._base_url = _normalize_alpaca_base_url(
+            base_url,
+            expected_host="paper-api.alpaca.markets",
+            label="paper",
+        )
         self._timeout_seconds = timeout_seconds
         self._safe_read_retry_attempts = max(1, safe_read_retry_attempts)
         self._safe_read_retry_delay_seconds = max(0.0, safe_read_retry_delay_seconds)
@@ -404,6 +406,7 @@ class AlpacaPaperBrokerAdapter:
                 json=payload,
                 headers=self._headers,
                 timeout=self._timeout_seconds,
+                allow_redirects=False,
             )
         except requests.exceptions.Timeout:
             recovered = self.get_order_by_client_order_id(order.client_order_id)
@@ -423,17 +426,10 @@ class AlpacaPaperBrokerAdapter:
             f"{self._base_url}/v2/orders/{broker_order_id}",
             headers=self._headers,
             timeout=self._timeout_seconds,
+            allow_redirects=False,
         )
         if response.status_code in {200, 204}:
-            return BrokerOrderStatus(
-                broker_order_id=broker_order_id,
-                client_order_id="unknown",
-                symbol="UNKNOWN",
-                quantity=0.0,
-                side="buy",
-                status="canceled",
-                raw_status=str(response.status_code),
-            )
+            return self.get_order_status(broker_order_id)
         return self._status_from_response(response)
 
     def get_order_status(self, broker_order_id: str) -> BrokerOrderStatus:
@@ -464,6 +460,7 @@ class AlpacaPaperBrokerAdapter:
         return _compare_positions(broker_positions, portfolio_positions)
 
     def _safe_get(self, url: str, **kwargs: Any) -> requests.Response:
+        kwargs["allow_redirects"] = False
         return self._request_with_retries(requests.get, url, **kwargs)
 
     def _request_with_retries(
@@ -501,7 +498,7 @@ class AlpacaPaperBrokerAdapter:
         return self._status_from_payload(payload)
 
     def _status_from_payload(self, payload: Mapping[str, Any]) -> BrokerOrderStatus:
-        raw_status = str(payload.get("status") or "accepted").lower()
+        raw_status = str(payload.get("status") or "unknown").lower()
         status = _normalize_status(raw_status)
         return BrokerOrderStatus(
             broker_order_id=str(payload.get("id") or "unknown"),
@@ -537,11 +534,11 @@ class AlpacaLiveBrokerAdapter(AlpacaPaperBrokerAdapter):
             raise ValueError(
                 "Alpaca live broker requires ALPACA_API_KEY_ID and ALPACA_API_SECRET_KEY"
             )
-        normalized_base_url = base_url.rstrip("/")
-        if normalized_base_url.endswith("/v2"):
-            normalized_base_url = normalized_base_url[: -len("/v2")]
-        if normalized_base_url != "https://api.alpaca.markets":
-            raise ValueError("ALPACA_LIVE_BASE_URL must be https://api.alpaca.markets")
+        normalized_base_url = _normalize_alpaca_base_url(
+            base_url,
+            expected_host="api.alpaca.markets",
+            label="live",
+        )
         self._base_url = normalized_base_url
         self._timeout_seconds = timeout_seconds
         self._safe_read_retry_attempts = max(1, safe_read_retry_attempts)
@@ -586,6 +583,28 @@ def _normalize_side(value: object) -> OrderSide:
     return "sell" if isinstance(value, str) and value.lower() == "sell" else "buy"
 
 
+def _normalize_alpaca_base_url(base_url: str, *, expected_host: str, label: str) -> str:
+    setting = "ALPACA_LIVE_BASE_URL: " if label == "live" else ""
+    error = f"{setting}Alpaca {label} base URL must use the exact HTTPS Alpaca origin"
+    try:
+        parsed = urlsplit(base_url)
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError(error) from exc
+    if (
+        parsed.scheme.lower() != "https"
+        or parsed.hostname != expected_host
+        or parsed.username is not None
+        or parsed.password is not None
+        or port not in {None, 443}
+        or parsed.path not in {"", "/", "/v2", "/v2/"}
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError(error)
+    return f"https://{expected_host}"
+
+
 def _normalize_status(value: str) -> OrderStatus:
     if value == "filled":
         return "filled"
@@ -593,11 +612,13 @@ def _normalize_status(value: str) -> OrderStatus:
         return "partially_filled"
     if value in {"canceled", "expired"}:
         return "canceled"
-    if value in {"rejected", "stopped", "suspended"}:
+    if value == "rejected":
         return "rejected"
     if value == "pending_cancel":
         return "pending_cancel"
-    return "accepted"
+    if value in {"new", "accepted", "pending_new", "accepted_for_bidding", "pending_replace"}:
+        return "accepted"
+    return "unknown"
 
 
 def _compare_positions(
