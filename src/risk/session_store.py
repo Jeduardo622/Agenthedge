@@ -17,6 +17,7 @@ from ops.calendar import USTradingCalendar
 from ops.release_gate import ReleaseIdentity
 from portfolio.accounting import as_decimal
 from portfolio.journal import PostgresJournal, RecoveryRequired, _state
+from portfolio.paper_mandate import PaperMandate
 from risk.evaluator import MarketRiskInputs
 from risk.policy import RiskPolicy
 from risk.session import (
@@ -53,6 +54,8 @@ class SessionObservation:
     checkpoint: int
     command_id: str | None
     reason: str | None
+    experiment: SessionRiskDecision | None = None
+    experiment_warning: bool = False
 
 
 @dataclass(frozen=True)
@@ -89,6 +92,7 @@ class PostgresSessionRisk:
         window_sessions: int,
         max_drawdown: Decimal,
         control_timeout: timedelta = timedelta(seconds=30),
+        paper_mandate: PaperMandate | None = None,
     ) -> None:
         if not account_id.strip() or mode not in {"paper_broker", "live"}:
             raise ValueError("explicit broker account and mode required")
@@ -102,6 +106,13 @@ class PostgresSessionRisk:
         self.policy, self.max_mark_age, self.boundary_grace = policy, max_mark_age, boundary_grace
         self.window_sessions, self.max_drawdown = window_sessions, as_decimal(max_drawdown)
         self.control_timeout = control_timeout
+        if paper_mandate is not None and (
+            type(paper_mandate) is not PaperMandate
+            or mode != "paper_broker"
+            or paper_mandate.account_id != account_id
+        ):
+            raise ValueError("paper session mandate namespace mismatch")
+        self.paper_mandate = paper_mandate
 
     @property
     def control_hash(self) -> str:
@@ -114,6 +125,11 @@ class PostgresSessionRisk:
                     "window_sessions": self.window_sessions,
                     "max_drawdown": self.max_drawdown,
                     "control_timeout": self.control_timeout.total_seconds(),
+                    **(
+                        {"paper_mandate": self.paper_mandate.content_hash}
+                        if self.paper_mandate is not None
+                        else {}
+                    ),
                 }
             ).encode()
         ).hexdigest()
@@ -158,7 +174,11 @@ class PostgresSessionRisk:
                         raise ValueError("opening processing exceeded boundary grace")
                 if result.decision.action != "none" and command is None:
                     command = "session-risk:" + result.decision.state.session_id
-                    reason = "session_risk_limit"
+                    reason = (
+                        "paper_experiment_loss_limit"
+                        if result.experiment is not None and result.experiment.action != "none"
+                        else "session_risk_limit"
+                    )
                     cur.execute(
                         "UPDATE ah_execution_accounts SET risk_blocked=TRUE,halt_command_id=%s,"
                         "halt_reason=%s,halt_deadline=%s,halt_state='HALTING' "
@@ -318,6 +338,22 @@ class PostgresSessionRisk:
         )
         if validated != marks or decision.state != state:
             raise RecoveryRequired("persisted session decision does not reproduce")
+        experiment = None
+        if self.paper_mandate is not None:
+            raw = _mapping(data["paper_experiment"])
+            if (
+                data.get("paper_mandate_hash") != self.paper_mandate.content_hash
+                or raw["mandate_hash"] != self.paper_mandate.content_hash
+                or raw["checkpoint"] != data["checkpoint"]
+            ):
+                raise RecoveryRequired("persisted experiment identity mismatch")
+            experiment, _ = self._decode_experiment(raw)
+            if experiment.state.session_id != state.session_id:
+                raise RecoveryRequired("experiment session differs from account")
+            if self._combine(decision, experiment) != decision:
+                raise RecoveryRequired("experiment loss latch missing from account")
+        elif "paper_experiment" in data or "paper_mandate_hash" in data:
+            raise RecoveryRequired("paper mandate cannot be removed")
         return SessionObservation(
             decision,
             marks,
@@ -325,7 +361,99 @@ class PostgresSessionRisk:
             int(data["checkpoint"]),
             data["command_id"],
             data["reason"],
+            experiment,
+            experiment is not None and experiment.return_fraction <= Decimal("-.01"),
         )
+
+    def _experiment_policy(self) -> RiskPolicy:
+        return replace(
+            self.policy,
+            session_loss_pause_fraction=Decimal(".02"),
+            hard_halt_loss_fraction=Decimal(".05"),
+        )
+
+    @staticmethod
+    def _combine(
+        account: SessionRiskDecision, experiment: SessionRiskDecision
+    ) -> SessionRiskDecision:
+        halted = account.state.halted or experiment.state.halted
+        paused = account.state.paused or experiment.state.paused or halted
+        return replace(
+            account,
+            state=replace(account.state, halted=halted, paused=paused),
+            action="halt" if halted else "pause" if paused else "none",
+        )
+
+    def _decode_experiment(
+        self, data: dict[str, Any]
+    ) -> tuple[SessionRiskDecision, tuple[SessionIndexMark, ...]]:
+        state = SessionRiskState(**data["state"])
+        marks = tuple(SessionIndexMark(**item) for item in data["marks"])
+        if not marks or marks[-1].session_id != state.session_id or state.external_flows != 0:
+            raise RecoveryRequired("invalid experiment session baseline")
+        decision, validated = assess_session_controls(
+            state,
+            marks[-1].equity,
+            policy=self._experiment_policy(),
+            marks=marks,
+            opening_index=marks[-1].opening_index,
+            window_sessions=self.window_sessions,
+            max_drawdown=self.max_drawdown,
+        )
+        if validated != marks or decision.state != state:
+            raise RecoveryRequired("persisted experiment decision does not reproduce")
+        return decision, marks
+
+    def _next_experiment(
+        self,
+        cur: CursorLike,
+        saved: Any,
+        market: MarketRiskInputs,
+        now: datetime,
+        session_id: str,
+        checkpoint: int,
+    ) -> tuple[dict[str, Any], SessionRiskDecision]:
+        assert self.paper_mandate is not None
+        projection = self.journal._paper_experiment_state(
+            cur, self.account_id, self.mode, self.paper_mandate
+        )
+        equity = session_equity(projection, market, now=now, max_mark_age=self.max_mark_age)
+        previous, marks = (
+            (None, ())
+            if saved is None or "state" not in saved
+            else (self._decode_experiment(_mapping(saved["paper_experiment"])))
+        )
+        if previous is None or previous.state.session_id != session_id:
+            state = open_session(
+                session_id,
+                equity,
+                valued_at=market.as_of,
+                now=now,
+                boundary_grace=self.boundary_grace,
+                prior=previous.state if previous else None,
+            )
+            opening_index = Decimal(1)
+            if marks:
+                if marks[-1].equity <= 0:
+                    raise RecoveryRequired("prior insolvent experiment requires recovery")
+                opening_index = marks[-1].index * equity / marks[-1].equity
+        else:
+            state, opening_index = previous.state, marks[-1].opening_index
+        decision, marks = assess_session_controls(
+            state,
+            equity,
+            policy=self._experiment_policy(),
+            marks=marks,
+            opening_index=opening_index,
+            window_sessions=self.window_sessions,
+            max_drawdown=self.max_drawdown,
+        )
+        return {
+            "mandate_hash": self.paper_mandate.content_hash,
+            "checkpoint": checkpoint,
+            "state": asdict(decision.state),
+            "marks": [asdict(item) for item in marks],
+        }, decision
 
     def _next(
         self,
@@ -396,7 +524,24 @@ class PostgresSessionRisk:
             max_drawdown=self.max_drawdown,
             overnight_external_flows=overnight,
         )
-        result = SessionObservation(decision, marks, now, int(row[2]), command, reason)
+        experiment_data, experiment = None, None
+        if self.paper_mandate is not None:
+            experiment_data, experiment = self._next_experiment(
+                cur, saved, market, now, session_id, int(row[2])
+            )
+            decision = self._combine(decision, experiment)
+        elif saved is not None and "paper_mandate_hash" in saved:
+            raise RecoveryRequired("paper mandate cannot be removed")
+        result = SessionObservation(
+            decision,
+            marks,
+            now,
+            int(row[2]),
+            command,
+            reason,
+            experiment,
+            experiment is not None and experiment.return_fraction <= Decimal("-.01"),
+        )
         data = {
             "control_hash": self.control_hash,
             "policy_hash": self.policy.content_hash,
@@ -424,6 +569,9 @@ class PostgresSessionRisk:
                 },
             },
         }
+        if experiment_data is not None:
+            data["paper_experiment"] = experiment_data
+            data["paper_mandate_hash"] = experiment_data["mandate_hash"]
         coverage = _coverage_records(saved) if saved is not None else {}
         covered = coverage.get(session_id)
         if covered is not None:

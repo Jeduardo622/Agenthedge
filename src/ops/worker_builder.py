@@ -35,6 +35,7 @@ from ops.worker import DurableWorker, PaperTarget
 from ops.worker_config import load_worker_authority, parse_session_controls
 from portfolio.broker import AlpacaLiveBrokerAdapter, AlpacaPaperBrokerAdapter
 from portfolio.journal import PostgresJournal
+from portfolio.paper_mandate import PaperMandate
 from portfolio.postgres_store import JournalPortfolioStore
 from risk.runtime_sources import RuntimeRiskSources
 from risk.session_store import PostgresSessionRisk
@@ -184,6 +185,13 @@ def build_worker(
     )
     journal = PostgresJournal(dsn)
     journal.require_submission_ready(expected.account_id, expected.mode)
+    mandate = (
+        PaperMandate.from_mapping(strategy["paper_mandate"])
+        if "paper_mandate" in strategy
+        else None
+    )
+    if mandate is not None:
+        journal.paper_experiment_state(expected.account_id, expected.mode, mandate)
     store = JournalPortfolioStore(journal, account_id=expected.account_id, mode=expected.mode)
     commands = CommandStore(dsn, account_id=expected.account_id, mode=expected.mode)
     commands.status(
@@ -210,6 +218,7 @@ def build_worker(
         window_sessions=controls.window_sessions,
         max_drawdown=controls.max_drawdown,
         control_timeout=controls.control_timeout,
+        paper_mandate=mandate,
     )
     registry = AgentRegistry()
     register_builtin_agents(registry)

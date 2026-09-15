@@ -309,6 +309,7 @@ def paper_built_worker(tmp_path, monkeypatch):
                     **prototype.runtime._agent_extras,
                     "portfolio_store": prototype.runtime.portfolio_store,
                     "broker_adapter": prototype.runtime.broker_adapter,
+                    "performance_tracker": prototype.runtime._performance_tracker,
                     "execution_mode": "paper_broker",
                     "execution_safety_config": config.execution_safety,
                     "symbols": ("SPY",),

@@ -932,7 +932,25 @@ class AgentRuntime:
                 session_id = "XNYS:" + bounds[0].date().isoformat()
                 if previous is None or previous.decision.state.session_id != session_id:
                     provider = opening_provider
-            observer.observe(provider(now), now=now)
+            observation = observer.observe(provider(now), now=now)
+            if (
+                observation.experiment_warning
+                and observation.experiment is not None
+                and self._alert_sink
+            ):
+                self._alert_sink(
+                    "paper_experiment_loss_warning",
+                    {
+                        "account_id": observer.account_id,
+                        "mode": observer.mode,
+                        "session_id": observation.experiment.state.session_id,
+                        "opening_equity": str(observation.experiment.state.opening_equity),
+                        "experiment_return_fraction": str(observation.experiment.return_fraction),
+                        "account_return_fraction": str(observation.decision.return_fraction),
+                        "checkpoint": observation.checkpoint,
+                    },
+                    severity="warning",
+                )
             if now >= bounds[1]:
                 self._state_sink.heartbeat(status="market_closed")
                 return False
