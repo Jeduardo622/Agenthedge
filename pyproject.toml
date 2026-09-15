@@ -46,6 +46,7 @@ typer = ">=0.12.5"
 python-json-logger = ">=2.0.7"
 holidays = ">=0.59"
 psycopg = {version = ">=3.2.0", extras = ["binary"]}
+exchange-calendars = "4.13.2"
 
 [tool.poetry.group.dev.dependencies]
 pytest = ">=8.3.2"
