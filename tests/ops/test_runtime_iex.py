@@ -258,3 +258,21 @@ def test_bid_ask_timestamp_survives_snapshot_serialization(iex):
     payload = snapshot_to_mapping(loaded.get_market_snapshot("SPY"))
     assert payload["event_at"] == now[0].isoformat()
     assert payload["quote_event_at"] == quote["t"]
+
+
+def test_final_boundary_rechecks_elapsed_capture_without_network(iex):
+    loaded, now, _, _, calls, *_ = iex
+    snapshot = loaded.revalidate_order("SPY", "buy", Decimal("101.01"))
+    loaded.validate_execution_snapshot(snapshot, now[0])
+    assert len(calls) == 2
+    now[0] += timedelta(seconds=6)
+    with pytest.raises(ValueError, match="stale"):
+        loaded.validate_execution_snapshot(snapshot, now[0])
+    assert len(calls) == 2
+
+
+def test_final_boundary_rejects_substituted_snapshot(iex):
+    loaded, now, *_ = iex
+    snapshot = loaded.revalidate_order("SPY", "buy", Decimal("101.01"))
+    with pytest.raises(ValueError, match="captured"):
+        loaded.validate_execution_snapshot(replace(snapshot, symbol="QQQ"), now[0])

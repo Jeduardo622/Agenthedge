@@ -71,6 +71,7 @@ class RuntimeMarketData:
     _quote_policy: IexQuotePolicy | None
     _execution_bindings: tuple[Any, ...]
     _capture_binding: Any
+    _last_execution_snapshot: CanonicalSnapshot | None
     _config: DataProviderConfig
     _provider: FinnhubProvider
     _client: Any
@@ -167,7 +168,9 @@ class RuntimeMarketData:
             result.execution_limit,
             result.revalidate_order,
             result._capture,
+            result.validate_execution_snapshot,
         )
+        result._last_execution_snapshot = None
         result._capture_binding = (
             provider.capture if isinstance(provider, AlpacaIexProvider) else None
         )
@@ -203,7 +206,12 @@ class RuntimeMarketData:
         if (
             self.provider is not self._approved_provider
             or self._reference_market is not self._approved_reference_market
-            or (self.execution_limit, self.revalidate_order, self._capture)
+            or (
+                self.execution_limit,
+                self.revalidate_order,
+                self._capture,
+                self.validate_execution_snapshot,
+            )
             != self._execution_bindings
         ):
             raise ValueError("loaded runtime provider changed")
@@ -284,6 +292,7 @@ class RuntimeMarketData:
     def revalidate_order(self, symbol: str, side: str, limit_price: Decimal) -> CanonicalSnapshot:
         """Fresh capture only; never widen the original approved order limit."""
         self.require()
+        self._last_execution_snapshot = None
         if self._quote_policy is None or side not in {"buy", "sell"}:
             raise ValueError("explicit IEX execution quote policy and side required")
         if not isinstance(limit_price, Decimal) or not limit_price.is_finite() or limit_price <= 0:
@@ -295,7 +304,17 @@ class RuntimeMarketData:
         assert bid is not None and ask is not None
         if (side == "buy" and limit_price > ask) or (side == "sell" and limit_price < bid):
             raise ValueError("approved limit exceeds current side-specific quote")
+        self._last_execution_snapshot = snapshot
         return snapshot
+
+    def validate_execution_snapshot(self, snapshot: CanonicalSnapshot, at: datetime) -> None:
+        """Recheck the exact successful capture after any blocking authorization work."""
+        self.require()
+        if snapshot is not self._last_execution_snapshot or self._quote_policy is None:
+            raise ValueError("exact captured execution snapshot required")
+        if not isinstance(at, datetime) or at.utcoffset() is None:
+            raise ValueError("aware execution validation time required")
+        self._quote_policy.validate(snapshot, max(at, self.now()))
 
     def market_inputs(self, at: datetime) -> MarketRiskInputs:
         self.require()
