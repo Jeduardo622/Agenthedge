@@ -10,6 +10,7 @@ from typing import Dict, Iterable, Mapping, MutableMapping
 
 from infra.postgres import ensure_postgres_schema, postgres_connection
 
+from .accounting import AccountingState, PositionState, apply_trade, as_decimal
 from .store import PortfolioSnapshot, PortfolioStore, Position
 
 
@@ -141,6 +142,7 @@ class PostgresPortfolioStore(PortfolioStore):
         quantity: float,
         price: float,
         dedup_key: str | None = None,
+        fee: float = 0.0,
     ) -> Mapping[str, float]:
         if quantity == 0.0:
             raise ValueError("quantity must be non-zero")
@@ -199,59 +201,46 @@ class PostgresPortfolioStore(PortfolioStore):
                     (self._account_id, symbol),
                 )
                 position_row = cur.fetchone()
-                existing_qty = _as_float(position_row[0]) if position_row else 0.0
-                existing_cost = _as_float(position_row[1]) if position_row else float(price)
-                realized = 0.0
-                if existing_qty and (existing_qty > 0) != (quantity > 0):
-                    closing_qty = min(abs(existing_qty), abs(quantity))
-                    pnl = (price - existing_cost) * closing_qty * (1 if existing_qty > 0 else -1)
-                    realized += pnl
-                new_qty = existing_qty + quantity
-                if new_qty == 0.0:
+                positions = {}
+                if position_row:
+                    positions[symbol] = PositionState(
+                        as_decimal(position_row[0]), as_decimal(position_row[1])
+                    )
+                result = apply_trade(
+                    AccountingState(
+                        as_decimal(account_row[0]), as_decimal(account_row[1]), positions
+                    ),
+                    symbol=symbol,
+                    quantity=as_decimal(quantity),
+                    price=as_decimal(price),
+                    fee=as_decimal(fee),
+                )
+                position = result.positions.get(symbol)
+                position_qty = float(position.quantity) if position else 0.0
+                if position is None:
                     cur.execute(
-                        """
-                        DELETE FROM ah_portfolio_positions
-                        WHERE account_id = %s AND symbol = %s
-                        """,
+                        "DELETE FROM ah_portfolio_positions WHERE account_id = %s AND symbol = %s",
                         (self._account_id, symbol),
                     )
-                    position_qty = 0.0
-                elif (existing_qty >= 0 and quantity > 0) or (existing_qty <= 0 and quantity < 0):
-                    total_cost = existing_cost * existing_qty + price * quantity
-                    avg_cost = total_cost / new_qty if new_qty else price
+                else:
                     cur.execute(
                         """
                         INSERT INTO ah_portfolio_positions (
-                            account_id,
-                            symbol,
-                            quantity,
-                            average_cost
+                            account_id, symbol, quantity, average_cost
                         )
                         VALUES (%s, %s, %s, %s)
                         ON CONFLICT (account_id, symbol) DO UPDATE
                         SET quantity = EXCLUDED.quantity, average_cost = EXCLUDED.average_cost
                         """,
-                        (self._account_id, symbol, new_qty, avg_cost),
-                    )
-                    position_qty = new_qty
-                else:
-                    cur.execute(
-                        """
-                        INSERT INTO ah_portfolio_positions (
-                            account_id,
+                        (
+                            self._account_id,
                             symbol,
-                            quantity,
-                            average_cost
-                        )
-                        VALUES (%s, %s, %s, %s)
-                        ON CONFLICT (account_id, symbol) DO UPDATE
-                        SET quantity = EXCLUDED.quantity
-                        """,
-                        (self._account_id, symbol, new_qty, existing_cost),
+                            float(position.quantity),
+                            float(position.average_cost),
+                        ),
                     )
-                    position_qty = new_qty
-                new_cash = cash - (quantity * price)
-                new_realized = realized_pnl + realized
+                new_cash = float(result.cash)
+                new_realized = float(result.realized_pnl)
                 cur.execute(
                     """
                     UPDATE ah_portfolio_accounts
@@ -276,6 +265,7 @@ class PostgresPortfolioStore(PortfolioStore):
                             {
                                 "applied_at": datetime.now(timezone.utc).isoformat(),
                                 "position_quantity": position_qty,
+                                "fee": str(as_decimal(fee)),
                             }
                         ),
                     ),

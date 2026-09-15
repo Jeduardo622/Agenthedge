@@ -1588,3 +1588,98 @@ def test_alpaca_paper_adapter_raises_submit_unknown_when_timeout_recovery_misses
         )
 
     assert exc.value.client_order_id == "client-missing-1"
+
+
+def test_cumulative_average_uses_incremental_value(tmp_path: Path) -> None:
+    store = PortfolioStore(tmp_path / "portfolio.json", initial_cash=1000)
+    bus = MessageBus()
+    first = BrokerOrderStatus(
+        broker_order_id="economic-1",
+        client_order_id="client-1",
+        symbol="SPY",
+        quantity=2,
+        side="buy",
+        status="partially_filled",
+        filled_quantity=1,
+        average_fill_price=100,
+    )
+    broker = RecordingBroker(submit_status=first)
+    agent = ExecutionAgent(_context(store, bus, broker=broker))
+    record = agent._record_order_status(first, {})
+    agent._persist_new_broker_fill(record, first, fallback_price=100)
+    second = BrokerOrderStatus(
+        broker_order_id="economic-1",
+        client_order_id="client-1",
+        symbol="SPY",
+        quantity=2,
+        side="buy",
+        status="filled",
+        filled_quantity=2,
+        average_fill_price=110,
+    )
+    record = agent._record_order_status(second, {})
+    agent._persist_new_broker_fill(record, second, fallback_price=100)
+    assert store.snapshot().cash == 780
+    assert store.snapshot().positions["SPY"].average_cost == 110
+
+
+def test_same_quantity_value_correction_requires_recovery(tmp_path: Path) -> None:
+    store = PortfolioStore(tmp_path / "portfolio.json", initial_cash=1000)
+    first = BrokerOrderStatus(
+        broker_order_id="economic-1",
+        client_order_id="client-1",
+        symbol="SPY",
+        quantity=2,
+        side="buy",
+        status="partially_filled",
+        filled_quantity=1,
+        average_fill_price=100,
+    )
+    agent = ExecutionAgent(
+        _context(store, MessageBus(), broker=RecordingBroker(submit_status=first))
+    )
+    record = agent._record_order_status(first, {})
+    agent._persist_new_broker_fill(record, first, fallback_price=100)
+    corrected = BrokerOrderStatus(
+        broker_order_id="economic-1",
+        client_order_id="client-1",
+        symbol="SPY",
+        quantity=2,
+        side="buy",
+        status="partially_filled",
+        filled_quantity=1,
+        average_fill_price=110,
+    )
+    record = agent._record_order_status(corrected, {})
+    with pytest.raises(ValueError, match="reconciliation required"):
+        agent._persist_new_broker_fill(record, corrected, fallback_price=100)
+    assert record["recovery_required"] is True
+    assert record["closed"] is False
+    assert store.snapshot().cash == 900
+
+
+def test_recovery_flag_survives_restart_and_blocks_approval(tmp_path: Path) -> None:
+    ledger = tmp_path / "execution-orders.json"
+    ledger.write_text(json.dumps({"orders": {"economic-1": {"recovery_required": True}}}))
+    store = PortfolioStore(tmp_path / "portfolio.json", initial_cash=1000)
+    broker = RecordingBroker(
+        submit_status=BrokerOrderStatus(
+            broker_order_id="economic-2",
+            client_order_id="a-1",
+            symbol="SPY",
+            quantity=2,
+            side="buy",
+            status="accepted",
+        )
+    )
+    bus = MessageBus()
+    events = []
+    agent = ExecutionAgent(
+        _context(store, bus, broker=broker, audit_events=events, order_ledger_path=ledger)
+    )
+    agent.setup()
+    bus.publish("director.approval", payload=_approval_payload(), publisher="director")
+    time.sleep(0.1)
+    agent.teardown()
+    assert broker.submitted == []
+    assert any(event["action"] == "execution_reconciliation_required" for event in events)
