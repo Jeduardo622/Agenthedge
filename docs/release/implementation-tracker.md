@@ -19,37 +19,72 @@ independent software work. No existing storage or environment files are read or 
 
 ## Current task status (2026-09-15)
 
-This rollup supersedes the initial queue below. Reviewed software integration is not
-paper qualification, live-pilot acceptance, or an exact-head CI pass. The detailed
-chronological entries retain the source SHAs, red/green evidence and reviewer names.
+This rollup supersedes the historical queue below. The accepted software candidate is
+merged main `b01544cbdf8ecf2e36a8506763dbc2119b7bb9b4`; combined-main post-merge
+verification passed. Software/tree acceptance is separate from paper qualification
+and live-pilot acceptance. Later evidence-only closeout commits grant no runtime
+authority; G0 independently binds the actual deployed SHA. The historical
+entries retain component SHAs, red/green evidence and reviewer names. All 23 software
+tasks in this rollup are complete; S4, O3 and O5 still require the external acceptance
+listed below.
 
 | Task | Current software status | Remaining acceptance |
 | --- | --- | --- |
-| B1 | Baseline, mandate and regression matrix integrated | Final release evidence index |
-| E1 | Merged PR43, post-merge verified; actual rollback linkage subsequently integrated | Final combined CI |
-| E2 | Merged PR45, post-merge verified | Final combined CI |
-| E3 | Merged PR44, post-merge verified | Final combined CI |
-| E4 | Economic journal, correction/replay, namespace and dispatch contracts reviewed and integrated | Final combined CI |
-| E5 | Canonical broker-history reconciliation, ambiguous-order recovery and installed lifecycle drill reviewed and integrated | Final combined CI |
-| E6 | Persistent halt, late-fill reconciliation, reduction, fractional residual repairs and installed lifecycle drill reviewed and integrated | Final combined CI |
-| R1 | Unified policy, sourced valuation, reservations and final admission reviewed and integrated | Final combined CI |
-| R2 | Durable session loss, opening observations and control state reviewed and integrated | Final combined CI |
-| R3 | Canonical inputs, causal visibility, freshness and submission rechecks reviewed and integrated | Final combined CI |
-| R4 | Unavailable-history estimates and runtime risk sources reviewed and integrated | Final combined CI |
-| R5 | Calendar adapter and worker ownership/fencing reviewed and integrated | Final combined CI |
-| S1 | Shared runtime/replay snapshots and approval clocks reviewed and integrated | Final combined CI |
-| S2 | Causal broker fills, partial volume, fees and engine integration reviewed and integrated | Final combined CI |
-| S3 | Point-in-time datasets, actions and provenance reviewed and integrated | Final combined CI |
+| B1 | Baseline, mandate, regression matrix and final release evidence index integrated | Software verification complete |
+| E1 | Merged PR43, post-merge verified; actual rollback linkage subsequently integrated | Software verification complete |
+| E2 | Merged PR45, post-merge verified | Software verification complete |
+| E3 | Merged PR44, post-merge verified | Software verification complete |
+| E4 | Economic journal, correction/replay, namespace and dispatch contracts reviewed and integrated | Software verification complete |
+| E5 | Canonical broker-history reconciliation, ambiguous-order recovery and installed lifecycle drill reviewed and integrated | Software verification complete |
+| E6 | Persistent halt, late-fill reconciliation, reduction, fractional residual repairs and installed lifecycle drill reviewed and integrated | Software verification complete |
+| R1 | Unified policy, sourced valuation, reservations and final admission reviewed and integrated | Software verification complete |
+| R2 | Durable session loss, opening observations and control state reviewed and integrated | Software verification complete |
+| R3 | Canonical inputs, causal visibility, freshness and submission rechecks reviewed and integrated | Software verification complete |
+| R4 | Unavailable-history estimates and runtime risk sources reviewed and integrated | Software verification complete |
+| R5 | Calendar adapter and worker ownership/fencing reviewed and integrated | Software verification complete |
+| S1 | Shared runtime/replay snapshots and approval clocks reviewed and integrated | Software verification complete |
+| S2 | Causal broker fills, partial volume, fees and engine integration reviewed and integrated | Software verification complete |
+| S3 | Point-in-time datasets, actions and provenance reviewed and integrated | Software verification complete |
 | S4 | Leakage, holdout and signed strategy acceptance contracts reviewed and integrated | Actual strategy acceptance is not established by fixtures |
-| S5 | Original-entry attribution, persisted safety reductions and installed signed strategy consumption reviewed and integrated | Final combined CI |
-| O1 | Installed builder, preflight, paper/live closeout, ordinary-session restart and separate-account rollback reviewed and integrated | Final combined CI |
-| O2 | Durable UI, corrected unavailable risk/current reservations and actual browser preflight/start/closeout/export/disconnect/order recovery proof recorded | Final combined CI |
-| O3 | Canonical signed stage policy, actual worker authority and same-worker evidence renewal reviewed and integrated | Final combined CI; actual issuer/account artifacts absent |
-| O4 | Process, replay, restore, alert and installed partial/cancel/late-fill/restart drills reviewed and integrated | Final combined parity |
+| S5 | Original-entry attribution, persisted safety reductions and installed signed strategy consumption reviewed and integrated | Software verification complete |
+| O1 | Installed builder, preflight, paper/live closeout, ordinary-session restart and separate-account rollback reviewed and integrated | Software verification complete |
+| O2 | Durable UI, corrected unavailable risk/current reservations and actual browser preflight/start/closeout/export/disconnect/order recovery proof recorded | Software verification complete |
+| O3 | Canonical signed stage policy, actual worker authority and same-worker evidence renewal reviewed and integrated | Actual issuer/account artifacts absent |
+| O4 | Process, replay, restore, alert and installed partial/cancel/late-fill/restart drills reviewed and integrated | Software verification complete |
 | O5 | Paper/live runbooks and renewal/persistent-worker procedures reviewed | Actual account, caps, credentials, owner authority,5/20 observed sessions and pilot |
-| I1 | Integration and evidence closeout active | Final verification, reviewed PR/CI/merge/post-merge; operational gates remain held |
+| I1 | Code/tree review, PR52/PR53 merge and combined-main post-merge verification complete at `b01544c` | G0-G6 operational gates remain held |
 
-### Current worker milestone
+### Final publication evidence
+
+- Reviewed software acceptance baseline: `b01544cbdf8ecf2e36a8506763dbc2119b7bb9b4`.
+  Its full tracked tree equals operator head `741c8ba` and tree `8d1d3e7`. Relative
+  to local freeze `4e0dcfa78a12f7c2fbe5c5b2da662980dc0bedd7`, production source,
+  configuration, scripts and workflows are unchanged; one reviewed CLI test and
+  three evidence documents differ. Later documentation commits grant no runtime
+  authority; G0 independently binds the actual deployed SHA and other identities.
+- Windows/Linux local freeze: 1,862 passed on each platform with zero skips;
+  87.35%/87.32% coverage in 915.46s/413.29s.
+- [PR52](https://github.com/Jeduardo622/Agenthedge/pull/52) core post-merge:
+  all seven checks green, [quality 34997797445](https://github.com/Jeduardo622/Agenthedge/actions/runs/34997797445),
+  [staged 34997797597](https://github.com/Jeduardo622/Agenthedge/actions/runs/34997797597),
+  1,837 tests, zero skips, 87.24% coverage.
+- [PR53](https://github.com/Jeduardo622/Agenthedge/pull/53) operator exact head
+  `741c8ba`: all seven checks green,
+  [quality 34997833866](https://github.com/Jeduardo622/Agenthedge/actions/runs/34997833866),
+  [staged 34997833777](https://github.com/Jeduardo622/Agenthedge/actions/runs/34997833777),
+  1,863 tests, zero skips, 87.32% coverage in 315.38s.
+- Combined-main `b01544c` post-merge: all seven checks green,
+  [quality 34998745169](https://github.com/Jeduardo622/Agenthedge/actions/runs/34998745169),
+  [staged 34998745153](https://github.com/Jeduardo622/Agenthedge/actions/runs/34998745153),
+  1,863 tests collected and executed, zero deselections or collection skips, 87.32%
+  coverage in 330.97s.
+- Static/audit/package: mypy 150 files, lint, lock, build and smoke passed. The
+  installed-dependency audit found no known vulnerabilities and excluded the unpublished
+  local package. Retained report:
+  `agenthedge-31e-review/.cache/completion/final-harness/FINAL-VERIFICATION.md`,
+  SHA-256 `4DDFF2E47F220EC95045CE7C58B97C56A8CDF79B836092A50878C108AB4785B1`.
+
+### Historical worker milestone (superseded by final rollup)
 
 - Integrated `fc94e077707a22872d04ee4dfa05965eb94bcc5f` includes the reviewed
   installed worker, recovery-queue settlement, ordinary-close rearm and actual
@@ -96,7 +131,7 @@ chronological entries retain the source SHAs, red/green evidence and reviewer na
 - Software-complete, paper-qualified and live-pilot-qualified remain false.
   Current executable work is tracked above; no observed session is fabricated.
 
-### Signed renewal and publication preparation
+### Historical signed-renewal and publication preparation (superseded)
 
 - Renewal `0e67b68e541579692eab5ea4069582600d47d920` is independently reviewed
   and integrated at `0712a25`. Reviewer e3 passed47 tests196.83s with zero skips
@@ -207,7 +242,7 @@ G0 pending baseline/manifest. G1-G3 unproven. G4-G6 blocked by missing new-relea
 observed broker/market-session/pilot evidence. No gate passes from historical or synthetic
 evidence alone. Software-complete: no. Paper-qualified: no. Live-pilot-qualified: no.
 
-## Integration log
+## Historical integration log (superseded by final rollup)
 
 - Initial inspection: HEAD equals audit baseline; no open PR; preserved plans and audit.
 - E1/E3 implementers and independent baseline tester dispatched in separate worktrees.
@@ -399,7 +434,7 @@ evidence alone. Software-complete: no. Paper-qualified: no. Live-pilot-qualified
 - Root owns agenthedge-control-worker, initial checkpoint84a4394 (24 component tests21.99s) and source222eec1 quote adapter. Review found provider/risk freshness disagreement, reference-provider mutation, stale cache after failed integrity check, and split reference-price error. Maintained red regressions cover each; fixes and actual worker binding are in progress, not approved/integrated. Current adapter captures actual DataIngestionService quotes through synthetic transport before decision cutoffs and uses hashed PIT research; it is not broker/provider subscription qualification. S5 installer is delegated in a separate worktree. Baseline tester is running fresh version-separated Windows/Linux aggregate verification of immutable92b36f3, with separately guarded O4 restore pairs.
 - Fresh dependency audit of141 exact lock pins found no known vulnerabilities. Software-complete, paper-qualified and live-pilot-qualified remain false. Actual O1/O2/O4 workflows, final verification and reviewed publication/CI/postmerge remain executable work; real-account inputs and observed sessions remain distinct O5 blockers.
 
-### Installed worker integrity and latest aggregate proof (2026-09-15 UTC)
+### Historical installed-worker checkpoints (superseded, 2026-09-15 UTC)
 
 - Immutable `92b36f307224da675476bd7784708a43cac2b60f`: Windows **1621 passed, zero skips, 87.11%, 342.45s**; Linux **1621 passed, zero skips, 87.07%, 385.14s**. Separate fresh versioned databases and guarded restore pairs; exact archive SHA256 `b539febb172258c09f06052eb6193722b316662a288d3e32336193b456b8a0e4`. Evidence is in `agenthedge-verification-92b36f3/.cache/completion/92b36f3-verification.md` and the named Windows/Linux logs. Later slices below are not covered by this full run.
 - S5 signed startup installer `866979695c933f0a8b5e46e72abc3201505359de` independently approved by e1 (80 tests), integrated `638e93a`. Atomic account/mode-bound installation preserves safety reductions and rejects retired manifests. Actual O1 start invocation is root's next binding slice; its new actual-worker assertion first failed because the tracker namespace remained unset.
