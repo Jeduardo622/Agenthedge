@@ -1,6 +1,9 @@
 import json
 from datetime import timedelta
 
+import pytest
+from click import unstyle
+from typer import rich_utils
 from typer.testing import CliRunner
 
 from cli.backtest import app
@@ -52,7 +55,10 @@ def test_cli_actual_qualification_and_promotion_rejects_insufficient(tmp_path, m
     assert "insufficient_evidence" in rejection.output
 
 
-def test_validation_route_requires_qualified_bundle(tmp_path):
+@pytest.mark.parametrize("force_color", [False, True], ids=["plain", "forced-color"])
+def test_validation_route_requires_qualified_bundle(tmp_path, monkeypatch, force_color):
+    monkeypatch.setattr(rich_utils, "FORCE_TERMINAL", force_color)
+    monkeypatch.setattr(rich_utils, "COLOR_SYSTEM", "standard" if force_color else None)
     result = CliRunner().invoke(
         app,
         [
@@ -65,6 +71,8 @@ def test_validation_route_requires_qualified_bundle(tmp_path):
             "--validation-protocol",
             str(tmp_path / "plan.json"),
         ],
+        color=True,
     )
-    assert result.exit_code != 0
-    assert "requires --dataset-bundle" in result.output
+    assert result.exit_code == 2
+    assert ("\x1b[" in result.output) is force_color
+    assert "--validation-protocol requires --dataset-bundle" in unstyle(result.output)
