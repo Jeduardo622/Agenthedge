@@ -43,7 +43,7 @@ chronological entries retain the source SHAs, red/green evidence and reviewer na
 | S4 | Leakage, holdout and signed strategy acceptance contracts reviewed and integrated | Actual strategy acceptance is not established by fixtures |
 | S5 | Original-entry attribution, persisted safety reductions and installed signed strategy consumption reviewed and integrated | Final combined CI |
 | O1 | Installed builder, preflight, paper/live closeout, ordinary-session restart and separate-account rollback reviewed and integrated | Final combined CI |
-| O2 | Durable UI, corrected unavailable risk/current reservations and actual browser preflight/start/closeout/export/disconnect/order recovery proof recorded | Final combined CI; export download contents not browser-readable |
+| O2 | Durable UI, corrected unavailable risk/current reservations and actual browser preflight/start/closeout/export/disconnect/order recovery proof recorded | Final combined CI |
 | O3 | Canonical signed stage policy, actual worker authority and same-worker evidence renewal reviewed and integrated | Final combined CI; actual issuer/account artifacts absent |
 | O4 | Process, replay, restore, alert and installed partial/cancel/late-fill/restart drills reviewed and integrated | Final combined parity |
 | O5 | Paper/live runbooks and renewal/persistent-worker procedures reviewed | Actual account, caps, credentials, owner authority,5/20 observed sessions and pilot |
@@ -89,6 +89,9 @@ chronological entries retain the source SHAs, red/green evidence and reviewer na
   The resulting stale reservation display correction24a0de5 is independently
   reviewed (12 PostgreSQL tests14.03s), integrated17a978c and browser-confirmed:
   canceled order reserved cash0, cash850, position1.5, and expired-lease controls disabled.
+  Browser export response contents are now verified: HTTP 200 JSON, 9,849 characters,
+  all 12 identity/economic/control assertions passed; browser-managed filesystem
+  download location remains unverified.
   Existing durable browser proof is in `operator-browser-verification.md`.
 - Software-complete, paper-qualified and live-pilot-qualified remain false.
   Current executable work is tracked above; no observed session is fabricated.
@@ -105,8 +108,9 @@ chronological entries retain the source SHAs, red/green evidence and reviewer na
 - Root independently reproduced invalidation during the final installed guard:
   old `2a0abd2` failed, repaired `0e67b68` passed. Maintained regression and the
   later order-restart fixture's explicit evidence-path adaptation are reviewed at
-  `5411aca`; the pure regression passed1 test1.72s. Their combined PostgreSQL
-  follow-through and final aggregate are pending.
+  `5411aca`; the pure regression passed 1 test in 1.72s. At clean `4e0dcfa`, the
+  installed order-recovery module and guard regression passed 3 tests in 36.21s with
+  zero skips. Final aggregate and publication checks remain pending.
 - Full Windows/Linux harnesses now verify actual dependency module paths, use
   clean Git bundle clones, PostgreSQL16 tools and22 fresh fixture databases, and
   execute serially. Failed state is preserved. No final aggregate is claimed yet.

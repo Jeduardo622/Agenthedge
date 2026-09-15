@@ -80,8 +80,8 @@ show the no-providers message only after the check completes. Root independently
 passed17 focused dashboard/helper tests2.52s, including real observed zero values.
 
 Screenshots are retained inline in the task's Computer Use evidence. No local PNG
-artifact path is claimed. The fake-order/late-fill/restart browser fixture remains
-the next verification flow; browser-managed download contents remain unverified.
+artifact path is claimed. At that checkpoint, order recovery and export-content
+verification were still pending; the follow-through below records their results.
 
 ## Follow-through: inherited partial order, halt, late fill and restart
 
@@ -131,3 +131,21 @@ Task-only command, state and snapshot evidence remains in the isolated
 `agenthedge-installed-order-recovery/.cache/completion/browser-order-state/`.
 Screenshots are inline in the Codex task. No real broker fill, cancellation,
 qualification session or live operation occurred.
+
+## Follow-through: browser export response contents
+
+The actual **Export bounded JSON snapshot** button was clicked after the retained
+order-recovery worker had stopped. A download event was observed. Supported browser
+CDP `Network.getResponseBody` returned the actual media response: HTTP 200,
+`application/json`, 9,849 characters, with snapshot `observed_at`
+`2026-09-15T16:09:38.673035+00:00`.
+
+All 12 parsed assertions passed: account `release-82f3515e8e41462ba74668030a13855c`,
+mode `paper_broker`, release `b554986f101c6ed7fb13befea95dea0dd65f9061`, cash 850,
+SPY quantity 1.5, current reserved cash 0, historical reserved cash 50, canceled order,
+exactly two economic events (`partial-activity` and `late-activity`), three succeeded
+and applied commands, HALTED state, and disabled controls with an expired lease.
+
+This verifies the downloaded response contents through the browser. The filesystem
+location of the browser-managed download remains unverified. It does not establish
+new worker authority, actual broker activity or a qualification session.

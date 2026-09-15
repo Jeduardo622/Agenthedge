@@ -25,7 +25,9 @@ final accepted release SHA. Current publication/CI/post-merge evidence is pendin
   an external broker; these are software tests, not actual observed sessions.
 - [Browser evidence](operator-browser-verification.md) records actual UI control
   IDs and durable readback, including inherited-order halt/late-fill/restart and
-  corrected current reservations. The broker transport and clock were synthetic.
+  corrected current reservations. The browser export JSON response passed 12
+  parsed identity/economic/control assertions; its filesystem download location
+  remains unverified. The broker transport and clock were synthetic.
 - Frozen `31e9a94` passed1794 Windows tests, zero skips,87% coverage in676.27s,
   plus mypy149 files, flake8, lock check, build, package smoke and dependency audit.
   Its Linux aggregate exposed leaked test threads. Reviewed cleanup `b4932295`
@@ -36,7 +38,9 @@ final accepted release SHA. Current publication/CI/post-merge evidence is pendin
   independently passed21 focused tests32.32s. Full local and exact-head hosted CI
   must still pass. Renewal `0e67b68` is reviewed and integrated at `0712a25`:
   independent47 tests196.83s passed with zero skips, including actual PostgreSQL
-  workers and invalid-evidence recovery probes. Final integration remains pending.
+  workers and invalid-evidence recovery probes. The installed order-restart
+  compatibility and final-guard regression passed 3 tests in 36.21s with zero skips at
+  clean `4e0dcfa`. Final aggregate, publication and exact-head CI remain pending.
 
 ## G0-G6 acceptance
 
