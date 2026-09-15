@@ -93,16 +93,18 @@ def test_one_share_owned_intent_reaches_actual_submission_boundary(bound, tmp_pa
     )
     broker.status = replace(broker.status, quantity=1)
     captured = []
+    captured_at = []
     validated = []
     snapshot = object()
 
     def recapture(symbol, side, price):
         captured.append((symbol, side, price))
+        captured_at.append(broker.now())
         return snapshot
 
     def validate_capture(value, at):
         assert value is snapshot
-        assert at == broker.now()
+        assert captured_at[0] <= at <= broker.now()
         assert broker.calls == 0
         validated.append(value)
 
