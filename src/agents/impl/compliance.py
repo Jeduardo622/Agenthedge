@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import os
 from datetime import datetime, timezone
-from typing import Any, Dict, Iterable, List, Mapping, Sequence
+from typing import Any, Callable, Dict, Iterable, List, Mapping, Sequence, cast
 
 from observability.state import ObservabilityState
 from portfolio.store import PortfolioStore
+from risk.service import RiskEvaluationService
 
 from ..base import BaseAgent
 from ..context import AgentContext
@@ -38,11 +39,20 @@ class ComplianceAgent(BaseAgent):
         if not bus:
             raise RuntimeError("ComplianceAgent requires a message bus")
         self.bus: MessageBus = bus
+        supplied_now = extras.get("now")
+        self._now: Callable[[], datetime] = (
+            cast(Callable[[], datetime], supplied_now)
+            if callable(supplied_now)
+            else lambda: datetime.now(timezone.utc)
+        )
         self._subscription: Subscription | None = None
         self.restricted = self._load_restricted()
-        self.max_position_pct = float(os.environ.get("COMPLIANCE_MAX_POSITION_PCT", "0.2"))
         self.prohibited_keywords = self._load_prohibited_keywords()
         self._insider_flags = {"insider_signal", "mnpi_flag", "material_non_public"}
+        supplied_evaluator = extras.get("risk_evaluation_service")
+        self._risk_evaluator = (
+            supplied_evaluator if isinstance(supplied_evaluator, RiskEvaluationService) else None
+        )
 
     def _load_restricted(self) -> List[str]:
         raw = os.environ.get("COMPLIANCE_RESTRICTED", "")
@@ -79,7 +89,13 @@ class ComplianceAgent(BaseAgent):
         strategies = (
             payload.get("strategies") if isinstance(payload.get("strategies"), list) else None
         )
-        if not symbol or price is None or quantity is None or not proposal_id:
+        if (
+            not symbol
+            or price is None
+            or quantity is None
+            or not isinstance(proposal_id, str)
+            or not proposal_id.strip()
+        ):
             return
         if symbol in self.restricted:
             payload = {
@@ -109,33 +125,40 @@ class ComplianceAgent(BaseAgent):
             if strategies:
                 self._emit_strategy_feedback(strategies, reason=prohibited_reason, delta=-0.3)
             return
+        artifact_identity = payload.get("risk_artifact")
+        if self._risk_evaluator is None or not isinstance(artifact_identity, Mapping):
+            self._reject_unified(proposal_id, decision_id, symbol, "risk_artifact_unavailable")
+            return
+        try:
+            artifact = self._risk_evaluator.recheck(
+                str(proposal_id),
+                candidate_hash=str(artifact_identity.get("candidate_hash", "")),
+                policy_hash=str(artifact_identity.get("policy_hash", "")),
+                input_hash=str(artifact_identity.get("input_hash", "")),
+            )
+        except Exception:
+            self._reject_unified(proposal_id, decision_id, symbol, "risk_artifact_invalid")
+            return
+        signed_quantity = (
+            float(artifact.candidate.quantity)
+            if artifact.candidate.side == "buy"
+            else -float(artifact.candidate.quantity)
+        )
+        if (
+            artifact.candidate.symbol != symbol
+            or float(artifact.candidate.worst_price) != price
+            or signed_quantity != quantity
+        ):
+            self._reject_unified(proposal_id, decision_id, symbol, "risk_candidate_drift")
+            return
         snapshot = self.portfolio_store.snapshot()
         position = snapshot.positions.get(symbol)
         current_qty = position.quantity if position else 0.0
         projected_qty = current_qty + quantity
-        projected_notional = abs(projected_qty * price)
-        nav = snapshot.cash + sum(
-            abs(position.quantity * position.average_cost)
-            for position in snapshot.positions.values()
-        )
-        nav = max(nav, 1.0)
-        if (projected_notional / nav) > self.max_position_pct:
-            payload = {
-                "proposal_id": proposal_id,
-                "decision_id": decision_id,
-                "symbol": symbol,
-                "reason": "concentration_limit",
-            }
-            self.audit("compliance_reject", payload)
-            self.alert("compliance_reject", payload, severity="error")
-            self._record_compliance(approved=False)
-            if strategies:
-                self._emit_strategy_feedback(strategies, reason="concentration_limit")
-            return
         approvals = dict(payload.get("approvals") or {})
         approvals["compliance"] = {
             "status": "approved",
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": self._decision_time().isoformat(),
         }
         approval = {
             **payload,
@@ -146,6 +169,25 @@ class ComplianceAgent(BaseAgent):
         self.bus.publish("compliance.approval", payload=approval, publisher=self.name)
         self.publish_metric("compliance_approved", 1.0, {"symbol": symbol})
         self._record_compliance(approved=True)
+
+    def _reject_unified(
+        self, proposal_id: object, decision_id: object, symbol: str, reason: str
+    ) -> None:
+        payload = {
+            "proposal_id": proposal_id,
+            "decision_id": decision_id,
+            "symbol": symbol,
+            "reason": reason,
+        }
+        self.audit("compliance_reject", payload)
+        self.alert("compliance_reject", payload, severity="error")
+        self._record_compliance(approved=False)
+
+    def _decision_time(self) -> datetime:
+        value = self._now()
+        if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("now must return a timezone-aware datetime")
+        return value.astimezone(timezone.utc)
 
     def _detect_prohibited_behavior(self, payload: Dict[str, Any]) -> str | None:
         text_tokens = self._extract_text_tokens(payload)
@@ -201,7 +243,7 @@ class ComplianceAgent(BaseAgent):
                 "strategy": name,
                 "delta": delta,
                 "reason": f"compliance_{reason}",
-                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "timestamp": self._decision_time().isoformat(),
             }
             self.bus.publish("strategy.feedback", payload=payload, publisher=self.name)
             self.audit("strategy_feedback", payload)

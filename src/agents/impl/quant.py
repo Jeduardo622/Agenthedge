@@ -34,6 +34,8 @@ class StrategyCouncilAgent(BaseAgent):
     def __init__(self, context: AgentContext) -> None:
         super().__init__(context)
         extras = context.extras or {}
+        candidate_now = extras.get("now")
+        self._now = candidate_now if callable(candidate_now) else lambda: datetime.now(timezone.utc)
         portfolio_store = extras.get("portfolio_store")
         if not isinstance(portfolio_store, PortfolioStore):
             raise RuntimeError("StrategyCouncilAgent requires PortfolioStore in context extras")
@@ -87,7 +89,9 @@ class StrategyCouncilAgent(BaseAgent):
             self._handle_directive, topics=["director.directive"], replay_last=0
         )
         self._execution_subscription = self.bus.subscribe(
-            self._handle_execution_fill, topics=["execution.fill"], replay_last=0
+            self._handle_execution_fill,
+            topics=["execution.fill", "execution.economic_event"],
+            replay_last=0,
         )
         self._feedback_subscription = self.bus.subscribe(
             self._handle_strategy_feedback, topics=["strategy.feedback"], replay_last=0
@@ -114,6 +118,19 @@ class StrategyCouncilAgent(BaseAgent):
         if not symbol or price is None:
             return
 
+        reference_price = _as_float(payload.get("reference_close"))
+        strategy_directive = payload
+        if reference_price is not None and reference_price != price:
+            quote = dict(payload.get("quote") or {})
+            reference_previous = _as_float(quote.get("reference_pc"))
+            if reference_previous is None or reference_previous <= 0:
+                return
+            # Preserve the reference-series return while strategies size raw
+            # shares and downstream agents receive the executable price.
+            quote["c"] = price
+            quote["pc"] = price * reference_previous / reference_price
+            strategy_directive = {**payload, "quote": quote}
+
         snapshot = self.portfolio_store.snapshot()
         directive_id = payload.get("directive_id")
         decision_id = payload.get("decision_id") or directive_id
@@ -123,7 +140,7 @@ class StrategyCouncilAgent(BaseAgent):
             strategy_payload = StrategyPayload(
                 symbol=symbol,
                 price=price,
-                directive=payload,
+                directive=strategy_directive,
                 portfolio=snapshot,
                 performance=self.strategy_performance,
             )
@@ -170,7 +187,10 @@ class StrategyCouncilAgent(BaseAgent):
         if not self.performance_tracker:
             return
         payload = dict(envelope.message.payload or {})
-        self.performance_tracker.record_fill(payload)
+        if envelope.message.topic == "execution.fill":
+            self.performance_tracker.record_fill(payload, receipt_key=envelope.id)
+        else:
+            self.performance_tracker.record_economic_event(payload, receipt_key=envelope.id)
         self._refresh_strategy_state()
 
     def _handle_strategy_feedback(self, envelope: Envelope) -> None:
@@ -182,7 +202,10 @@ class StrategyCouncilAgent(BaseAgent):
         reason = payload.get("reason")
         if isinstance(strategy, str) and isinstance(delta, (int, float)):
             self.performance_tracker.apply_feedback(
-                strategy, float(delta), str(reason) if reason else None
+                strategy,
+                float(delta),
+                str(reason) if reason else None,
+                receipt_key=envelope.id,
             )
             self._refresh_strategy_state()
 
@@ -195,7 +218,7 @@ class StrategyCouncilAgent(BaseAgent):
         payload = {
             "proposal_id": str(uuid.uuid4()),
             "decision_id": decision_id or directive_id,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": self._utc_now().isoformat(),
             "strategy": decision.strategy,
             "symbol": decision.symbol,
             "action": decision.action,
@@ -258,7 +281,7 @@ class StrategyCouncilAgent(BaseAgent):
             "action": action,
             "quantity": quantity,
             "confidence": min(1.0, stats["weight"]),
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": self._utc_now().isoformat(),
             "strategies": [
                 {
                     "strategy": decision.strategy,
@@ -315,7 +338,7 @@ class StrategyCouncilAgent(BaseAgent):
                 "symbol": symbol,
                 "price": price,
                 "reason": "consensus_threshold_not_met",
-                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "timestamp": self._utc_now().isoformat(),
                 "consensus": {
                     "candidates": candidates,
                     "requirements": {
@@ -347,7 +370,7 @@ class StrategyCouncilAgent(BaseAgent):
                 "symbol": symbol,
                 "price": price,
                 "reason": "no_strategy_proposals",
-                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "timestamp": self._utc_now().isoformat(),
                 "non_participating_strategies": [dict(item) for item in non_participating],
             },
         )
@@ -445,6 +468,10 @@ class StrategyCouncilAgent(BaseAgent):
         weights: Mapping[str, float] = (
             self.performance_tracker.weights() if self.performance_tracker else {}
         )
+        actual_snapshot = snapshot
+        installed = (
+            self.performance_tracker.installed_weights() if self.performance_tracker else None
+        )
         if isinstance(self._custom_performance, Mapping):
             snapshot = self._custom_performance
         if isinstance(self._custom_weights, Mapping):
@@ -456,9 +483,17 @@ class StrategyCouncilAgent(BaseAgent):
         resolved_weights: Dict[str, float] = {}
         for strategy in self.strategies:
             raw_weight = weights.get(strategy.name, 1.0)
-            resolved_weights[strategy.name] = (
-                float(raw_weight) if isinstance(raw_weight, (int, float)) else 1.0
-            )
+            resolved = float(raw_weight) if isinstance(raw_weight, (int, float)) else 1.0
+            if installed is not None:
+                if strategy.name not in installed:
+                    raise ValueError("enabled strategy absent from installed roster")
+                # Fixed configuration cannot restore an unaccepted or safety-reduced allocation.
+                resolved = min(installed.get(strategy.name, 0.0), resolved)
+            else:
+                actual = actual_snapshot.get(strategy.name, {})
+                if actual.get("penalties", 0):
+                    resolved = min(float(actual["weight"]), resolved)
+            resolved_weights[strategy.name] = resolved
         self.strategy_weights = resolved_weights
         if self._observability_state:
             enriched = {
@@ -471,6 +506,12 @@ class StrategyCouncilAgent(BaseAgent):
             self._observability_state.update_strategies(enriched)
         for name, weight in self.strategy_weights.items():
             self.publish_metric("strategy_weight", weight, {"strategy": name})
+
+    def _utc_now(self) -> datetime:
+        value = self._now()
+        if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("now must return a UTC-aware datetime")
+        return value.astimezone(timezone.utc)
 
 
 def _coerce_symbol(value: object) -> str | None:

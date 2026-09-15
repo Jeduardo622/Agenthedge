@@ -6,9 +6,12 @@ import logging
 import os
 import threading
 import time
+from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Mapping
+from typing import Any, Dict, List, Mapping, cast
+from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 from audit import JsonlAuditSink
 from data.cache import TTLCache
@@ -20,13 +23,26 @@ from learning.performance import PerformanceTracker
 from observability.alerts import AlertNotifier
 from observability.anomaly import BehaviorAnomalyDetector
 from observability.state import ObservabilityState
-from portfolio.broker import BrokerAdapter, SimulatedBrokerAdapter
+from ops.calendar import USTradingCalendar
+from ops.closeout_view import load_journal_closeout_view
+from ops.control import HaltController
+from ops.fencing import WorkerLease
+from ops.rearm import OperatorRearm
+from ops.release_gate import ReleaseTrust
+from ops.runtime_release import RuntimeReleaseAuthorization
+from ops.session_closeout import SessionCloseoutSource, build_session_closeout, closeout_hash
+from portfolio.broker import BrokerAdapter, BrokerOrderStatus, SimulatedBrokerAdapter
+from portfolio.journal import RecoveryRequired
+from portfolio.postgres_store import JournalPortfolioStore
+from portfolio.reconciliation import ReconciliationReader, ReconciliationService
 from portfolio.store import PortfolioStore
+from risk.session_store import PostgresSessionRisk
 
 from .base import BaseAgent
 from .config import AgentRuntimeConfig
 from .context import AgentContext, AuditSink, MetricSink
 from .messaging import Envelope, MessageBus, Subscription
+from .postgres_bus import PostgresMessageBus
 from .registry import AgentRegistry
 
 DEFAULT_AUDIT_PATH = Path("storage/audit/runtime_events.jsonl")
@@ -45,6 +61,7 @@ DEFAULT_BUS_ACL = {
     "compliance.approval": ["compliance"],
     "compliance.kill_switch": ["compliance"],
     "execution.fill": ["execution"],
+    "execution.economic_event": ["execution"],
 }
 
 
@@ -68,18 +85,50 @@ class AgentRuntime:
         observability_state: ObservabilityState | None = None,
         broker_adapter: BrokerAdapter | None = None,
         agent_extras: Mapping[str, Any] | None = None,
+        release_trust: ReleaseTrust | None = None,
+        release_evidence: dict[str, object] | None = None,
+        performance_tracker: PerformanceTracker | None = None,
+        audit_report_dir: Path | None = None,
+        instance_id: str | None = None,
     ) -> None:
+        if performance_tracker is not None and type(performance_tracker) is not PerformanceTracker:
+            raise TypeError("explicit PerformanceTracker required")
+        if audit_report_dir is not None and not isinstance(audit_report_dir, Path):
+            raise TypeError("explicit audit report Path required")
+        if instance_id is not None and (
+            not isinstance(instance_id, str)
+            or not instance_id
+            or instance_id != instance_id.strip()
+        ):
+            raise ValueError("explicit canonical runtime instance ID required")
         self.logger = logging.getLogger("agenthedge.runtime")
         self.registry = registry
         self.ingestion = ingestion
         self.cache = cache
         self.config = config or AgentRuntimeConfig.from_env()
+        if self.config.execution_mode != "simulated":
+            if (
+                not isinstance(portfolio_store, JournalPortfolioStore)
+                or portfolio_store.mode != self.config.execution_mode
+            ):
+                raise RuntimeError("broker mode requires matching PostgreSQL journal namespace")
+            if not isinstance(bus, PostgresMessageBus):
+                raise RuntimeError("broker mode requires PostgreSQL message bus")
+            bus.bind_namespace(portfolio_store.account_id, portfolio_store.mode)
+            portfolio_store.journal.require_dispatch_ready(
+                bus, portfolio_store.account_id, portfolio_store.mode
+            )
+            if broker_adapter is None or isinstance(broker_adapter, SimulatedBrokerAdapter):
+                raise RuntimeError("broker mode requires explicit broker adapter")
+
         self._governance = self.config.governance
         self.bus = bus or MessageBus()
         self._state_sink = state_sink or NullRuntimeStateSink()
         self._break_glass = break_glass_store or NullBreakGlassStore()
         self._break_glass_enabled = self.config.break_glass_enabled
-        self._runtime_instance_id = os.environ.get("RUN_ID", "runtime")
+        self._runtime_instance_id = (
+            instance_id if instance_id is not None else os.environ.get("RUN_ID", "runtime")
+        )
         self._runtime_name = self.config.runtime_name
         self._runtime_lease_seconds = self.config.runtime_lease_seconds
         self._runtime_fence_token: int | None = None
@@ -98,14 +147,51 @@ class AgentRuntime:
         self.audit_sink = audit_sink or JsonlAuditSink(DEFAULT_AUDIT_PATH)
         self._audit_path = getattr(self.audit_sink, "path", DEFAULT_AUDIT_PATH)
         self.portfolio_store = portfolio_store or PortfolioStore(DEFAULT_PORTFOLIO_PATH)
-        self.broker_adapter = broker_adapter or SimulatedBrokerAdapter(self.portfolio_store)
         self._agent_extras = dict(agent_extras or {})
+        self._installed_binding: Any = None
+        self.broker_adapter = broker_adapter or SimulatedBrokerAdapter(self.portfolio_store)
+        self._halt_controller: HaltController | None = None
+        if isinstance(self.portfolio_store, JournalPortfolioStore):
+            self._halt_controller = HaltController(
+                self.portfolio_store.journal,
+                self.broker_adapter,
+                ReconciliationService(
+                    self.portfolio_store.journal,
+                    cast(ReconciliationReader, self.broker_adapter),
+                    now=lambda: cast(
+                        Any, self._agent_extras.get("now", lambda: datetime.now(timezone.utc))
+                    )(),
+                ),
+                account_id=self.portfolio_store.account_id,
+                mode=self.portfolio_store.mode,
+                now=lambda: cast(
+                    Any, self._agent_extras.get("now", lambda: datetime.now(timezone.utc))
+                )(),
+            )
+        self._release_authorization = RuntimeReleaseAuthorization.build(
+            self.config,
+            (
+                portfolio_store.account_id
+                if isinstance(portfolio_store, JournalPortfolioStore)
+                else ""
+            ),
+            release_trust,
+            release_evidence,
+        )
         self.alert_notifier = alert_notifier or AlertNotifier.from_env()
         self._alert_sink = self.alert_notifier.notify if self.alert_notifier else None
-        self._audit_report_dir = Path(os.environ.get("AUDIT_REPORT_DIR", "storage/audit/reports"))
+        self._audit_report_dir = (
+            audit_report_dir
+            if audit_report_dir is not None
+            else Path(os.environ.get("AUDIT_REPORT_DIR", "storage/audit/reports"))
+        )
         self._observability_state = observability_state
-        self._performance_tracker = PerformanceTracker(
-            Path(os.environ.get("PERFORMANCE_TRACKER_PATH", DEFAULT_PERFORMANCE_PATH))
+        self._performance_tracker = (
+            performance_tracker
+            if performance_tracker is not None
+            else PerformanceTracker(
+                Path(os.environ.get("PERFORMANCE_TRACKER_PATH", DEFAULT_PERFORMANCE_PATH))
+            )
         )
         self._agents: List[BaseAgent] = []
         self._agent_names: List[str] = []
@@ -147,7 +233,262 @@ class AgentRuntime:
             extra={"governance": self._governance.redacted_summary()},
         )
 
+    def bind_worker(self, lease: WorkerLease) -> None:
+        """Attach controller authority before any agents or subscriptions start."""
+        if self._agents or (self._thread and self._thread.is_alive()):
+            raise RuntimeError("worker must bind before bootstrap")
+        if not isinstance(lease, WorkerLease):
+            raise TypeError("concrete worker lease required")
+        store = self.portfolio_store
+        if not isinstance(store, JournalPortfolioStore) or (
+            lease.store.dsn,
+            lease.store.account_id,
+            lease.store.mode,
+        ) != (store.journal.dsn, store.account_id, store.mode):
+            raise ValueError("worker and runtime require identical datastore namespace")
+        if "worker_lease" in self._agent_extras:
+            raise RuntimeError("worker binding is immutable")
+        self._agent_extras["worker_lease"] = lease
+        self._control_running = False
+        if self._halt_controller is not None:
+            self._halt_controller.broker = _WorkerCancellation(self)
+
+    def _require_current_worker(self) -> None:
+        lease = self._agent_extras.get("worker_lease")
+        if lease is None:
+            return
+        if not isinstance(lease, WorkerLease):
+            raise TypeError("concrete worker lease required")
+        store = self.portfolio_store
+        if not isinstance(store, JournalPortfolioStore) or (
+            lease.store.dsn,
+            lease.store.account_id,
+            lease.store.mode,
+        ) != (store.journal.dsn, store.account_id, store.mode):
+            raise RuntimeError("worker namespace changed")
+        lease.require_current()
+
+    def control_rearm(self, command_id: str) -> None:
+        """Rearm a proved ordinary close only for this explicit owned start."""
+        self._require_current_worker()
+        if not self._release_allowed():
+            raise RuntimeError("current signed release required for rearm")
+        store = cast(JournalPortfolioStore, self.portfolio_store)
+        if not store.journal.risk_control_status(store.account_id, store.mode)["risk_blocked"]:
+            return
+        self.reconcile_execution()
+        if not self._observe_session_risk() or not self._release_allowed():
+            raise RuntimeError("current session and release required for rearm")
+        observer = self._agent_extras["session_risk"]
+        lease = self._agent_extras["worker_lease"]
+        OperatorRearm(
+            store.journal,
+            observer,
+            account_id=store.account_id,
+            mode=store.mode,
+            now=self._agent_extras["now"],
+        ).rearm_for_start(
+            start_command_id=command_id,
+            lease=lease,
+            expected_release=lease.release,
+            session_observation=observer.status(),
+        )
+        self._kill_switch_reason = None
+
+    def control_start(self) -> Mapping[str, object]:
+        self._require_current_worker()
+        if "worker_lease" not in self._agent_extras or not self._release_allowed():
+            raise RuntimeError("bound worker and signed stage evidence required")
+        self._control_running = True
+        before = self._tick_count
+        try:
+            self.run_once(include_provider_health=False)
+            if self._tick_count == before:
+                self._control_running = False
+                raise RuntimeError("runtime did not establish a permitted running tick")
+        except Exception:
+            self._control_running = False
+            raise
+        return self.control_readback("start")
+
+    def control_halt(self, command_id: str) -> Mapping[str, object]:
+        self._require_current_worker()
+        self._control_running = False
+        controller = self._halt_controller
+        if controller is None:
+            raise RuntimeError("durable halt controller required")
+        store = cast(JournalPortfolioStore, self.portfolio_store)
+        prior = store.journal.risk_control_status(store.account_id, store.mode)
+        controller.halt(
+            command_id=prior.get("command_id") or command_id,
+            reason=prior.get("reason") or "operator_command",
+        )
+        return self.control_readback("halt")
+
+    def control_preflight(self, command_id: str) -> Mapping[str, object]:
+        """Reconcile and, when qualified before the open, record actual coverage."""
+        observed = dict(self.control_readback("reconcile"))
+        observed["preflight_qualified"] = False
+        guard = self._release_authorization.installed_guard
+        if observed["state"] != "RECONCILED" or guard is None or not self._release_allowed():
+            return observed
+        guard.require_current()
+        clock = self._agent_extras["now"]
+        qualified_at = clock()
+        observer = self._agent_extras["session_risk"]
+        started_at = clock()
+        day = started_at.astimezone(ZoneInfo("America/New_York")).date()
+        bounds = USTradingCalendar().session_bounds(day)
+        if (
+            bounds is None
+            or not started_at < bounds[0]
+            or bounds[0] - started_at > observer.boundary_grace
+        ):
+            return observed
+        self._require_current_worker()
+        coverage = observer.record_coverage(
+            identity=guard.trust.expected,
+            source_command_id=command_id,
+            safety_qualified_at=qualified_at,
+            now=started_at,
+        )
+        observed["preflight_qualified"] = True
+        observed["session_coverage"] = {
+            "session_id": coverage.session_id,
+            "identity": asdict(coverage.identity),
+            "source_command_id": coverage.source_command_id,
+            "safety_qualified_at": coverage.safety_qualified_at.isoformat(),
+            "coverage_started_at": coverage.coverage_started_at.isoformat(),
+        }
+        return observed
+
+    def control_close_session(self, command_id: str) -> Mapping[str, object]:
+        """Construct a closeout only from persisted preflight and observed session facts."""
+        self._require_current_worker()
+        guard = self._release_authorization.installed_guard
+        if guard is None:
+            raise RuntimeError("installed controller required for session closeout")
+        guard.require_current()
+        # Reconcile after the final valuation so the proof covers that observation.
+        self._observe_session_risk()
+        observed = dict(self.control_readback("halt"))
+        if observed["state"] != "HALTED":
+            return observed
+        store = cast(JournalPortfolioStore, self.portfolio_store)
+        clock = self._agent_extras["now"]
+        day = clock().astimezone(ZoneInfo("America/New_York")).date()
+        observer = self._agent_extras["session_risk"]
+        coverage = observer.closeout_evidence(f"XNYS:{day.isoformat()}")
+        if coverage is None or coverage.identity != guard.trust.expected:
+            return {**observed, "unresolved": ["session_coverage_unavailable"]}
+        lease = self._agent_extras["worker_lease"]
+        preflight = lease.store.status(coverage.source_command_id)
+        expected_coverage = {
+            "session_id": coverage.session_id,
+            "identity": asdict(coverage.identity),
+            "source_command_id": coverage.source_command_id,
+            "safety_qualified_at": coverage.safety_qualified_at.isoformat(),
+            "coverage_started_at": coverage.coverage_started_at.isoformat(),
+        }
+        if (
+            preflight is None
+            or preflight["state"] != "succeeded"
+            or preflight["action"] != "reconcile"
+            or preflight["expected_release"] != lease.release
+            or preflight["details"].get("session_coverage") != expected_coverage
+        ):
+            return {**observed, "unresolved": ["session_preflight_unconfirmed"]}
+        view = load_journal_closeout_view(
+            store.journal,
+            account_id=store.account_id,
+            mode=store.mode,
+            session_id=day.isoformat(),
+        )
+        assert coverage.latest_closing_observed_at is not None
+        source = SessionCloseoutSource(
+            session_id=day.isoformat(),
+            account_id=store.account_id,
+            mode=store.mode,
+            identity=coverage.identity,
+            opened_at=coverage.coverage_started_at,
+            closed_at=coverage.latest_closing_observed_at,
+            safety_qualified_at=coverage.safety_qualified_at,
+            reconciliation_observed_at=view.reconciliation_observed_at,
+            reconciliation_complete=view.reconciliation_complete,
+            mismatches=view.mismatches,
+            unresolved_orders=view.unresolved_orders,
+            open_owned_orders=view.open_owned_orders,
+            trade_count=view.trade_count,
+            halt_state="HALTED",
+            journal_revision=view.journal_revision,
+            command_id=command_id,
+            command_observed_at=datetime.now(timezone.utc),
+            source_kind=coverage.source_kind,
+            source_id=coverage.source_command_id,
+        )
+        artifact = build_session_closeout(source, qualification_account_id=store.account_id)
+        cast(dict[str, object], artifact["details"])[
+            "session_checkpoint"
+        ] = coverage.latest_closing_checkpoint
+        self._require_current_worker()
+        return {
+            **observed,
+            "state": "CLOSED",
+            "closeout": artifact,
+            "closeout_hash": closeout_hash(artifact),
+            "observed_at": datetime.now(timezone.utc).isoformat(),
+        }
+
+    def control_readback(self, action: str) -> Mapping[str, object]:
+        """Observe actual reconciliation, durable halt and local running state."""
+        self._require_current_worker()
+        lease = self._agent_extras.get("worker_lease")
+        if not isinstance(lease, WorkerLease):
+            raise RuntimeError("bound controller required")
+        store = cast(JournalPortfolioStore, self.portfolio_store)
+        report = self.reconcile_execution()
+        orders = store.journal.list_order_states(store.account_id, store.mode)
+        open_orders = sorted(
+            key
+            for key, item in orders.items()
+            if (item.get("observation") or {}).get("status")
+            not in {"filled", "canceled", "rejected", "expired"}
+        )
+        session_ready = self._observe_session_risk() if action == "start" else False
+        control = store.journal.risk_control_status(store.account_id, store.mode)
+        unresolved = list(cast(Any, report.get("mismatches", ()))) + list(
+            cast(Any, report.get("unresolved_orders", ()))
+        )
+        if report.get("complete") is not True:
+            unresolved.append("reconciliation_incomplete")
+        state = "RECOVERY_REQUIRED"
+        if action == "reconcile" and not unresolved:
+            state = "RECONCILED"
+        elif action == "start" and not unresolved and not control["risk_blocked"]:
+            if session_ready and self._control_running and self._agents and self._release_allowed():
+                state = "RUNNING_PAPER" if store.mode == "paper_broker" else "RUNNING_LIVE"
+        elif action in {"halt", "close_session", "rollback_to_paper"}:
+            if self._halt_controller is not None:
+                halted = self._halt_controller.status()
+                unresolved.extend(halted.unresolved)
+                if halted.state == "HALTED" and not open_orders and not unresolved:
+                    state = "HALTED"
+        self._require_current_worker()
+        return {
+            "account_id": store.account_id,
+            "mode": store.mode,
+            "release": lease.release,
+            "state": state,
+            "unresolved": sorted(set(unresolved)),
+            "open_owned_orders": open_orders,
+            "positions": store.snapshot_dict()["positions"],
+            "observed_at": datetime.now(timezone.utc).isoformat(),
+        }
+
     def bootstrap(self) -> None:
+        self._require_current_worker()
+        if getattr(self, "_control_running", None) is False:
+            raise RuntimeError("explicit signed start command required before bootstrap")
         self._acquire_runtime_lease()
         self._restore_checkpoint()
         agent_names = self.config.enabled_agents or self.registry.list_agents()
@@ -160,11 +501,14 @@ class AgentRuntime:
         for name in agent_names:
             ctx = AgentContext.build_default(
                 name=name,
+                env={**os.environ, "RUN_ID": self._runtime_instance_id},
                 ingestion=self.ingestion,
                 cache=self.cache,
                 metric_sink=self.metric_sink,
                 audit_sink=self.audit_sink,
                 extras={
+                    **self._agent_extras,
+                    "release_authorization": self._release_authorization,
                     "portfolio_store": self.portfolio_store,
                     "broker_adapter": self.broker_adapter,
                     "execution_safety_config": self.config.execution_safety,
@@ -173,18 +517,37 @@ class AgentRuntime:
                     "audit_path": self._audit_path,
                     "audit_report_dir": self._audit_report_dir,
                     "performance_tracker": self._performance_tracker,
-                    **self._agent_extras,
+                    "execution_mode": self.config.execution_mode,
                 },
                 alert_sink=self._alert_sink,
             ).with_message_bus(self.bus)
             contexts[name] = ctx
+        if self._release_authorization.installed_guard is not None:
+            self._release_authorization.installed_guard.capture_contexts(contexts)
         self._agents = [self.registry.create(name, contexts[name]) for name in agent_names]
+        if self._release_authorization.installed_guard is not None:
+            # Validate constructed agents before subscriptions can consume a directive.
+            self._release_authorization.installed_guard.require_current()
         self._agent_failure_counts = {agent.name: 0 for agent in self._agents}
         now = time.time()
         self._agent_heartbeats = {agent.name: now for agent in self._agents}
         for agent in self._agents:
             agent.ensure_setup()
-        self._state_sink.mark_started()
+        if self.config.execution_mode != "simulated":
+            report = self.reconcile_execution()
+            session_ready = self._observe_session_risk()
+            if self._resume_durable_halt() or not session_ready:
+                self._persist_checkpoint()
+                return
+            if report.get("complete") is True and not self._kill_switch_reason:
+                if self._release_allowed():
+                    self._state_sink.mark_started()
+                else:
+                    self._state_sink.heartbeat(status="release_blocked")
+            else:
+                self._state_sink.heartbeat(status="recovering")
+        else:
+            self._state_sink.mark_started()
         self._persist_checkpoint()
 
     def start(self) -> None:
@@ -215,6 +578,12 @@ class AgentRuntime:
         self.logger.info("agent runtime stopped")
 
     def run_once(self, *, include_provider_health: bool = True) -> None:
+        self._require_current_worker()
+        if getattr(self, "_control_running", None) is False:
+            self.reconcile_execution()
+            self._observe_session_risk()
+            self._resume_durable_halt()
+            return
         if not self._agents:
             self.bootstrap()
         self._run_iteration(include_provider_health=include_provider_health)
@@ -229,16 +598,32 @@ class AgentRuntime:
             time.sleep(self.config.tick_interval_seconds)
 
     def _run_iteration(self, *, include_provider_health: bool = True) -> None:
+        self._require_current_worker()
         self._refresh_acl_policy()
         if not self._renew_runtime_lease():
+            self._stop_event.set()
             self._engage_kill_switch(
                 trigger="runtime.fencing",
                 reason="runtime_lease_lost",
                 payload={"runtime_name": self._runtime_name},
             )
             return
+        if self.config.execution_mode != "simulated":
+            report = self.reconcile_execution()
+            if not report or report.get("complete") is not True:
+                # Incomplete coverage blocks admission, not an existing cancellation drain.
+                if not self._resume_durable_halt():
+                    self._state_sink.heartbeat(status="recovering")
+                return
+            session_ready = self._observe_session_risk()
+            halted = self._resume_durable_halt()
+            if halted or not session_ready:
+                return
         if self._kill_switch_reason:
             self.logger.warning("kill switch engaged; skipping tick")
+            return
+        if not self._release_allowed():
+            self._state_sink.heartbeat(status="release_blocked")
             return
         target_event_id = self.bus.high_watermark()
         for agent in self._agents:
@@ -330,7 +715,49 @@ class AgentRuntime:
             ),
         }
 
+    def _release_allowed(self) -> bool:
+        if self.config.execution_mode == "simulated":
+            return True
+        store = self.portfolio_store
+        assert isinstance(store, JournalPortfolioStore)
+        clock = self._agent_extras.get("now")
+        now = clock() if callable(clock) else datetime.now(timezone.utc)
+        decision = self._release_authorization.check(
+            account_id=store.account_id, mode=store.mode, now=now
+        )
+        if not decision["passed"]:
+            self._audit_runtime("runtime_release_blocked", dict(decision))
+        return decision["passed"]
+
     def reconcile_execution(self) -> Mapping[str, object]:
+        if self.config.execution_mode != "simulated":
+            store = self.portfolio_store
+            assert isinstance(store, JournalPortfolioStore)
+            clock = self._agent_extras.get("now")
+            now = clock if callable(clock) else lambda: datetime.now(timezone.utc)
+            try:
+                report = (
+                    ReconciliationService(
+                        store.journal, cast(ReconciliationReader, self.broker_adapter), now=now
+                    )
+                    .reconcile(store.account_id, store.mode)
+                    .to_dict()
+                )
+            except Exception as exc:
+                report = {
+                    "complete": False,
+                    "unresolved_orders": [],
+                    "mismatches": [type(exc).__name__],
+                    "as_of": now().isoformat(),
+                }
+            try:
+                assert isinstance(self.bus, PostgresMessageBus)
+                while store.journal.dispatch_outbox(self.bus, store.account_id, store.mode):
+                    pass
+            except Exception as exc:
+                report = {**report, "complete": False, "dispatch_error": type(exc).__name__}
+            self._audit_runtime("runtime_execution_reconciliation", report)
+            return report
         result = self.broker_adapter.reconcile_fills(self.portfolio_store)
         action = (
             "runtime_execution_reconciliation_mismatch"
@@ -422,6 +849,8 @@ class AgentRuntime:
             return
         self._kill_switch_reason = reason
         self._kill_switch_trigger = trigger
+        if trigger != "runtime.fencing":
+            self._resume_durable_halt(reason=reason)
         self.logger.error(
             "kill switch engaged by %s (%s)",
             self._kill_switch_trigger,
@@ -446,7 +875,71 @@ class AgentRuntime:
                 severity="critical",
             )
         self._persist_checkpoint()
-        self._stop_event.set()
+        if self.config.execution_mode == "simulated" or trigger == "runtime.fencing":
+            self._stop_event.set()
+
+    def _resume_durable_halt(self, *, reason: str | None = None) -> bool:
+        controller = self._halt_controller
+        if controller is None:
+            return False
+        store = cast(JournalPortfolioStore, self.portfolio_store)
+        status = store.journal.risk_control_status(store.account_id, store.mode)
+        if not status["risk_blocked"] and reason is None:
+            return False
+        command = status.get("command_id") or uuid4().hex
+        durable_reason = status.get("reason") or reason or "runtime_kill_switch"
+        try:
+            result = controller.halt(command_id=command, reason=durable_reason)
+        except RuntimeError:
+            status = store.journal.risk_control_status(store.account_id, store.mode)
+            durable_reason = cast(str, status["reason"])
+            result = controller.halt(
+                command_id=cast(str, status["command_id"]),
+                reason=durable_reason,
+            )
+        self._kill_switch_reason = durable_reason
+        self._state_sink.heartbeat(status=result.state.lower())
+        return True
+
+    def _observe_session_risk(self) -> bool:
+        observer = self._agent_extras.get("session_risk")
+        provider = self._agent_extras.get("session_market_inputs")
+        clock = self._agent_extras.get("now")
+        if (
+            not isinstance(observer, PostgresSessionRisk)
+            or not callable(provider)
+            or not callable(clock)
+        ):
+            self._state_sink.heartbeat(status="session_risk_unavailable")
+            return False
+        try:
+            now = clock()
+            if not isinstance(now, datetime) or now.tzinfo is None or now.utcoffset() is None:
+                raise ValueError("aware session decision time required")
+            bounds = USTradingCalendar().session_bounds(
+                now.astimezone(ZoneInfo("America/New_York")).date()
+            )
+            if bounds is None or not bounds[0] <= now <= bounds[1] + observer.max_mark_age:
+                self._state_sink.heartbeat(status="market_closed")
+                return False
+            # Closing grace permits an honestly timestamped observation, never new risk.
+            opening_provider = self._agent_extras.get("session_opening_market_inputs")
+            if callable(opening_provider):
+                try:
+                    previous = observer.status()
+                except RecoveryRequired:
+                    previous = None
+                session_id = "XNYS:" + bounds[0].date().isoformat()
+                if previous is None or previous.decision.state.session_id != session_id:
+                    provider = opening_provider
+            observer.observe(provider(now), now=now)
+            if now >= bounds[1]:
+                self._state_sink.heartbeat(status="market_closed")
+                return False
+            return True
+        except Exception:
+            self._state_sink.heartbeat(status="session_risk_recovery_required")
+            return False
 
     def _record_heartbeat(self, agent_name: str) -> None:
         if agent_name in self._disabled_agents:
@@ -841,3 +1334,12 @@ class AgentRuntime:
             if isinstance(checkpoint, int):
                 return checkpoint
         return self.bus.depth()
+
+
+class _WorkerCancellation:
+    def __init__(self, runtime: AgentRuntime) -> None:
+        self.runtime = runtime
+
+    def cancel_order(self, broker_order_id: str) -> BrokerOrderStatus:
+        self.runtime._require_current_worker()
+        return self.runtime.broker_adapter.cancel_order(broker_order_id)

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
+from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Dict, List, Mapping
@@ -24,6 +27,8 @@ from portfolio.broker import (
 )
 from portfolio.safety import ExecutionSafetyConfig
 from portfolio.store import PortfolioStore
+
+pytestmark = pytest.mark.usefixtures("owned_message_buses")
 
 
 class RecordingBroker:
@@ -180,7 +185,7 @@ def _context(
     order_ledger_path: Path | None = None,
     safety_config: ExecutionSafetyConfig | None = None,
 ) -> AgentContext:
-    extras: Dict[str, object] = {"portfolio_store": store}
+    extras: Dict[str, object] = {"portfolio_store": store, "execution_mode": "simulated"}
     if broker is not None:
         extras["broker_adapter"] = broker
     store_path = getattr(store, "_path", None)
@@ -212,6 +217,7 @@ def _approval_payload(**overrides: object) -> Dict[str, object]:
         "proposal_id": "p-1",
         "decision_id": "d-1",
         "director_approval_id": "a-1",
+        "expires_at": "2099-01-01T00:00:00+00:00",
         "symbol": "SPY",
         "price": 100.0,
         "quantity": 2.0,
@@ -223,6 +229,19 @@ def _approval_payload(**overrides: object) -> Dict[str, object]:
     }
     payload.update(overrides)
     return payload
+
+
+def test_owned_message_bus_teardown_stops_subscription_workers(
+    owned_message_buses: Any,
+) -> None:
+    bus = MessageBus()
+    bus.subscribe(lambda envelope: None, topics=["test.event"])
+
+    assert any(thread.name.startswith("MessageBusSub-") for thread in threading.enumerate())
+
+    owned_message_buses.close_all()
+
+    assert owned_message_buses.workers_are_stopped()
 
 
 def test_simulated_broker_preserves_portfolio_store_idempotency(tmp_path: Path) -> None:
@@ -1495,6 +1514,99 @@ def test_alpaca_requests_never_follow_redirects_with_credentials(
 
     assert len(calls) == 4
     assert all(call["allow_redirects"] is False for call in calls)
+
+
+def test_alpaca_fractional_capability_binds_exact_account_asset_and_position(monkeypatch):
+    class Response:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self.payload
+
+    adapter = AlpacaPaperBrokerAdapter(api_key_id="fake", api_secret_key="fake")
+    monkeypatch.setattr(adapter, "get_account", lambda: BrokerAccount("acct", "ACTIVE", True))
+    calls = []
+
+    def read(url, **kwargs):
+        calls.append((url, kwargs))
+        if "/assets/" in url:
+            return Response({"id": "asset-spy", "symbol": "SPY", "fractionable": True})
+        return Response({"symbol": "SPY", "qty": "0.250000000"})
+
+    monkeypatch.setattr(adapter, "_safe_get", read)
+    now = datetime(2026, 9, 15, tzinfo=timezone.utc)
+    capability = adapter.get_fractional_residual_capability(
+        account_id="acct", mode="paper_broker", symbol="spy", now=lambda: now
+    )
+    assert capability.position_quantity == Decimal("0.250000000")
+    assert capability.fractionable and capability.observed_at == now
+    assert [item[0] for item in calls] == [
+        "https://paper-api.alpaca.markets/v2/assets/SPY",
+        "https://paper-api.alpaca.markets/v2/positions/SPY",
+    ]
+
+
+def test_alpaca_fractional_capability_rejects_wrong_asset_symbol(monkeypatch):
+    class Response:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self.payload
+
+    adapter = AlpacaPaperBrokerAdapter(api_key_id="fake", api_secret_key="fake")
+    monkeypatch.setattr(adapter, "get_account", lambda: BrokerAccount("acct", "ACTIVE", True))
+    replies = iter(
+        [
+            Response({"id": "wrong", "symbol": "QQQ", "fractionable": True}),
+            Response({"symbol": "SPY", "qty": "0.25"}),
+        ]
+    )
+    monkeypatch.setattr(adapter, "_safe_get", lambda *args, **kwargs: next(replies))
+    with pytest.raises(ValueError, match="asset identity"):
+        adapter.get_fractional_residual_capability(
+            account_id="acct",
+            mode="paper_broker",
+            symbol="SPY",
+            now=lambda: datetime(2026, 9, 15, tzinfo=timezone.utc),
+        )
+
+
+def test_alpaca_fractional_submit_preserves_qualified_quantity_wire_value(monkeypatch):
+    captured = {}
+
+    class Response:
+        status_code = 200
+        text = ""
+
+        def json(self):
+            return {
+                "id": "broker-residual",
+                "client_order_id": "reduction-residual",
+                "symbol": "SPY",
+                "qty": "0.123456789",
+                "side": "sell",
+                "status": "new",
+                "filled_qty": "0",
+            }
+
+    def submit(url, **kwargs):
+        captured.update(kwargs)
+        return Response()
+
+    monkeypatch.setattr("portfolio.broker.requests.post", submit)
+    adapter = AlpacaPaperBrokerAdapter(api_key_id="fake", api_secret_key="fake")
+    adapter.submit_order(BrokerOrder("reduction-residual", "SPY", 0.123456789, "sell", 100))
+    assert captured["json"]["qty"] == "0.123456789"
+    assert captured["json"]["client_order_id"] == "reduction-residual"
+    assert captured["allow_redirects"] is False
 
 
 @pytest.mark.parametrize(

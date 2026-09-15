@@ -17,18 +17,22 @@ from infra.metrics import ensure_metrics_server
 from infra.postgres import get_postgres_dsn, resolve_runtime_backend, resolve_runtime_profile
 from infra.runtime_state import NullRuntimeStateSink, PostgresRuntimeStateSink, RuntimeStateSink
 from observability.state import get_observability_state
+from ops.release_gate import ReleaseTrust
 from portfolio.broker import (
     AlpacaLiveBrokerAdapter,
     AlpacaPaperBrokerAdapter,
     BrokerAdapter,
     SimulatedBrokerAdapter,
 )
-from portfolio.postgres_store import PostgresPortfolioStore
+from portfolio.journal import PostgresJournal
+from portfolio.postgres_store import JournalPortfolioStore, PostgresPortfolioStore
 from portfolio.store import PortfolioStore
 from research_inputs.catalyst_calendar import (
     CatalystCalendarValidationError,
     load_catalyst_calendar,
 )
+from risk.runtime_sources import RuntimeRiskSources
+from risk.session_store import PostgresSessionRisk
 from strategies import CatalystStrategy, MacroStrategy, MomentumStrategy, ValueStrategy
 
 from .config import AgentRuntimeConfig
@@ -54,16 +58,70 @@ def _get_positive_float(
     return value
 
 
-def build_runtime_from_env(*, load_env: bool = True) -> AgentRuntime:
+def build_runtime_from_env(
+    *,
+    load_env: bool = True,
+    release_trust: ReleaseTrust | None = None,
+    release_evidence: dict[str, object] | None = None,
+    risk_sources: RuntimeRiskSources | None = None,
+) -> AgentRuntime:
     """Build a runtime wired with builtin agents and default services."""
 
     if load_env:
         load_dotenv()
+    config = AgentRuntimeConfig.from_env_for_recovery()
+    env = os.environ
+    if risk_sources is not None:
+        if not isinstance(risk_sources, RuntimeRiskSources):
+            raise TypeError("typed runtime risk sources required")
+        risk_sources.require_namespace(
+            account_id=env.get("PORTFOLIO_ACCOUNT_ID", "").strip(), mode=config.execution_mode
+        )
+        if (
+            release_trust is not None
+            and release_trust.expected.policy_hash != risk_sources.policy.content_hash
+        ):
+            raise ValueError("runtime risk policy does not match release identity")
+    backend = resolve_runtime_backend(env)
+    journal_store: JournalPortfolioStore | None = None
+    if config.execution_mode != "simulated":
+        if backend != "postgres":
+            raise RuntimeError("broker mode requires PostgreSQL persistence")
+        account_id = env.get("PORTFOLIO_ACCOUNT_ID", "").strip()
+        if not account_id:
+            raise RuntimeError("broker mode requires explicit PORTFOLIO_ACCOUNT_ID")
+        dsn = get_postgres_dsn(env, required=True)
+        if not dsn:
+            raise RuntimeError("broker mode requires PostgreSQL DSN")
+        journal = PostgresJournal(dsn)
+        journal.require_submission_ready(account_id, config.execution_mode)
+        journal_store = JournalPortfolioStore(
+            journal, account_id=account_id, mode=config.execution_mode
+        )
     registry = AgentRegistry()
     register_builtin_agents(registry)
     ingestion = DataIngestionService()
-    config = AgentRuntimeConfig.from_env()
     agent_extras = _agent_extras_from_config(config)
+    if risk_sources is not None:
+        if journal_store is None:
+            raise ValueError("runtime risk requires broker journal persistence")
+        agent_extras.update(
+            risk_evaluation_service=risk_sources.bind(journal_store),
+            risk_history_provider=risk_sources.history_provider,
+            now=risk_sources.now,
+            session_market_inputs=risk_sources.market_inputs,
+            session_risk=PostgresSessionRisk(
+                journal_store.journal,
+                account_id=journal_store.account_id,
+                mode=journal_store.mode,
+                policy=risk_sources.policy,
+                max_mark_age=risk_sources.session.max_mark_age,
+                boundary_grace=risk_sources.session.boundary_grace,
+                window_sessions=risk_sources.session.window_sessions,
+                max_drawdown=risk_sources.session.max_drawdown,
+                control_timeout=risk_sources.session.control_timeout,
+            ),
+        )
     prometheus_port = int(os.environ.get("PROMETHEUS_METRICS_PORT", "9464"))
     ensure_metrics_server(prometheus_port)
     state = get_observability_state()
@@ -75,7 +133,7 @@ def build_runtime_from_env(*, load_env: bool = True) -> AgentRuntime:
     portfolio_path = Path(env.get("PORTFOLIO_STATE_PATH", "storage/strategy_state/portfolio.json"))
     bus = MessageBus()
     audit_sink: AuditSink = JsonlAuditSink(audit_path)
-    portfolio_store = PortfolioStore(portfolio_path)
+    portfolio_store: PortfolioStore = journal_store or PortfolioStore(portfolio_path)
     broker_adapter: BrokerAdapter | None = None
     state_sink: RuntimeStateSink = NullRuntimeStateSink()
     break_glass_store: BreakGlassStore = NullBreakGlassStore()
@@ -87,12 +145,13 @@ def build_runtime_from_env(*, load_env: bool = True) -> AgentRuntime:
         initial_cash = _get_positive_float(env, "PORTFOLIO_INITIAL_CASH", 1_000_000.0)
         bus = PostgresMessageBus(dsn, instance_id=run_id)
         audit_sink = PostgresAuditSink(dsn, mirror_path=audit_path)
-        portfolio_store = PostgresPortfolioStore(
-            dsn,
-            account_id=account_id,
-            initial_cash=initial_cash,
-            mirror_path=portfolio_path,
-        )
+        if journal_store is None:
+            portfolio_store = PostgresPortfolioStore(
+                dsn,
+                account_id=account_id,
+                initial_cash=initial_cash,
+                mirror_path=portfolio_path,
+            )
         state_sink = PostgresRuntimeStateSink(
             dsn,
             instance_id=run_id,
@@ -130,6 +189,8 @@ def build_runtime_from_env(*, load_env: bool = True) -> AgentRuntime:
         break_glass_store=break_glass_store,
         broker_adapter=broker_adapter,
         agent_extras=agent_extras,
+        release_trust=release_trust,
+        release_evidence=release_evidence,
     )
     return runtime
 

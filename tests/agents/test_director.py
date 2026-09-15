@@ -14,6 +14,8 @@ from portfolio.store import PortfolioSnapshot, PortfolioStore
 from strategies.base import StrategyPayload
 from strategies.momentum import MomentumStrategy
 
+pytestmark = pytest.mark.usefixtures("owned_message_buses")
+
 
 class FakeIngestion:
     def get_market_snapshot(self, symbol: str) -> CanonicalSnapshot:

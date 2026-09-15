@@ -3,7 +3,11 @@ from __future__ import annotations
 import threading
 import time
 
+import pytest
+
 from agents.messaging import MessageBus
+
+pytestmark = pytest.mark.usefixtures("owned_message_buses")
 
 
 def test_publish_and_subscribe_with_replay():

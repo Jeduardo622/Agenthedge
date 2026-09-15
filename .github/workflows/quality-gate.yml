@@ -10,6 +10,20 @@ on:
 jobs:
   checks:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     permissions:
       contents: read
       id-token: write
@@ -33,7 +47,23 @@ jobs:
         run: poetry run python -m pip install --upgrade "pip>=26.1.2"
 
       - name: Run tests with coverage gate
-        run: poetry run pytest --cov=src --cov-fail-under=80
+        env:
+          POSTGRES_DSN: postgresql://postgres:postgres@localhost:5432/postgres
+          PYTHON_DOTENV_DISABLED: "1"
+          EXECUTION_MODE: simulated
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes postgresql-client-16
+          export PATH="/usr/lib/postgresql/16/bin:$PATH"
+          poetry run python scripts/run_postgres_suite.py --create-disposable-databases --output-dir .cache/postgres-suite
+
+      - name: Preserve PostgreSQL suite evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: postgres-suite-evidence
+          path: .cache/postgres-suite
+          if-no-files-found: warn
 
       - name: Type checks
         run: poetry run mypy src

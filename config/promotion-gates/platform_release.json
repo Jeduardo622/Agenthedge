@@ -1,0 +1,88 @@
+{
+  "schema_version": 1,
+  "max_dossier_age_seconds": 86400,
+  "max_preflight_age_seconds": 300,
+  "stages": {
+    "paper_start": [
+      "G0",
+      "G1",
+      "G2"
+    ],
+    "dependable_paper": [
+      "G0",
+      "G1",
+      "G2",
+      "G4"
+    ],
+    "live_start": [
+      "G0",
+      "G1",
+      "G2",
+      "G3",
+      "G4",
+      "G5"
+    ],
+    "closeout": [
+      "G0",
+      "G1",
+      "G2",
+      "G3",
+      "G4",
+      "G5",
+      "G6"
+    ]
+  },
+  "minimum_sessions": {
+    "paper_start": 0,
+    "dependable_paper": 5,
+    "live_start": 20,
+    "closeout": 20
+  },
+  "checks": {
+    "G0": [
+      "baseline",
+      "regression_matrix",
+      "mandate",
+      "policy_manifest",
+      "data_manifest"
+    ],
+    "G1": [
+      "decimal_accounting",
+      "crash_replay",
+      "broker_history_reconciliation",
+      "migration_rollback"
+    ],
+    "G2": [
+      "session_loss",
+      "aggregate_reservations",
+      "stale_feed_veto",
+      "cancel_races",
+      "persistent_halt",
+      "observed_rollback",
+      "current_preflight"
+    ],
+    "G3": [
+      "runtime_replay_parity",
+      "causal_fills",
+      "bias_tests",
+      "frozen_holdout",
+      "approved_objective"
+    ],
+    "G4": [
+      "paper_operations"
+    ],
+    "G5": [
+      "representative_sessions",
+      "fault_drills",
+      "account_readiness",
+      "approved_caps",
+      "owner_authorization"
+    ],
+    "G6": [
+      "observed_pilot",
+      "operator_workflows",
+      "restore_runbook",
+      "residual_risk_acceptance"
+    ]
+  }
+}

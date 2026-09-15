@@ -16,6 +16,8 @@ from audit import JsonlAuditSink
 from infra.runtime_state import RuntimeFenceError
 from portfolio.store import PortfolioStore
 
+pytestmark = pytest.mark.usefixtures("owned_message_buses")
+
 
 class FakeIngestion:
     def get_market_snapshot(self, symbol: str) -> SimpleNamespace:

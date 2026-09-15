@@ -3,8 +3,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from math import isfinite
 from typing import List
+
+from ops.residual_reduction import (
+    FractionalResidualCapability,
+    FractionalResidualPolicy,
+    authorize_fractional_residual,
+)
 
 from .broker import BrokerAccount, BrokerMarketClock, BrokerOrder, BrokerPosition
 
@@ -83,6 +90,42 @@ def evaluate_order_safety(
         return ExecutionSafetyResult(False, "new_short_exposure_prohibited")
     if abs(current_quantity + signed_order_quantity) > config.max_symbol_position_shares:
         return ExecutionSafetyResult(False, "max_symbol_position_exceeded")
+    return ExecutionSafetyResult(True)
+
+
+def evaluate_fractional_residual_safety(
+    order: BrokerOrder,
+    *,
+    account: BrokerAccount,
+    market_clock: BrokerMarketClock,
+    config: ExecutionSafetyConfig,
+    policy: FractionalResidualPolicy,
+    capability: FractionalResidualCapability,
+    now: datetime,
+) -> ExecutionSafetyResult:
+    """Apply broker checks to one explicitly authorized exact residual exit."""
+    try:
+        quantity = authorize_fractional_residual(
+            policy, capability, symbol=order.symbol, quantity=order.quantity, now=now
+        )
+    except (ValueError, ArithmeticError):
+        return ExecutionSafetyResult(False, "fractional_residual_authorization_invalid")
+    if order.side != "sell" or order.limit_price is None or not _finite(order.limit_price):
+        return ExecutionSafetyResult(False, "fractional_residual_order_invalid")
+    if order.limit_price <= 0:
+        return ExecutionSafetyResult(False, "bounded_positive_limit_price_required")
+    if config.require_paper_account and not account.is_paper:
+        return ExecutionSafetyResult(False, "paper_account_required")
+    if account.account_id != policy.account_id or account.trading_blocked:
+        return ExecutionSafetyResult(False, "account_not_eligible")
+    if account.status.upper() not in {"ACTIVE", "OPEN"}:
+        return ExecutionSafetyResult(False, "account_not_active")
+    if config.market_hours_guard_enabled and not market_clock.is_open:
+        return ExecutionSafetyResult(False, "market_closed")
+    if float(quantity) > config.max_order_shares:
+        return ExecutionSafetyResult(False, "max_order_shares_exceeded")
+    if float(quantity) * order.limit_price > config.max_order_notional:
+        return ExecutionSafetyResult(False, "max_order_notional_exceeded")
     return ExecutionSafetyResult(True)
 
 

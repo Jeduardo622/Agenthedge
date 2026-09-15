@@ -11,6 +11,8 @@ from typing import Any, Callable, Iterable, Mapping, cast
 
 import typer
 
+from agents.config import AgentRuntimeConfig
+from ops.release_gate import ReleaseTrust, release_decision
 from portfolio.broker import AlpacaLiveBrokerAdapter, BrokerAdapter
 
 app = typer.Typer(
@@ -35,6 +37,8 @@ def build_switch_packet(
     apply: bool = False,
     confirmation: str | None = None,
     now: datetime | None = None,
+    release_trust: ReleaseTrust | None = None,
+    release_evidence: dict[str, object] | None = None,
 ) -> dict[str, Any]:
     artifact_root = Path(artifact_dir)
     artifact_root.mkdir(parents=True, exist_ok=True)
@@ -57,6 +61,30 @@ def build_switch_packet(
         scheduler_state_provider=scheduler_state_provider,
     )
     blockers.extend(preflight["blockers"])
+    gate = release_decision(
+        release_evidence, trust=release_trust, stage="live_start", now=current_time
+    )
+    if release_trust is not None and (
+        release_trust.expected.mode != "live"
+        or release_trust.expected.account_id != preflight["broker_identity"].get("account_id")
+    ):
+        gate = {
+            "stage": "live_start",
+            "passed": False,
+            "reasons": ["broker_release_identity_mismatch"],
+        }
+    if not gate["passed"]:
+        blockers.extend("release evidence: " + str(reason) for reason in gate["reasons"])
+    else:
+        try:
+            AgentRuntimeConfig.from_env(
+                source_env,
+                release_trust=release_trust,
+                release_evidence=release_evidence,
+                now=current_time,
+            )
+        except ValueError as exc:
+            blockers.append(str(exc))
     timestamp = _timestamp()
     json_path = artifact_root / f"paper_live_enablement_switch_{timestamp}.json"
     markdown_path = artifact_root / f"paper_live_enablement_switch_{timestamp}.md"
@@ -65,6 +93,7 @@ def build_switch_packet(
     outcome = "ready_to_apply_live_switch" if ready else "blocked_with_reasons"
     packet: dict[str, Any] = {
         "artifact_type": "paper_live_enablement_switch",
+        "release_gate": gate,
         "created_at": current_time.isoformat(),
         "outcome": outcome,
         "dry_run": not apply,
@@ -97,6 +126,7 @@ def build_switch_packet(
         "switch_transcript_markdown_artifact": str(markdown_path),
     }
     markdown = _render_switch_markdown(packet)
+    markdown += "\nRelease gate: " + json.dumps(gate, sort_keys=True) + "\n"
     packet["markdown"] = markdown
     json_path.write_text(json.dumps(packet, indent=2, sort_keys=True), encoding="utf-8")
     markdown_path.write_text(markdown, encoding="utf-8")
