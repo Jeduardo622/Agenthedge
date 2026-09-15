@@ -9,6 +9,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Iterable, Mapping, MutableMapping, TypedDict
 
+from .accounting import AccountingState, PositionState, apply_trade, as_decimal
+
 
 class _PositionState(TypedDict):
     quantity: float
@@ -115,41 +117,34 @@ class PortfolioStore:
         quantity: float,
         price: float,
         dedup_key: str | None = None,
+        fee: float = 0.0,
     ) -> Mapping[str, float]:
         """Apply a trade fill; quantity > 0 for buy, < 0 for sell."""
 
-        if quantity == 0.0:
-            raise ValueError("quantity must be non-zero")
-        if price <= 0.0:
-            raise ValueError("price must be positive")
-
         with self._lock:
-            positions: Dict[str, _PositionState] = self._state["positions"]
-            position = positions.setdefault(symbol, {"quantity": 0.0, "average_cost": float(price)})
-            existing_qty = position["quantity"]
-            existing_cost = position["average_cost"]
-
-            realized = 0.0
-            if existing_qty and (existing_qty > 0) != (quantity > 0):
-                closing_qty = min(abs(existing_qty), abs(quantity))
-                pnl = (price - existing_cost) * closing_qty * (1 if existing_qty > 0 else -1)
-                realized += pnl
-
-            new_qty = existing_qty + quantity
-            if new_qty == 0.0:
-                positions.pop(symbol, None)
-            elif (existing_qty >= 0 and quantity > 0) or (existing_qty <= 0 and quantity < 0):
-                total_cost = existing_cost * existing_qty + price * quantity
-                position["quantity"] = new_qty
-                position["average_cost"] = total_cost / new_qty if new_qty else price
-            else:
-                position["quantity"] = new_qty
-                if new_qty != 0.0:
-                    position["average_cost"] = existing_cost
-
-            cash_delta = -(quantity * price)
-            self._state["cash"] += cash_delta
-            self._state["realized_pnl"] += realized
+            state = AccountingState(
+                as_decimal(self._state["cash"]),
+                as_decimal(self._state["realized_pnl"]),
+                {
+                    key: PositionState(
+                        as_decimal(value["quantity"]), as_decimal(value["average_cost"])
+                    )
+                    for key, value in self._state["positions"].items()
+                },
+            )
+            result = apply_trade(
+                state,
+                symbol=symbol,
+                quantity=as_decimal(quantity),
+                price=as_decimal(price),
+                fee=as_decimal(fee),
+            )
+            self._state["cash"] = float(result.cash)
+            self._state["realized_pnl"] = float(result.realized_pnl)
+            self._state["positions"] = {
+                key: {"quantity": float(value.quantity), "average_cost": float(value.average_cost)}
+                for key, value in result.positions.items()
+            }
             self._state["last_updated"] = datetime.now(timezone.utc).isoformat()
             self._persist()
             position_state = self._state["positions"].get(symbol)

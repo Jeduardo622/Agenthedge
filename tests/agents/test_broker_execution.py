@@ -58,13 +58,13 @@ class RecordingBroker:
         self.cancelled.append(broker_order_id)
         return BrokerOrderStatus(
             broker_order_id=broker_order_id,
-            client_order_id="client-cancel",
-            symbol="SPY",
-            quantity=1.0,
-            side="buy",
+            client_order_id=self.submit_status.client_order_id,
+            symbol=self.submit_status.symbol,
+            quantity=self.submit_status.quantity,
+            side=self.submit_status.side,
             status="canceled",
-            filled_quantity=0.0,
-            average_fill_price=None,
+            filled_quantity=self.submit_status.filled_quantity,
+            average_fill_price=self.submit_status.average_fill_price,
         )
 
     def get_order_status(self, broker_order_id: str) -> BrokerOrderStatus:
@@ -1588,3 +1588,183 @@ def test_alpaca_paper_adapter_raises_submit_unknown_when_timeout_recovery_misses
         )
 
     assert exc.value.client_order_id == "client-missing-1"
+
+
+def test_cumulative_average_uses_incremental_value(tmp_path: Path) -> None:
+    store = PortfolioStore(tmp_path / "portfolio.json", initial_cash=1000)
+    bus = MessageBus()
+    first = BrokerOrderStatus(
+        broker_order_id="economic-1",
+        client_order_id="client-1",
+        symbol="SPY",
+        quantity=2,
+        side="buy",
+        status="partially_filled",
+        filled_quantity=1,
+        average_fill_price=100,
+    )
+    broker = RecordingBroker(submit_status=first)
+    agent = ExecutionAgent(_context(store, bus, broker=broker))
+    record = agent._record_order_status(first, {})
+    agent._persist_new_broker_fill(record, first, fallback_price=100)
+    second = BrokerOrderStatus(
+        broker_order_id="economic-1",
+        client_order_id="client-1",
+        symbol="SPY",
+        quantity=2,
+        side="buy",
+        status="filled",
+        filled_quantity=2,
+        average_fill_price=110,
+    )
+    record = agent._record_order_status(second, {})
+    agent._persist_new_broker_fill(record, second, fallback_price=100)
+    assert store.snapshot().cash == 780
+    assert store.snapshot().positions["SPY"].average_cost == 110
+
+
+def test_same_quantity_value_correction_requires_recovery(tmp_path: Path) -> None:
+    store = PortfolioStore(tmp_path / "portfolio.json", initial_cash=1000)
+    first = BrokerOrderStatus(
+        broker_order_id="economic-1",
+        client_order_id="client-1",
+        symbol="SPY",
+        quantity=2,
+        side="buy",
+        status="partially_filled",
+        filled_quantity=1,
+        average_fill_price=100,
+    )
+    agent = ExecutionAgent(
+        _context(store, MessageBus(), broker=RecordingBroker(submit_status=first))
+    )
+    record = agent._record_order_status(first, {})
+    agent._persist_new_broker_fill(record, first, fallback_price=100)
+    corrected = BrokerOrderStatus(
+        broker_order_id="economic-1",
+        client_order_id="client-1",
+        symbol="SPY",
+        quantity=2,
+        side="buy",
+        status="partially_filled",
+        filled_quantity=1,
+        average_fill_price=110,
+    )
+    record = agent._record_order_status(corrected, {})
+    with pytest.raises(ValueError, match="reconciliation required"):
+        agent._persist_new_broker_fill(record, corrected, fallback_price=100)
+    assert record["recovery_required"] is True
+    assert record["closed"] is False
+    assert store.snapshot().cash == 900
+
+
+def test_recovery_flag_survives_restart_and_blocks_approval(tmp_path: Path) -> None:
+    ledger = tmp_path / "execution-orders.json"
+    ledger.write_text(json.dumps({"orders": {"economic-1": {"recovery_required": True}}}))
+    store = PortfolioStore(tmp_path / "portfolio.json", initial_cash=1000)
+    broker = RecordingBroker(
+        submit_status=BrokerOrderStatus(
+            broker_order_id="economic-2",
+            client_order_id="a-1",
+            symbol="SPY",
+            quantity=2,
+            side="buy",
+            status="accepted",
+        )
+    )
+    bus = MessageBus()
+    events = []
+    agent = ExecutionAgent(
+        _context(store, bus, broker=broker, audit_events=events, order_ledger_path=ledger)
+    )
+    agent.setup()
+    bus.publish("director.approval", payload=_approval_payload(), publisher="director")
+    time.sleep(0.1)
+    agent.teardown()
+    assert broker.submitted == []
+    assert any(event["action"] == "execution_reconciliation_required" for event in events)
+
+
+@pytest.mark.parametrize(
+    "changed",
+    [
+        {"symbol": "QQQ"},
+        {"side": "sell"},
+        {"client_order_id": "different"},
+        {"quantity": 3},
+        {"filled_quantity": 3},
+        {"quantity": -2},
+        {"broker_order_id": "different"},
+        {"filled_quantity": -1},
+    ],
+)
+def test_broker_identity_changes_require_recovery_before_overwrite(tmp_path: Path, changed) -> None:
+    from dataclasses import replace
+
+    store = PortfolioStore(tmp_path / "portfolio.json", initial_cash=1000)
+    first = BrokerOrderStatus(
+        broker_order_id="economic-1",
+        client_order_id="client-1",
+        symbol="SPY",
+        quantity=2,
+        side="buy",
+        status="partially_filled",
+        filled_quantity=1,
+        average_fill_price=100,
+    )
+    agent = ExecutionAgent(
+        _context(store, MessageBus(), broker=RecordingBroker(submit_status=first))
+    )
+    record = agent._record_order_status(first, {})
+    agent._persist_new_broker_fill(record, first, fallback_price=100)
+    before = store.snapshot_dict()
+    update = replace(first, filled_quantity=2, average_fill_price=110)
+    update = replace(update, **changed)
+    with pytest.raises(ValueError, match="reconciliation required"):
+        record = agent._record_order_status(update, record)
+        agent._persist_new_broker_fill(record, update, fallback_price=100)
+    assert store.snapshot_dict() == before
+    assert record["symbol"] == "SPY"
+    assert record["side"] == "buy"
+    assert record["client_order_id"] == "client-1"
+    assert record["quantity"] == 2
+    assert record["recovery_required"] is True
+    assert record["closed"] is False
+    reopened = ExecutionAgent(
+        _context(store, MessageBus(), broker=RecordingBroker(submit_status=first))
+    )
+    assert reopened._order_ledger["orders"]["economic-1"]["recovery_required"] is True
+
+
+@pytest.mark.parametrize(
+    "changed",
+    [
+        {"symbol": "QQQ"},
+        {"side": "sell"},
+        {"client_order_id": "different"},
+        {"quantity": 3},
+        {"filled_quantity": 3},
+    ],
+)
+def test_initial_broker_status_must_match_request(tmp_path: Path, changed) -> None:
+    from dataclasses import replace
+
+    store = PortfolioStore(tmp_path / "portfolio.json", initial_cash=1000)
+    status = BrokerOrderStatus(
+        broker_order_id="economic-1",
+        client_order_id="a-1",
+        symbol="SPY",
+        quantity=2,
+        side="buy",
+        status="partially_filled",
+        filled_quantity=1,
+        average_fill_price=100,
+    )
+    agent = ExecutionAgent(
+        _context(store, MessageBus(), broker=RecordingBroker(submit_status=status))
+    )
+    with pytest.raises(ValueError, match="reconciliation required"):
+        record = agent._record_order_status(replace(status, **changed), _approval_payload())
+        agent._persist_new_broker_fill(record, replace(status, **changed), fallback_price=100)
+    assert store.snapshot().cash == 1000
+    assert agent._order_ledger["orders"]["economic-1"]["recovery_required"] is True
