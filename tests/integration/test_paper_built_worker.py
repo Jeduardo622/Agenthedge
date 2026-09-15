@@ -22,7 +22,7 @@ import requests
 from agents.context import AgentContext
 from agents.runtime import AgentRuntime
 from data.config import DataProviderConfig
-from infra.postgres import ensure_postgres_schema, migrate_execution_journal
+from infra.postgres import ensure_postgres_schema, migrate_execution_journal, postgres_connection
 from ops.agent_bindings import agent_parameters
 from ops.artifacts import _FACTORIES
 from ops.calendar import USTradingCalendar
@@ -200,6 +200,9 @@ def paper_built_worker(tmp_path, monkeypatch):
         "AGENT_ENABLED": "director,quant,risk,compliance,execution,audit",
         "DATA_CACHE_ENABLED": "false",
         "ALERT_STDOUT_ENABLED": "false",
+        "EXECUTION_MAX_ORDER_NOTIONAL": "1000",
+        "EXECUTION_MAX_ORDER_SHARES": "1",
+        "EXECUTION_MAX_SYMBOL_POSITION_SHARES": "1",
     }
     from agents.config import AgentRuntimeConfig
 
@@ -363,7 +366,25 @@ def _start(state):
     worker.run_once()
     submit(worker, "start", "start_paper")
     result = worker.run_once()
-    assert result["state"] == "succeeded", result
+    assert result["state"] == "succeeded", result.get("details")
+    _healthy(state)
+
+
+def _healthy(state):
+    observed = state.worker.runtime.control_readback("start")
+    assert observed["state"] == "RUNNING_PAPER", observed
+    assert observed["unresolved"] == [], observed
+    return observed
+
+
+def _directives(state):
+    with postgres_connection(state.journal.dsn) as conn, conn.cursor() as cur:
+        cur.execute(
+            "SELECT payload_json FROM ah_bus_events WHERE account_id=%s "
+            "AND mode='paper_broker' AND topic='director.directive' ORDER BY event_id",
+            (state.mandate.account_id,),
+        )
+        return [row[0] for row in cur.fetchall()]
 
 
 def test_installed_paper_worker_submits_exactly_one_share_at_ask(paper_built_worker):
@@ -378,7 +399,13 @@ def test_installed_paper_worker_submits_exactly_one_share_at_ask(paper_built_wor
     assert state.journal.snapshot(state.mandate.account_id, "paper_broker").cash == Decimal(
         "100000"
     )
+    ticks = state.worker.runtime._tick_count
+    directives = _directives(state)
+    assert len(directives) == 1
     state.worker.run_once()
+    assert state.worker.runtime._tick_count == ticks + 1
+    assert len(_directives(state)) == len(directives) + 1
+    assert len(_healthy(state)["open_owned_orders"]) == 1
     assert len(state.transport.posts) == 1
 
 
@@ -386,4 +413,31 @@ def test_installed_paper_worker_does_not_force_a_trade(paper_built_worker):
     state = paper_built_worker
     state.transport.last, state.transport.bid, state.transport.ask = 100, 99.99, 100.01
     _start(state)
+    assert len(_directives(state)) == 1
     assert state.transport.posts == []
+
+
+def test_installed_negative_signal_never_shorts_empty_inventory(paper_built_worker):
+    state = paper_built_worker
+    state.transport.last, state.transport.bid, state.transport.ask = 99, 98.99, 99.01
+    _start(state)
+    assert len(_directives(state)) == 1
+    assert state.transport.posts == []
+
+
+def test_installed_unowned_spy_blocks_start_without_adoption(paper_built_worker):
+    from tests.integration.test_installed_worker import submit
+
+    state = paper_built_worker
+    state.transport.positions = [{"symbol": "SPY", "qty": "77", "asset_class": "us_equity"}]
+    worker = state.worker
+    worker.run_once()
+    submit(worker, "start", "start_paper")
+    result = worker.run_once()
+    assert result["state"] == "recovery_required", result
+    observed = worker.runtime.control_readback("reconcile")
+    assert observed["state"] == "RECOVERY_REQUIRED", observed
+    assert "positions" in observed["unresolved"], observed
+    assert state.transport.positions[0]["qty"] == "77"
+    assert state.transport.posts == []
+    assert state.journal.snapshot(state.mandate.account_id, "paper_broker").positions == {}

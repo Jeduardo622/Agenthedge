@@ -93,9 +93,21 @@ def test_one_share_owned_intent_reaches_actual_submission_boundary(bound, tmp_pa
     )
     broker.status = replace(broker.status, quantity=1)
     captured = []
-    execution.context.ingestion.revalidate_order = lambda symbol, side, price: captured.append(
-        (symbol, side, price)
-    )
+    validated = []
+    snapshot = object()
+
+    def recapture(symbol, side, price):
+        captured.append((symbol, side, price))
+        return snapshot
+
+    def validate_capture(value, at):
+        assert value is snapshot
+        assert at == broker.now()
+        assert broker.calls == 0
+        validated.append(value)
+
+    execution.context.ingestion.revalidate_order = recapture
+    execution.context.ingestion.validate_execution_snapshot = validate_capture
     execution._handle_approval(
         approval(
             broker=broker, proposal_id="one-p", quantity=1, paper_mandate_hash=policy.content_hash
@@ -103,6 +115,7 @@ def test_one_share_owned_intent_reaches_actual_submission_boundary(bound, tmp_pa
     )
     assert broker.calls == 1
     assert captured == [("SPY", "buy", D(100))]
+    assert validated == [snapshot]
     assert (
         j.intent(account, "paper_broker", "approval")["payload"]["paper_mandate_hash"]
         == policy.content_hash

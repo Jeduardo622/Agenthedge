@@ -1088,13 +1088,24 @@ class AgentRuntime:
         wait_raw = getattr(self.bus, "wait_until_caught_up", None)
         try:
             if callable(wait_raw):
-                caught_up = bool(
-                    wait_raw(
-                        target_event_id,
-                        self._bus_drain_timeout_seconds,
-                        None,
-                    )
-                )
+                deadline = time.monotonic() + self._bus_drain_timeout_seconds
+                while True:
+                    remaining = max(0.0, deadline - time.monotonic())
+                    caught_up = bool(wait_raw(target_event_id, remaining, None))
+                    if not caught_up:
+                        break
+                    # Handlers publish their children before completing the parent.
+                    # Include those descendants before a tick can reconcile again.
+                    latest = self.bus.high_watermark()
+                    if time.monotonic() > deadline:
+                        caught_up = False
+                        break
+                    if latest <= target_event_id:
+                        break
+                    target_event_id = latest
+                    if time.monotonic() >= deadline:
+                        caught_up = False
+                        break
             else:
                 caught_up = self.bus.drain(self._bus_drain_timeout_seconds)
         except Exception as exc:

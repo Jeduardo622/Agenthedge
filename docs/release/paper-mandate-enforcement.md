@@ -50,6 +50,11 @@ from the bid/ask timestamp, same-feed prior close/history/liquidity, and validat
 ETF look-through provenance. A final capture never widens the approved limit;
 the exact capture must still be fresh after blocking authorization checks.
 
+Before control readback can reconcile a completed tick, the worker must finish
+downstream events emitted by that tick's handlers. The existing configured bus
+deadline covers the complete chain; each downstream event does not receive a new
+timeout budget. Expiry retains the existing fail-closed halt and recovery path.
+
 Tests using synthetic transport/signatures are software verification only. A
 passing test suite does not create a new broker account, approve operational
 evidence, count an observed session, or establish paper/live qualification.
