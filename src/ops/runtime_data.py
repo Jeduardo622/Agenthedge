@@ -308,8 +308,24 @@ class RuntimeMarketData:
         return snapshot
 
     def validate_execution_snapshot(self, snapshot: CanonicalSnapshot, at: datetime) -> None:
-        """Recheck the exact successful capture after any blocking authorization work."""
-        self.require()
+        """Pure final check after release authorization; never perform blocking I/O here."""
+        if (
+            type(self.provider) is not AlpacaIexProvider
+            or self.provider is not self._approved_provider
+            or self.provider_name != "alpaca_iex"
+            or self.provider.config != self._config
+            or self.provider.now is not self.now
+            or self.provider.policy is not self._quote_policy
+            or self.provider.capture != self._capture_binding
+            or (
+                self.execution_limit,
+                self.revalidate_order,
+                self._capture,
+                self.validate_execution_snapshot,
+            )
+            != self._execution_bindings
+        ):
+            raise ValueError("loaded runtime provider changed")
         if snapshot is not self._last_execution_snapshot or self._quote_policy is None:
             raise ValueError("exact captured execution snapshot required")
         if not isinstance(at, datetime) or at.utcoffset() is None:

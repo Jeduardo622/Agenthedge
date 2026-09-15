@@ -276,3 +276,28 @@ def test_final_boundary_rejects_substituted_snapshot(iex):
     snapshot = loaded.revalidate_order("SPY", "buy", Decimal("101.01"))
     with pytest.raises(ValueError, match="captured"):
         loaded.validate_execution_snapshot(replace(snapshot, symbol="QQQ"), now[0])
+
+
+def test_final_execution_validation_performs_no_file_reads(iex, monkeypatch):
+    from pathlib import Path
+
+    loaded, now, *_ = iex
+    snapshot = loaded.revalidate_order("SPY", "buy", Decimal("101.01"))
+    monkeypatch.setattr(
+        Path, "read_bytes", lambda *args: pytest.fail("final validation performed file I/O")
+    )
+    loaded.validate_execution_snapshot(snapshot, now[0])
+
+
+@pytest.mark.parametrize("mutation", ["provider", "policy", "capture_callback"])
+def test_pure_final_validation_rejects_local_binding_changes(iex, mutation):
+    loaded, now, *_ = iex
+    snapshot = loaded.revalidate_order("SPY", "buy", Decimal("101.01"))
+    if mutation == "provider":
+        loaded.provider = replace(loaded.provider)
+    elif mutation == "policy":
+        loaded._quote_policy = replace(loaded._quote_policy, max_age_seconds=Decimal("1"))
+    else:
+        loaded._capture = lambda symbol: snapshot
+    with pytest.raises(ValueError, match="provider"):
+        loaded.validate_execution_snapshot(snapshot, now[0])

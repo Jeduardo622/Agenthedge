@@ -39,6 +39,9 @@ boundary calls `revalidate_order` for a new uncached capture and rejects a buy
 above the new ask or sell below the new bid. It never changes quantity or price.
 Because capture consumes time, submission must subsequently recheck independent
 release, lease, reservation and risk-approval expiry before broker submission.
+After those blocking checks, `validate_execution_snapshot` checks the exact captured
+object, local provider bindings and both timestamps without file or network I/O.
+Descriptor/research hashes remain checked by capture and installed release authorization.
 
 Actual account identity, broker baseline, entitlement, observed input coverage,
 ETF source validation and independent signature remain operational gates.
