@@ -23,6 +23,7 @@ from portfolio.broker import (
     SimulatedBrokerAdapter,
 )
 from portfolio.journal import EconomicEvent, OrderObservation, RecoveryRequired, TradePayload
+from portfolio.paper_mandate import PaperMandate
 from portfolio.postgres_store import JournalPortfolioStore
 from portfolio.reconciliation import ReconciliationReader, ReconciliationService
 from portfolio.safety import (
@@ -57,6 +58,9 @@ class ExecutionAgent(BaseAgent):
         if not isinstance(portfolio_store, PortfolioStore):
             raise RuntimeError("ExecutionAgent requires PortfolioStore in context extras")
         self.portfolio_store = portfolio_store
+        self._paper_mandate = extras.get("paper_mandate")
+        if self._paper_mandate is not None and type(self._paper_mandate) is not PaperMandate:
+            raise ValueError("immutable installed paper mandate required")
         self._release_authorization = extras.get("release_authorization")
         self._risk_service = extras.get("risk_evaluation_service")
         self._execution_mode = str(extras.get("execution_mode", "simulated"))
@@ -369,12 +373,16 @@ class ExecutionAgent(BaseAgent):
                     policy_hash=cast(str, hashes[1]),
                     input_hash=cast(str, hashes[2]),
                 )
+                if self._paper_mandate is not None:
+                    if payload.get("paper_mandate_hash") != self._paper_mandate.content_hash:
+                        raise ValueError("missing approved paper mandate identity")
                 journal.admit_intent(
                     account,
                     mode,
                     order.client_order_id,
                     payload,
                     artifact=artifact,
+                    paper_mandate=self._paper_mandate,
                     policy=service.policy,
                     thresholds=service.thresholds,
                     decision_time=self._now(),
@@ -414,6 +422,27 @@ class ExecutionAgent(BaseAgent):
             safety_result = self._evaluate_safety(order, payload)
             if not safety_result.allowed:
                 self._reject("execution_reconciliation_required", payload)
+                return
+        if self._paper_mandate is not None:
+            try:
+                state = journal.paper_experiment_state(account, mode, self._paper_mandate)
+                reservations = tuple(
+                    item
+                    for item in journal.reservations(account, mode)
+                    if item.order_id != order.client_order_id
+                )
+                self._paper_mandate.require_order(
+                    order.symbol,
+                    order.quantity if order.side == "buy" else -order.quantity,
+                    order.limit_price,
+                    state,
+                    reservations,
+                )
+                cast(Any, self.context.ingestion).revalidate_order(
+                    order.symbol, order.side, as_decimal(order.limit_price)
+                )
+            except (ValueError, ArithmeticError):
+                self._reject("execution_paper_mandate_blocked", payload)
                 return
         deadline = None
         claim_checked_at = self._now()

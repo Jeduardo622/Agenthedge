@@ -208,6 +208,7 @@ def require_agent_bindings(
     approved_weights: Mapping[str, float],
     approved_symbols: object,
     agent_parameters: Mapping[str, Mapping[str, Any]],
+    paper_mandate: object = None,
 ) -> None:
     """Compare actual dependencies/settings without invoking callbacks or changing state."""
     if (
@@ -290,6 +291,9 @@ def require_agent_bindings(
                 raise ValueError("director symbols differ from approval")
             if _encoded(extras.get("research_inputs", {})) != _encoded(agent.research_inputs):
                 raise ValueError("director research override changed")
+        if type(agent) in (QuantAgent, ExecutionAgent):
+            _same(agent._paper_mandate, paper_mandate, "paper mandate")
+            _same(extras.get("paper_mandate"), paper_mandate, "context paper mandate")
         if type(agent) is QuantAgent:
             _same(agent.performance_tracker, performance_tracker, "performance tracker")
             if _encoded(agent.strategy_performance) != _encoded(performance_tracker.snapshot()):

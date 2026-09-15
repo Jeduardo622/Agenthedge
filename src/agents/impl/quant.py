@@ -5,12 +5,15 @@ from __future__ import annotations
 import os
 import uuid
 from collections import defaultdict
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Sequence
+from typing import Any, Dict, List, Mapping, Sequence, cast
 
 from learning.performance import PerformanceTracker
 from observability.state import ObservabilityState
+from portfolio.paper_mandate import PaperMandate
+from portfolio.postgres_store import JournalPortfolioStore
 from portfolio.store import PortfolioStore
 from strategies import (
     MacroStrategy,
@@ -46,6 +49,12 @@ class StrategyCouncilAgent(BaseAgent):
             raise RuntimeError("StrategyCouncilAgent requires a message bus")
         self.bus: MessageBus = bus
 
+        self._paper_mandate = extras.get("paper_mandate")
+        if self._paper_mandate is not None and (
+            type(self._paper_mandate) is not PaperMandate
+            or not isinstance(portfolio_store, JournalPortfolioStore)
+        ):
+            raise ValueError("bound journal paper mandate required")
         strategies = extras.get("strategies")
         if isinstance(strategies, Sequence):
             self.strategies: List[Strategy] = list(strategies)
@@ -132,6 +141,16 @@ class StrategyCouncilAgent(BaseAgent):
             strategy_directive = {**payload, "quote": quote}
 
         snapshot = self.portfolio_store.snapshot()
+        if self._paper_mandate is not None:
+            store = cast(JournalPortfolioStore, self.portfolio_store)
+            try:
+                state = store.journal.paper_experiment_state(
+                    store.account_id, store.mode, self._paper_mandate
+                )
+                snapshot = self._paper_mandate.sizing_snapshot(state)
+            except ValueError as exc:
+                self.audit("paper_mandate_blocked", {"reason": str(exc)})
+                return
         directive_id = payload.get("directive_id")
         decision_id = payload.get("decision_id") or directive_id
         proposals: List[StrategyDecision] = []
@@ -155,6 +174,20 @@ class StrategyCouncilAgent(BaseAgent):
                     )
                 )
                 continue
+            if self._paper_mandate is not None:
+                decision = replace(decision, quantity=(1 if decision.quantity > 0 else -1))
+                store = cast(JournalPortfolioStore, self.portfolio_store)
+                try:
+                    self._paper_mandate.require_order(
+                        symbol,
+                        decision.quantity,
+                        price,
+                        state,
+                        store.journal.reservations(store.account_id, store.mode),
+                    )
+                except ValueError as exc:
+                    self.audit("paper_mandate_blocked", {"reason": str(exc)})
+                    continue
             self._publish_strategy_proposal(decision, directive_id, decision_id)
             proposals.append(decision)
         if not proposals:
@@ -177,6 +210,10 @@ class StrategyCouncilAgent(BaseAgent):
                 decision_id=decision_id,
             )
             return
+        if self._paper_mandate is not None:
+            consensus["paper_mandate_hash"] = self._paper_mandate.content_hash
+            ingestion = cast(Any, self.context.ingestion)
+            consensus["price"] = float(ingestion.execution_limit(symbol, consensus["action"]))
         self.bus.publish("quant.proposal", payload=consensus, publisher=self.name)
         self.audit("quant_consensus", consensus)
         self.publish_metric(
@@ -455,6 +492,17 @@ class StrategyCouncilAgent(BaseAgent):
         return entry
 
     def _default_strategies(self) -> List[Strategy]:
+        if self._paper_mandate is not None:
+            strategy = MomentumStrategy()
+            strategy.threshold_pct = 0.25
+            strategy.target_alloc_pct = float(
+                min(
+                    self._paper_mandate.max_instrument_fraction,
+                    self._paper_mandate.max_gross_fraction,
+                    self._paper_mandate.max_order_notional / self._paper_mandate.allocation,
+                )
+            )
+            return [strategy]
         return [
             MomentumStrategy(),
             ValueStrategy(),

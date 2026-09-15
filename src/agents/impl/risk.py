@@ -265,6 +265,8 @@ class RiskAgent(BaseAgent):
                 },
             },
         }
+        if "paper_mandate_hash" in payload:
+            approval["paper_mandate_hash"] = payload["paper_mandate_hash"]
         if "strategies" in payload:
             approval["strategies"] = payload.get("strategies")
         if "confidence" in payload:
