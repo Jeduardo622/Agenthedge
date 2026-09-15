@@ -498,9 +498,15 @@ class PostgresMessageBus(MessageBus):
                       AND s.instance_id = %s
                       AND d.status IN ('pending', 'retry')
                       AND d.next_attempt_at <= NOW()
+                      AND NOT EXISTS (
+                          SELECT 1 FROM ah_bus_deliveries earlier
+                          WHERE earlier.subscription_id = d.subscription_id
+                            AND earlier.event_id < d.event_id
+                            AND earlier.status <> 'done'
+                      )
                     ORDER BY d.event_id
                     LIMIT 1
-                    FOR UPDATE SKIP LOCKED
+                    FOR UPDATE OF d SKIP LOCKED
                     """,
                     (subscription_id, self._instance_id),
                 )
