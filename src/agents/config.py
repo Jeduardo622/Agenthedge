@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from math import isfinite
 from typing import List, Mapping
 
 from infra.governance import RuntimeGovernanceConfig
@@ -20,7 +21,7 @@ def _get_float(env: Mapping[str, str], key: str, default: float) -> float:
     if raw is None or raw == "":
         return default
     value = float(raw)
-    if value <= 0:
+    if not isfinite(value) or value <= 0:
         raise ValueError(f"{key} must be positive")
     return value
 
