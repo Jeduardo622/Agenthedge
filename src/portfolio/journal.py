@@ -23,6 +23,7 @@ from .accounting import AccountingState, PositionState, apply_trade, as_decimal
 if TYPE_CHECKING:
     from agents.postgres_bus import PostgresMessageBus
     from ops.reduction import ReductionPolicy
+    from portfolio.paper_mandate import PaperMandate
     from risk.evaluator import FreshnessThresholds
     from risk.policy import RiskPolicy
     from risk.service import RiskDecisionArtifact
@@ -756,6 +757,7 @@ class PostgresJournal:
         thresholds: "FreshnessThresholds",
         decision_time: datetime,
         reduction_policy: "ReductionPolicy | None" = None,
+        paper_mandate: "PaperMandate | None" = None,
     ) -> str:
         """Evaluate immutable inputs against locked state, then reserve atomically.
 
@@ -866,6 +868,17 @@ class PostgresJournal:
                 )
                 view = self._reconciliation_view(cur, account_id, mode)
                 reservations = self._reservations_from_states(view["orders"], terminal_proven=True)
+                if paper_mandate is not None:
+                    if request.get("paper_mandate_hash") != paper_mandate.content_hash:
+                        raise ValueError("paper mandate intent identity mismatch")
+                    experiment = self._paper_experiment_state(cur, account_id, mode, paper_mandate)
+                    paper_mandate.require_order(
+                        candidate.symbol,
+                        candidate.quantity if candidate.side == "buy" else -candidate.quantity,
+                        candidate.worst_price,
+                        experiment,
+                        reservations,
+                    )
                 if reduction_policy is not None:
                     self._validate_reduction_request(
                         request, view["state"], reservations, reduction_policy
@@ -1462,6 +1475,121 @@ class PostgresJournal:
 
     def snapshot(self, account_id: str, mode: str) -> AccountingState:
         return _state(self._account(account_id, mode)[0])
+
+    def install_paper_mandate(self, account_id: str, mode: str, mandate: "PaperMandate") -> None:
+        """Explicit preparation only: bind approved limits to an untouched empty namespace."""
+        from portfolio.paper_mandate import PaperMandate
+
+        if (
+            type(mandate) is not PaperMandate
+            or mode != "paper_broker"
+            or mandate.account_id != account_id
+        ):
+            raise ValueError("paper mandate namespace mismatch")
+        with postgres_connection(self.dsn) as conn, conn.cursor() as cur:
+            row = self._lock(cur, account_id, mode)
+            cur.execute(
+                "SELECT session_risk FROM ah_execution_accounts WHERE account_id=%s AND mode=%s",
+                (account_id, mode),
+            )
+            raw = cur.fetchone()
+            session = _mapping(raw[0]) if raw and raw[0] else {}
+            previous = session.get("paper_mandate_hash")
+            if previous is not None:
+                if previous != mandate.content_hash:
+                    raise RecoveryRequired("installed paper mandate differs")
+                return
+            cur.execute(
+                "SELECT EXISTS(SELECT 1 FROM ah_execution_events WHERE account_id=%s AND mode=%s) "
+                "OR EXISTS(SELECT 1 FROM ah_execution_intents WHERE account_id=%s AND mode=%s)",
+                (account_id, mode, account_id, mode),
+            )
+            used = cur.fetchone()
+            if session or _state(_mapping(row[0])).positions or (used and used[0]):
+                raise RecoveryRequired(
+                    "paper mandate installation requires untouched empty namespace"
+                )
+            cur.execute(
+                "UPDATE ah_execution_accounts SET session_risk=%s::jsonb "
+                "WHERE account_id=%s AND mode=%s",
+                (_json({"paper_mandate_hash": mandate.content_hash}), account_id, mode),
+            )
+
+    def paper_experiment_state(
+        self, account_id: str, mode: str, mandate: "PaperMandate"
+    ) -> AccountingState:
+        """Read canonical allocation economics; never change actual account cash."""
+        with postgres_connection(self.dsn) as conn, conn.cursor() as cur:
+            self._lock(cur, account_id, mode)
+            return self._paper_experiment_state(cur, account_id, mode, mandate)
+
+    def _paper_experiment_state(
+        self, cur: CursorLike, account: str, mode: str, mandate: "PaperMandate"
+    ) -> AccountingState:
+        from portfolio.paper_mandate import PaperMandate
+
+        if (
+            type(mandate) is not PaperMandate
+            or mode != "paper_broker"
+            or mandate.account_id != account
+        ):
+            raise ValueError("paper mandate namespace mismatch")
+        row = self._lock(cur, account, mode)
+        cur.execute(
+            "SELECT session_risk FROM ah_execution_accounts WHERE account_id=%s AND mode=%s",
+            (account, mode),
+        )
+        saved = cur.fetchone()
+        session = _mapping(saved[0]) if saved and saved[0] else {}
+        if session.get("paper_mandate_hash") != mandate.content_hash:
+            raise RecoveryRequired("installed paper mandate required or differs")
+        genesis, projection = _mapping(row[0]), _mapping(row[1])
+        if _state(genesis).positions:
+            raise RecoveryRequired("paper experiment requires empty genesis; no adoption")
+        cur.execute(
+            "SELECT orders.state,intents.payload FROM ah_execution_orders orders "
+            "JOIN ah_execution_intents intents USING(account_id,mode,client_order_id) "
+            "WHERE orders.account_id=%s AND orders.mode=%s",
+            (account, mode),
+        )
+        owned = set()
+        for raw_state, raw_payload in cur.fetchall():
+            state, payload = _mapping(raw_state), _mapping(raw_payload)
+            if payload.get("paper_mandate_hash") != mandate.content_hash:
+                raise RecoveryRequired("unrelated or changed paper experiment intent")
+            if state.get("broker_order_id"):
+                owned.add(state["broker_order_id"])
+        cur.execute(
+            "SELECT event FROM ah_execution_events WHERE account_id=%s "
+            "AND mode=%s ORDER BY sequence",
+            (account, mode),
+        )
+        effective = _effective([_mapping(item[0]) for item in cur.fetchall()])
+        for event in effective.values():
+            if event is None:
+                continue
+            if event["kind"] == "trade" and (
+                event["order_id"] not in owned or event["symbol"] != mandate.symbol
+            ):
+                raise RecoveryRequired("unrelated trade cannot become experiment inventory")
+            if (
+                event["kind"] == "cash"
+                and event["reason"] != "transfer"
+                and as_decimal(event["amount"]) > 0
+            ):
+                raise RecoveryRequired(
+                    "positive non-trade income requires qualified experiment attribution"
+                )
+            if event["kind"] == "split" and event["symbol"] != mandate.symbol:
+                raise RecoveryRequired("unrelated corporate action")
+        full = _state(projection)
+        if any(
+            symbol != mandate.symbol or pos.quantity < 0 for symbol, pos in full.positions.items()
+        ):
+            raise RecoveryRequired("unrelated or short experiment inventory")
+        flows = as_decimal(projection["external_flows"]) - as_decimal(genesis["external_flows"])
+        cash = mandate.allocation + full.cash - as_decimal(genesis["cash"]) - flows
+        return AccountingState(cash, full.realized_pnl, full.positions)
 
     def position_lifecycle_id(self, account_id: str, mode: str, symbol: str) -> str:
         """Return the canonical event anchor for the currently open long lifecycle."""
