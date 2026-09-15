@@ -21,6 +21,9 @@ app = typer.Typer(
 APPROVED_FINAL_REVIEW_OUTCOME = "approve_live_enablement_switch_implementation"
 APPLY_CONFIRMATION = "APPLY LIVE SWITCH"
 ROLLBACK_CONFIRMATION = "ROLLBACK LIVE SWITCH"
+CONTROLLER_UNAVAILABLE_BLOCKER = (
+    "runtime controller is unavailable; this command writes a plan-only packet"
+)
 
 
 def build_switch_packet(
@@ -46,6 +49,8 @@ def build_switch_packet(
     blockers = _approval_blockers(decision, final_review)
     if apply and confirmation != APPLY_CONFIRMATION:
         blockers.append(f"typed confirmation {APPLY_CONFIRMATION} is required")
+    if apply:
+        blockers.append(CONTROLLER_UNAVAILABLE_BLOCKER)
     preflight = _run_preflight(
         env=source_env,
         broker_adapter=broker_adapter,
@@ -56,12 +61,8 @@ def build_switch_packet(
     json_path = artifact_root / f"paper_live_enablement_switch_{timestamp}.json"
     markdown_path = artifact_root / f"paper_live_enablement_switch_{timestamp}.md"
     ready = not blockers
-    applied = bool(apply and ready)
-    outcome = (
-        "live_switch_applied_with_rollback_packet"
-        if applied
-        else "ready_to_apply_live_switch" if ready else "blocked_with_reasons"
-    )
+    applied = False
+    outcome = "ready_to_apply_live_switch" if ready else "blocked_with_reasons"
     packet: dict[str, Any] = {
         "artifact_type": "paper_live_enablement_switch",
         "created_at": current_time.isoformat(),
@@ -116,7 +117,9 @@ def build_rollback_packet(
     blockers: list[str] = []
     if apply and confirmation != ROLLBACK_CONFIRMATION:
         blockers.append(f"typed confirmation {ROLLBACK_CONFIRMATION} is required")
-    applied = bool(apply and not blockers)
+    if apply:
+        blockers.append(CONTROLLER_UNAVAILABLE_BLOCKER)
+    applied = False
     timestamp = _timestamp()
     json_path = artifact_root / f"paper_live_enablement_rollback_{timestamp}.json"
     markdown_path = artifact_root / f"paper_live_enablement_rollback_{timestamp}.md"

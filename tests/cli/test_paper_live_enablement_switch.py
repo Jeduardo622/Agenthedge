@@ -110,7 +110,7 @@ def test_live_enablement_switch_apply_requires_typed_confirmation(
         confirmation="wrong",
         now=datetime(2026, 6, 22, 18, 23, tzinfo=timezone.utc),
     )
-    applied = paper_live_enablement_switch.build_switch_packet(
+    plan_only = paper_live_enablement_switch.build_switch_packet(
         artifact_dir=artifact_dir,
         env=_ready_live_env(),
         broker_adapter=_CleanLiveBroker(),
@@ -125,11 +125,16 @@ def test_live_enablement_switch_apply_requires_typed_confirmation(
         "typed confirmation APPLY LIVE SWITCH is required"
         in blocked["blocker_register"]["blockers"]
     )
-    assert applied["outcome"] == "live_switch_applied_with_rollback_packet"
-    assert applied["live_switch_applied"] is True
-    assert applied["runtime_config_mutation"] is True
-    assert applied["env_var_mutation"] is True
-    assert applied["scheduler_mutation"] is False
+    assert plan_only["outcome"] == "blocked_with_reasons"
+    assert plan_only["live_switch_applied"] is False
+    assert plan_only["broker_mutation"] is False
+    assert plan_only["runtime_config_mutation"] is False
+    assert plan_only["env_var_mutation"] is False
+    assert plan_only["scheduler_mutation"] is False
+    assert (
+        paper_live_enablement_switch.CONTROLLER_UNAVAILABLE_BLOCKER
+        in plan_only["blocker_register"]["blockers"]
+    )
 
 
 def test_live_enablement_rollback_writes_proof_packet(tmp_path: Path, monkeypatch) -> None:
@@ -146,12 +151,57 @@ def test_live_enablement_rollback_writes_proof_packet(tmp_path: Path, monkeypatc
     )
 
     assert packet["artifact_type"] == "paper_live_enablement_rollback"
-    assert packet["outcome"] == "rollback_packet_written"
-    assert packet["rollback_applied"] is True
+    assert packet["outcome"] == "blocked_with_reasons"
+    assert packet["rollback_applied"] is False
+    assert packet["broker_mutation"] is False
+    assert packet["runtime_config_mutation"] is False
+    assert packet["env_var_mutation"] is False
+    assert (
+        paper_live_enablement_switch.CONTROLLER_UNAVAILABLE_BLOCKER
+        in packet["blocker_register"]["blockers"]
+    )
     assert packet["target_execution_mode"] == "paper_broker"
     assert packet["scheduler_mutation"] is False
     assert packet["rollback_artifact"].endswith(
         "paper_live_enablement_rollback_20260622T183000Z.json"
+    )
+
+
+def test_packet_is_not_an_applied_rollback(tmp_path: Path) -> None:
+    from cli.paper_live_enablement_switch import build_rollback_packet
+
+    result = build_rollback_packet(
+        artifact_dir=tmp_path,
+        reason="probe",
+        apply=True,
+        confirmation="ROLLBACK LIVE SWITCH",
+    )
+
+    assert result["rollback_applied"] is False
+    assert result["broker_mutation"] is False
+    assert result["runtime_config_mutation"] is False
+    assert result["env_var_mutation"] is False
+
+
+def test_rollback_apply_request_still_requires_typed_confirmation(tmp_path: Path) -> None:
+    from cli import paper_live_enablement_switch
+
+    result = paper_live_enablement_switch.build_rollback_packet(
+        artifact_dir=tmp_path,
+        reason="probe",
+        apply=True,
+        confirmation="wrong",
+    )
+
+    assert result["outcome"] == "blocked_with_reasons"
+    assert result["rollback_applied"] is False
+    assert (
+        "typed confirmation ROLLBACK LIVE SWITCH is required"
+        in result["blocker_register"]["blockers"]
+    )
+    assert (
+        paper_live_enablement_switch.CONTROLLER_UNAVAILABLE_BLOCKER
+        in result["blocker_register"]["blockers"]
     )
 
 
