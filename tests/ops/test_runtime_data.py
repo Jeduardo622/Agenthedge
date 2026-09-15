@@ -166,6 +166,8 @@ def test_provider_descriptor_never_serializes_credentials_or_accepts_a_different
         "finnhub_key",
         "fred_api_key",
         "news_api_key",
+        "alpaca_api_key_id",
+        "alpaca_api_secret_key",
     }
     with pytest.raises(ValueError, match="provider"):
         RuntimeMarketData.load(

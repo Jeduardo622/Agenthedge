@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Mapping, MutableMapping, Sequence, cast
 
 _PROVIDER_CREDENTIAL_REQUIREMENTS: Mapping[str, tuple[str, ...]] = {
@@ -150,6 +150,8 @@ class DataProviderConfig:
     provider_health_probe_symbol: str = "SPY"
     provider_health_probe_series_id: str = "DGS10"
     provider_health_probe_query: str = "markets"
+    alpaca_api_key_id: str | None = field(default=None, repr=False)
+    alpaca_api_secret_key: str | None = field(default=None, repr=False)
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "DataProviderConfig":
@@ -159,6 +161,8 @@ class DataProviderConfig:
             finnhub_key=env_map.get("FINNHUB_API_KEY"),
             fred_api_key=env_map.get("FRED_API_KEY"),
             news_api_key=env_map.get("NEWSAPI_KEY"),
+            alpaca_api_key_id=env_map.get("ALPACA_API_KEY_ID"),
+            alpaca_api_secret_key=env_map.get("ALPACA_API_SECRET_KEY"),
             cache_ttl_seconds=_get_int(env_map, "DATA_CACHE_TTL", 300),
             cache_max_items=_get_int(env_map, "MAX_CACHE_SIZE", 512),
             cache_enabled=_get_bool(env_map, "DATA_CACHE_ENABLED", True),
