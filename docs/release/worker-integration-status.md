@@ -1,8 +1,17 @@
 # Worker integration status
 
-The installed worker, closeout and recovery slices are integrated through
-`f6d0bbcd1d78ed67b5373f467f7cd66bccbe97a4`. This is not an accepted operator release
-and has not been published. Full milestone verification remains in progress.
+The installed worker, closeout and recovery implementation is accepted in merged
+software baseline `b01544cbdf8ecf2e36a8506763dbc2119b7bb9b4`. Its full tracked tree
+equals operator head `741c8ba` (tree `8d1d3e7`). Relative to reviewed freeze
+`4e0dcfa78a12f7c2fbe5c5b2da662980dc0bedd7`, production source, configuration,
+scripts and workflows are unchanged; one reviewed CLI test and three evidence
+documents differ.
+Combined-main post-merge checks all passed:
+[quality 34998745169](https://github.com/Jeduardo622/Agenthedge/actions/runs/34998745169),
+[staged 34998745153](https://github.com/Jeduardo622/Agenthedge/actions/runs/34998745153),
+1,863 tests collected and executed, zero deselections or collection skips, 87.32%
+coverage in 330.97s. A later documentation-only closeout commit grants no runtime authority. G0 independently binds
+the actual deployed SHA with configuration, policy, strategy, data and issuer evidence.
 
 Implemented boundaries include explicit paused binding before startup, actual
 Runtime start/halt readback, command recovery by observation, separate paper
@@ -27,7 +36,7 @@ invalidates an older running receipt immediately; raw exception text is excluded
   root's combined builder suite passed15 tests23.67s. Synthetic transports remain
   clearly separated from broker qualification.
 
-## Required follow-through
+## Verified workflow follow-through
 
 - Installed start/halt/partial/late-fill/restart and separate-paper rollback
   fixtures have passed independent PostgreSQL verification. Ordinary post-close
@@ -39,9 +48,10 @@ invalidates an older running receipt immediately; raw exception text is excluded
 - Same-worker signed-evidence renewal is reviewed and integrated at0712a25;
   independent47 tests196.83s passed with zero skips. Invalid renewal revokes final
   authorization and cannot restart an interrupted worker through background refresh.
-- Complete full Windows/Linux milestone verification, reviewed publication, CI
-  and post-merge checks. The test-owned bus cleanup is integrated at217dc28; its
-  decisive197-test sequence passed independently on Windows and Linux.
+- Freeze `4e0dcfa` passed 1,862 tests with zero skips on Windows and Linux at
+  87.35%/87.32% coverage. Mypy checked 150 source files; lint, lock, build, package
+  smoke and installed-dependency audit passed; the unpublished local package was
+  excluded. Core, operator exact-head and combined-main post-merge checks passed.
 
 Missing live account authorization, provider credentials/entitlements and observed
 market sessions remain external qualification prerequisites. No broker or live
