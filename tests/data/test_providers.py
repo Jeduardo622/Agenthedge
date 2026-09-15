@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
@@ -176,7 +177,7 @@ def test_ingestion_falls_back_to_finnhub(monkeypatch):
             }
 
         def get_quote(self, symbol: str) -> dict:
-            return {"c": 100.0}
+            return {"c": 100.0, "pc": 99.0, "t": 1789387200}
 
         def get_company_news(self, symbol: str) -> list[dict]:
             return []
@@ -185,14 +186,15 @@ def test_ingestion_falls_back_to_finnhub(monkeypatch):
         def get_company_news(self, symbol: str) -> list[dict]:
             return []
 
-    service = DataIngestionService(config=_config())
+    service = DataIngestionService(
+        config=_config(), now=lambda: datetime(2026, 9, 14, 12, 0, tzinfo=timezone.utc)
+    )
     service._providers["alpha_vantage"] = AlphaFail()
     service._providers["finnhub"] = FinnhubStub()
     service._providers["newsapi"] = NewsStub()
 
     snapshot = service.get_market_snapshot("AAPL")
-    assert snapshot.fundamentals["_source"] == "finnhub"
-    assert snapshot.fundamentals["PERatio"] == 11.0
+    assert snapshot.fundamentals == {}  # no provider availability time was supplied
 
 
 def test_ingestion_fallback_can_be_disabled(monkeypatch):
@@ -227,7 +229,7 @@ def test_ingestion_returns_empty_when_all_fundamentals_fail(monkeypatch):
             return {"metric": {}}
 
         def get_quote(self, symbol: str) -> dict:
-            return {"c": 100.0}
+            return {"c": 100.0, "pc": 99.0, "t": 1789387200}
 
         def get_company_news(self, symbol: str) -> list[dict]:
             return []
@@ -236,7 +238,9 @@ def test_ingestion_returns_empty_when_all_fundamentals_fail(monkeypatch):
         def get_company_news(self, symbol: str) -> list[dict]:
             return []
 
-    service = DataIngestionService(config=_config())
+    service = DataIngestionService(
+        config=_config(), now=lambda: datetime(2026, 9, 14, 12, 0, tzinfo=timezone.utc)
+    )
     service._providers["alpha_vantage"] = AlphaFail()
     service._providers["finnhub"] = FinnhubEmpty()
     service._providers["newsapi"] = NewsStub()
@@ -257,15 +261,17 @@ def test_ingestion_uses_quote_when_timeseries_fail(monkeypatch):
 
     class FinnhubQuoteNews:
         def get_quote(self, symbol: str) -> dict:
-            return {"c": 432.1}
+            return {"c": 432.1, "pc": 430.0, "t": 1789387200}
 
         def get_company_news(self, symbol: str) -> list[dict]:
             return []
 
-    service = DataIngestionService(config=_config())
+    service = DataIngestionService(
+        config=_config(), now=lambda: datetime(2026, 9, 14, 12, 0, tzinfo=timezone.utc)
+    )
     service._providers["alpha_vantage"] = AlphaTimeseriesFail()
     service._providers["finnhub"] = FinnhubQuoteNews()
     service._providers["newsapi"] = FinnhubQuoteNews()
 
     snapshot = service.get_market_snapshot("AAPL")
-    assert snapshot.latest_close == 432.1
+    assert snapshot.price == Decimal("432.1")
