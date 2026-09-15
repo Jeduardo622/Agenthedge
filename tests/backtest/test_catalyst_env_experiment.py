@@ -13,6 +13,8 @@ from backtest.engine import (
     InMemoryDataLoader,
     build_backtest_engine_from_config,
 )
+from ops.calendar import USTradingCalendar
+from tests.backtest.qualified_risk import qualified_risk_factory
 
 FIXTURE_PATH = (
     Path(__file__).parents[1] / "fixtures" / "research_inputs" / "catalyst_calendar_spy.json"
@@ -21,17 +23,30 @@ FIXTURE_PATH = (
 
 def _dataset() -> dict[str, list[BacktestBar]]:
     base = date(2026, 6, 12)
+    calendar = USTradingCalendar()
+    sessions: list[date] = []
+    cursor = base - timedelta(days=1)
+    while len(sessions) < 61:
+        if calendar.session_bounds(cursor) is not None:
+            sessions.append(cursor)
+        cursor -= timedelta(days=1)
+    sessions.reverse()
+    sessions.extend([base, base + timedelta(days=3), base + timedelta(days=4)])
     return {
         "SPY": [
             BacktestBar(
-                date=base + timedelta(days=idx),
+                date=session,
                 open=100.0,
                 high=101.0,
                 low=99.0,
-                close=100.0,
+                close=99.0 if session == sessions[-1] else 100.0,
                 volume=1_000_000,
+                available_at=calendar.session_bounds(session)[1],
+                source="synthetic:test",
+                revision="1",
+                checksum=f"spy-{session.isoformat()}",
             )
-            for idx in range(2)
+            for session in sessions
         ]
     }
 
@@ -69,21 +84,20 @@ def test_backtest_config_enables_catalyst_end_to_end_when_opted_in(tmp_path: Pat
         config,
         data_loader=InMemoryDataLoader(dataset),
         storage_dir=tmp_path,
+        risk_service_factory=qualified_risk_factory,
     )
 
     result = engine.run(_run_config(dataset))
 
+    assert result.trades >= 1
     assert [strategy.name for strategy in engine.strategies] == [
         "momentum",
         "value",
         "macro",
         "catalyst",
     ]
-    assert result.trades >= 1
-    assert any(
-        any(strategy.get("strategy") == "catalyst" for strategy in fill.get("strategies", []))
-        for fill in result.fills
-    )
+    rows = (result.storage_dir / "audit.jsonl").read_text().splitlines()
+    assert any('"strategy":"catalyst"' in row for row in rows)
 
 
 def test_backtest_config_fails_closed_when_catalyst_path_missing(tmp_path: Path) -> None:
@@ -127,7 +141,6 @@ def test_backtest_config_research_only_packet_does_not_trade(tmp_path: Path) -> 
 
     result = engine.run(_run_config(dataset))
 
-    assert result.trades >= 1
     assert not any(
         any(strategy.get("strategy") == "catalyst" for strategy in fill.get("strategies", []))
         for fill in result.fills

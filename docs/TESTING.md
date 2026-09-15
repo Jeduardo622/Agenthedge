@@ -103,3 +103,20 @@ Informed by the Technical Implementation Plan (CI/CD, sanity checks) and the arc
 ## Reporting
 - Test reports exported as JUnit XML for CI artifacts.
 - Critical failures block merge; results referenced in `CHANGELOG.md` when relevant.
+
+## Full PostgreSQL coverage gate
+
+The `checks` CI job runs the entire suite through `scripts/run_postgres_suite.py` with the existing **80%** coverage threshold. It fails if any collected test is skipped, deselected, absent from JUnit, failed, or errored. The five legacy PostgreSQL matrix targets remain separate.
+
+The runner requires an explicit `POSTGRES_DSN` pointing to the local `postgres` administration database (loopback host only), PostgreSQL 16 server/client tools (`pg_dump` and `pg_restore`), clean committed source, and `--create-disposable-databases`. Its child process explicitly uses the dev profile, in-memory runtime backend and simulated execution, and removes inherited pytest selection options. It never reads dotenv, adopts an existing database, or drops databases. Each fixture variable receives a distinct newly created `qualification_<random>_<component>` database; fixtures apply their own schema version. This separates legacy/v2/v3/v4/v5/v6 tests and keeps the restore source/target distinct and empty. Existing restore-driver locks and fresh-database checks remain enforced. The environment-map test rejects newly introduced PostgreSQL fixture variables until mapped.
+
+Example against an explicitly provisioned disposable local PostgreSQL service:
+
+```powershell
+$env:PYTHON_DOTENV_DISABLED = '1'
+$env:EXECUTION_MODE = 'simulated'
+# Set POSTGRES_DSN to the approved local service's postgres administration database.
+poetry run python scripts/run_postgres_suite.py --create-disposable-databases --output-dir .cache/postgres-suite-unique
+```
+
+Choose a new ignored `.cache` output directory for each run. Evidence includes the exact Git SHA, database names (not credentials), collection counts, JUnit, coverage/test output and final result. Full verification is successful only when the runner exits zero and `result.json` reports `passed: true`. A green local result does not establish hosted CI success or broker qualification. Local disposable databases are retained for investigation; CI's service lifecycle removes its isolated cluster after the job.

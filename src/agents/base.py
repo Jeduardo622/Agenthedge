@@ -16,7 +16,12 @@ class BaseAgent(ABC):
     def __init__(self, context: AgentContext) -> None:
         self.context = context
         self.name = context.name
-        self.logger = logging.getLogger(f"agenthedge.agents.{self.name}")
+        supplied_logger = (context.extras or {}).get("logger")
+        self.logger = (
+            supplied_logger
+            if isinstance(supplied_logger, logging.Logger)
+            else logging.getLogger(f"agenthedge.agents.{self.name}")
+        )
         self._is_setup = False
         self._last_tick_duration = 0.0
 

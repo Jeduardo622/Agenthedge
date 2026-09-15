@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
-from datetime import date, datetime
+from datetime import date, datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, List
 
@@ -18,9 +19,11 @@ from backtest import (
     BacktestResult,
     BacktestRunConfig,
     InMemoryDataLoader,
+    QualifiedDatasetLoader,
     YFinanceDataLoader,
     build_backtest_engine_from_config,
 )
+from backtest.datasets import load_dataset_bundle, qualified_risk_service_factory
 from cli import promotion_gate
 from research_inputs.catalyst_calendar import CatalystCalendarPacket
 
@@ -63,6 +66,10 @@ def _load_price_fixture(path: str) -> InMemoryDataLoader:
                     low=_float_fixture_field(raw_row, "low"),
                     close=_float_fixture_field(raw_row, "close"),
                     volume=_optional_float_fixture_field(raw_row, "volume"),
+                    available_at=_optional_fixture_datetime(raw_row, "available_at"),
+                    source=_optional_fixture_text(raw_row, "source"),
+                    revision=_optional_fixture_text(raw_row, "revision"),
+                    checksum=_optional_fixture_text(raw_row, "checksum"),
                 )
             )
         dataset[raw_symbol.upper()] = rows
@@ -74,6 +81,30 @@ def _required_fixture_field(row: Mapping[str, Any], field: str) -> Any:
     if value is None:
         raise typer.BadParameter(f"price fixture row missing required field: {field}")
     return value
+
+
+def _optional_fixture_datetime(row: Mapping[str, Any], field: str) -> datetime | None:
+    value = row.get(field)
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise typer.BadParameter(f"price fixture field {field} must be an ISO timestamp")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise typer.BadParameter(f"price fixture field {field} must be an ISO timestamp") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise typer.BadParameter(f"price fixture field {field} must be timezone-aware")
+    return parsed.astimezone(timezone.utc)
+
+
+def _optional_fixture_text(row: Mapping[str, Any], field: str) -> str | None:
+    value = row.get(field)
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise typer.BadParameter(f"price fixture field {field} must be nonempty text")
+    return value.strip()
 
 
 def _float_fixture_field(row: Mapping[str, Any], field: str) -> float:
@@ -100,10 +131,11 @@ def _build_promotion_report(
     runtime_config: AgentRuntimeConfig,
     run_config: BacktestRunConfig,
     price_fixture: str | None,
+    dataset_bundle: str | None = None,
 ) -> dict[str, Any]:
     catalyst_packet = _find_catalyst_packet(engine)
     catalyst_trade_count = _count_catalyst_fills(result)
-    fixture_backed = price_fixture is not None
+    fixture_backed = price_fixture is not None or dataset_bundle is not None
     catalyst_opt_in = (
         runtime_config.experimental_strategies is not None
         and "catalyst" in runtime_config.experimental_strategies
@@ -117,6 +149,8 @@ def _build_promotion_report(
         "end": run_config.end.isoformat(),
         "initial_cash": float(run_config.initial_cash),
         "price_fixture": price_fixture,
+        "dataset_bundle": dataset_bundle,
+        "dataset_manifest": dict(result.dataset_manifest),
         "fixture_backed": fixture_backed,
         "no_live_network": fixture_backed,
         "catalyst": _catalyst_report(catalyst_packet),
@@ -147,6 +181,7 @@ def _write_promotion_report(
     runtime_config: AgentRuntimeConfig,
     run_config: BacktestRunConfig,
     price_fixture: str | None,
+    dataset_bundle: str | None = None,
 ) -> None:
     report = _build_promotion_report(
         result=result,
@@ -154,6 +189,7 @@ def _write_promotion_report(
         runtime_config=runtime_config,
         run_config=run_config,
         price_fixture=price_fixture,
+        dataset_bundle=dataset_bundle,
     )
     path.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
@@ -264,6 +300,11 @@ def run(
         "--price-fixture",
         help="JSON OHLCV fixture for deterministic local runs instead of YFinance",
     ),
+    dataset_bundle: str | None = typer.Option(
+        None,
+        "--dataset-bundle",
+        help="Licensed, checksummed point-in-time dataset bundle",
+    ),
     promotion_report: bool = typer.Option(
         False,
         "--promotion-report",
@@ -273,6 +314,11 @@ def run(
         None,
         "--gate-profile",
         help="Write promotion_report.json and evaluate it with a promotion gate profile",
+    ),
+    validation_protocol: str | None = typer.Option(
+        None,
+        "--validation-protocol",
+        help="Frozen chronological qualification protocol; requires a qualified dataset bundle",
     ),
 ) -> None:
     """Run a backtest over the requested window using default strategies."""
@@ -284,14 +330,64 @@ def run(
     end_date = _parse_date(end)
     if start_date > end_date:
         raise typer.BadParameter("start date must be on/before end date")
+    if price_fixture and dataset_bundle:
+        raise typer.BadParameter("--price-fixture and --dataset-bundle are mutually exclusive")
+    if validation_protocol and not dataset_bundle:
+        raise typer.BadParameter("--validation-protocol requires --dataset-bundle")
 
     runtime_config = AgentRuntimeConfig.from_env()
-    data_loader = _load_price_fixture(price_fixture) if price_fixture else YFinanceDataLoader()
-    engine = build_backtest_engine_from_config(
-        runtime_config,
-        data_loader=data_loader,
-        storage_dir=storage_dir,
+    bundle = load_dataset_bundle(dataset_bundle) if dataset_bundle else None
+    if validation_protocol:
+        from backtest.validation_adapter import QualifiedValidationAdapter, run_qualification
+        from research_inputs.catalyst_calendar import load_catalyst_calendar
+
+        if gate_profile or promotion_report:
+            raise typer.BadParameter("qualification uses its exact qualification artifact gate")
+        assert bundle is not None
+        try:
+            plan = json.loads(Path(validation_protocol).read_text())
+            if (
+                _parse_date(plan["train"][0]) != start_date
+                or _parse_date(plan["holdout"][1]) != end_date
+            ):
+                raise ValueError("CLI dates must match frozen protocol train start and holdout end")
+            research = {}
+            catalyst_enabled = "catalyst" in (runtime_config.experimental_strategies or [])
+            if catalyst_enabled and runtime_config.catalyst_research_input_path:
+                packet = load_catalyst_calendar(runtime_config.catalyst_research_input_path)
+                research[packet.symbol] = {"catalyst_calendar": packet}
+            adapter = QualifiedValidationAdapter(
+                bundle,
+                symbols=symbol,
+                storage_dir=Path(storage_dir),
+                initial_cash=Decimal(str(capital)),
+                catalyst_enabled=catalyst_enabled,
+                research_inputs=research,
+            )
+            artifact, digest = run_qualification(adapter, plan)
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            raise typer.BadParameter(str(exc)) from exc
+        status = json.loads(artifact.read_text())["status"]
+        typer.echo(f"QUALIFICATION {status} artifact={artifact} sha256={digest}")
+        if status in {"failed_evidence", "rejected"}:
+            raise typer.Exit(1)
+        return
+    data_loader = (
+        _load_price_fixture(price_fixture)
+        if price_fixture
+        else (QualifiedDatasetLoader(bundle) if bundle else YFinanceDataLoader())
     )
+    if bundle:
+        engine = build_backtest_engine_from_config(
+            runtime_config,
+            data_loader=data_loader,
+            storage_dir=storage_dir,
+            risk_service_factory=qualified_risk_service_factory(bundle),
+        )
+    else:
+        engine = build_backtest_engine_from_config(
+            runtime_config, data_loader=data_loader, storage_dir=storage_dir
+        )
     config = BacktestRunConfig(symbols=symbol, start=start_date, end=end_date, initial_cash=capital)
     result = engine.run(config)
     result_path = result.save()
@@ -310,6 +406,7 @@ def run(
                 runtime_config=runtime_config,
                 run_config=config,
                 price_fixture=price_fixture,
+                dataset_bundle=dataset_bundle,
             )
             typer.echo(f"Promotion report saved under: {report_path}")
             if gate_profile:

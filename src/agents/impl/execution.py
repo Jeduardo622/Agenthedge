@@ -5,11 +5,16 @@ from __future__ import annotations
 import json
 import os
 from datetime import datetime, timedelta, timezone
+from importlib import import_module
 from pathlib import Path
-from typing import Any, Dict, Mapping, NoReturn, cast
+from typing import Any, Callable, Dict, Mapping, NoReturn, cast
 
+from ops.reduction import ReductionPolicy
+from ops.residual_reduction import FractionalResidualCapability, FractionalResidualPolicy
+from ops.runtime_release import RuntimeReleaseAuthorization
 from portfolio.accounting import as_decimal
 from portfolio.broker import (
+    AlpacaPaperBrokerAdapter,
     BrokerAdapter,
     BrokerOrder,
     BrokerOrderStatus,
@@ -17,12 +22,23 @@ from portfolio.broker import (
     OrderSide,
     SimulatedBrokerAdapter,
 )
-from portfolio.safety import ExecutionSafetyConfig, ExecutionSafetyResult, evaluate_order_safety
+from portfolio.journal import EconomicEvent, OrderObservation, RecoveryRequired, TradePayload
+from portfolio.postgres_store import JournalPortfolioStore
+from portfolio.reconciliation import ReconciliationReader, ReconciliationService
+from portfolio.safety import (
+    ExecutionSafetyConfig,
+    ExecutionSafetyResult,
+    evaluate_fractional_residual_safety,
+    evaluate_order_safety,
+)
 from portfolio.store import PortfolioStore
+from risk.service import RiskEvaluationService
+from risk.valuation import WorkingOrderReservation
 
 from ..base import BaseAgent
 from ..context import AgentContext
 from ..messaging import Envelope, MessageBus, Subscription
+from ..postgres_bus import PostgresMessageBus
 
 
 def _as_float(value: object) -> float | None:
@@ -41,12 +57,51 @@ class ExecutionAgent(BaseAgent):
         if not isinstance(portfolio_store, PortfolioStore):
             raise RuntimeError("ExecutionAgent requires PortfolioStore in context extras")
         self.portfolio_store = portfolio_store
+        self._release_authorization = extras.get("release_authorization")
+        self._risk_service = extras.get("risk_evaluation_service")
+        self._execution_mode = str(extras.get("execution_mode", "simulated"))
+        reduction_policy = extras.get("reduction_policy")
+        self._reduction_policy = (
+            reduction_policy if isinstance(reduction_policy, ReductionPolicy) else None
+        )
+        residual_policy = extras.get("fractional_residual_policy")
+        self._fractional_residual_policy = (
+            residual_policy if isinstance(residual_policy, FractionalResidualPolicy) else None
+        )
+        self._worker_lease = extras.get("worker_lease")
+        self._journal_store = (
+            portfolio_store if isinstance(portfolio_store, JournalPortfolioStore) else None
+        )
+        if self._execution_mode not in {"simulated", "paper_broker", "live"}:
+            raise RuntimeError("unsupported execution mode")
+        if (self._execution_mode != "simulated" and self._journal_store is None) or (
+            self._journal_store is not None and self._journal_store.mode != self._execution_mode
+        ):
+            raise RuntimeError("broker mode requires matching PostgreSQL journal namespace")
+        if self._journal_store:
+            self._journal_store.journal.require_submission_ready(
+                self._journal_store.account_id, self._journal_store.mode
+            )
+        raw_now = extras.get("now")
+        self._now: Callable[[], datetime] = (
+            raw_now if callable(raw_now) else lambda: datetime.now(timezone.utc)
+        )
+
         broker_adapter = extras.get("broker_adapter")
         self.broker_adapter: BrokerAdapter = (
             cast(BrokerAdapter, broker_adapter)
             if _is_broker_adapter(broker_adapter)
             else SimulatedBrokerAdapter(portfolio_store)
         )
+        if (
+            isinstance(self.broker_adapter, AlpacaPaperBrokerAdapter)
+            and self._execution_mode == "simulated"
+        ):
+            raise RuntimeError("real broker adapter requires PostgreSQL broker execution mode")
+        if self._execution_mode != "simulated" and isinstance(
+            self.broker_adapter, SimulatedBrokerAdapter
+        ):
+            raise RuntimeError("broker mode requires explicit broker adapter")
         safety_config = extras.get("execution_safety_config")
         self._safety_config = (
             safety_config
@@ -64,11 +119,21 @@ class ExecutionAgent(BaseAgent):
                 )
             )
         )
-        self._order_ledger: Dict[str, Any] = self._load_order_ledger()
+        self._order_ledger: Dict[str, Any] = (
+            {"orders": {}} if self._journal_store else self._load_order_ledger()
+        )
         bus = context.message_bus
         if not bus:
             raise RuntimeError("ExecutionAgent requires a message bus")
         self.bus: MessageBus = bus
+        if self._journal_store:
+            if not isinstance(bus, PostgresMessageBus):
+                raise RuntimeError("journal execution requires PostgreSQL message bus")
+            bus.bind_namespace(self._journal_store.account_id, self._journal_store.mode)
+            self._journal_store.journal.require_dispatch_ready(
+                bus, self._journal_store.account_id, self._journal_store.mode
+            )
+
         self._subscription: Subscription | None = None
         self._kill_switch_engaged = False
         self._kill_switch_reason: str | None = None
@@ -100,8 +165,25 @@ class ExecutionAgent(BaseAgent):
         self._consumed_approval_ids.clear()
 
     def tick(self) -> None:
-        self.reconcile_pending_orders()
+        if self._execution_mode != "simulated":
+            self.reconcile_economics()
+        else:
+            self.reconcile_pending_orders()
         self.publish_metric("execution_active", 1.0)
+
+    def reconcile_economics(self) -> Mapping[str, Any]:
+        store = self._journal_store
+        assert store is not None
+        try:
+            return (
+                ReconciliationService(
+                    store.journal, cast(ReconciliationReader, self.broker_adapter), now=self._now
+                )
+                .reconcile(store.account_id, store.mode)
+                .to_dict()
+            )
+        finally:
+            self._dispatch_outbox()
 
     def _handle_control_message(self, envelope: Envelope) -> None:
         if envelope.message.topic == "director.approval":
@@ -111,7 +193,16 @@ class ExecutionAgent(BaseAgent):
 
     def _handle_approval(self, envelope: Envelope) -> None:
         payload: Dict[str, Any] = dict(envelope.message.payload or {})
-        if self._kill_switch_engaged:
+        is_reduction = self._journal_store is not None and self._authorized_reduction(payload)
+        if self._journal_store and not is_reduction:
+            try:
+                self._journal_store.journal.require_risk_unblocked(
+                    self._journal_store.account_id, self._journal_store.mode
+                )
+            except RecoveryRequired:
+                self._reject("execution_halt_blocked", payload)
+                return
+        if self._kill_switch_engaged and not is_reduction:
             self._reject(
                 "execution_blocked_kill_switch",
                 payload,
@@ -143,6 +234,14 @@ class ExecutionAgent(BaseAgent):
         if not isinstance(approval_id, str) or not approval_id:
             self._reject("execution_missing_director_approval_id", payload)
             return
+        if is_reduction:
+            reduction_client = payload.get("reduction_client_order_id")
+            if not isinstance(reduction_client, str) or not reduction_client.startswith(
+                "reduction-"
+            ):
+                self._reject("execution_reduction_identity_invalid", payload)
+                return
+            approval_id = reduction_client
         if approval_id in self._consumed_approval_ids:
             self._reject(
                 "execution_replay_blocked",
@@ -154,7 +253,9 @@ class ExecutionAgent(BaseAgent):
             self._reject("execution_missing_required_approvals", payload)
             return
         expires_at = payload.get("expires_at")
-        if _is_expired(expires_at, clock_skew_seconds=self._approval_clock_skew_seconds):
+        if _is_expired(
+            expires_at, clock_skew_seconds=self._approval_clock_skew_seconds, now=self._now()
+        ):
             self.logger.warning("skipping expired approval for %s", proposal_id)
             self._reject("execution_expired_approval", payload)
             return
@@ -166,7 +267,18 @@ class ExecutionAgent(BaseAgent):
             side=side,
             limit_price=price,
         )
-        safety_result = self._evaluate_safety(order)
+        if self._execution_mode != "simulated":
+            try:
+                complete = self.reconcile_economics()["complete"]
+            except Exception:
+                complete = False
+            if complete is not True:
+                self._reject("execution_reconciliation_required", payload)
+                return
+        if not self._release_allowed(self._now()):
+            self._reject("execution_release_blocked", payload)
+            return
+        safety_result = self._evaluate_safety(order, payload)
         if not safety_result.allowed:
             self._reject(
                 "execution_safety_blocked",
@@ -182,6 +294,16 @@ class ExecutionAgent(BaseAgent):
                     },
                 },
             )
+            return
+        if self._journal_store:
+            self._submit_durable(order, payload)
+            return
+        if _is_expired(
+            payload.get("expires_at"),
+            clock_skew_seconds=self._approval_clock_skew_seconds,
+            now=self._now(),
+        ):
+            self._reject("execution_expired_before_send", payload)
             return
         broker_status = self.broker_adapter.submit_order(order)
         self._consumed_approval_ids.add(approval_id)
@@ -211,6 +333,215 @@ class ExecutionAgent(BaseAgent):
             return
         self._publish_fill_event(event)
 
+    def _release_allowed(self, now: datetime) -> bool:
+        if self._execution_mode == "simulated":
+            return True
+        authorization = self._release_authorization
+        store = self._journal_store
+        if type(authorization) is not RuntimeReleaseAuthorization or store is None:
+            return False
+        if authorization.config.execution_safety != self._safety_config:
+            return False
+        return authorization.check(account_id=store.account_id, mode=store.mode, now=now)["passed"]
+
+    def _submit_durable(self, order: BrokerOrder, payload: Dict[str, Any]) -> None:
+        store = self._journal_store
+        assert store is not None
+        journal, account, mode = store.journal, store.account_id, store.mode
+        try:
+            if mode != "simulated":
+                service = self._risk_service
+                identity = payload.get("risk_artifact")
+                if not isinstance(service, RiskEvaluationService) or not isinstance(
+                    identity, Mapping
+                ):
+                    raise ValueError(
+                        "broker submission requires injected risk service and advisory identity"
+                    )
+                hashes = [
+                    identity.get(key) for key in ("candidate_hash", "policy_hash", "input_hash")
+                ]
+                if any(not isinstance(value, str) or not value for value in hashes):
+                    raise ValueError("risk advisory hashes are required")
+                artifact = service.for_admission(
+                    payload["proposal_id"],
+                    candidate_hash=cast(str, hashes[0]),
+                    policy_hash=cast(str, hashes[1]),
+                    input_hash=cast(str, hashes[2]),
+                )
+                journal.admit_intent(
+                    account,
+                    mode,
+                    order.client_order_id,
+                    payload,
+                    artifact=artifact,
+                    policy=service.policy,
+                    thresholds=service.thresholds,
+                    decision_time=self._now(),
+                    reduction_policy=(
+                        self._reduction_policy if self._authorized_reduction(payload) else None
+                    ),
+                )
+            else:
+                quantity, price = as_decimal(order.quantity), as_decimal(order.limit_price)
+                reservation = WorkingOrderReservation(
+                    order.client_order_id,
+                    order.symbol,
+                    order.side,
+                    quantity,
+                    price,
+                    quantity * price,
+                    "submitted",
+                )
+                journal.record_intent(
+                    account, mode, order.client_order_id, payload, reservation=reservation
+                )
+            if not journal.claim_intent_submission(
+                account,
+                mode,
+                order.client_order_id,
+                decision_time=self._now(),
+                reduction_policy=(
+                    self._reduction_policy if self._authorized_reduction(payload) else None
+                ),
+            ):
+                self._reject("execution_replay_blocked", payload)
+                return
+        except (RecoveryRequired, ValueError, ArithmeticError):
+            self._reject("execution_reconciliation_required", payload)
+            return
+        if isinstance(payload.get("fractional_residual_authorization"), Mapping):
+            safety_result = self._evaluate_safety(order, payload)
+            if not safety_result.allowed:
+                self._reject("execution_reconciliation_required", payload)
+                return
+        deadline = None
+        claim_checked_at = self._now()
+        if mode != "simulated":
+            try:
+                deadline = journal.submission_claim_deadline(
+                    account,
+                    mode,
+                    order.client_order_id,
+                    decision_time=claim_checked_at,
+                    reduction_policy=(
+                        self._reduction_policy if self._authorized_reduction(payload) else None
+                    ),
+                )
+            except (RecoveryRequired, ValueError, ArithmeticError):
+                self._reject("execution_reconciliation_required", payload)
+                return  # The durable claim stays unknown.
+        if not self._authorized_reduction(payload):
+            try:
+                journal.require_risk_unblocked(account, mode)
+            except RecoveryRequired:
+                self._reject("execution_halt_blocked", payload)
+                return
+        lease_deadline = None
+        if self._worker_lease is not None:
+            try:
+                fencing = import_module("ops.fencing")
+                worker_lease_type = getattr(fencing, "WorkerLease")
+                deadline_type = getattr(fencing, "WorkerLeaseDeadline")
+                if not isinstance(self._worker_lease, worker_lease_type):
+                    raise RuntimeError("invalid worker lease")
+                lease_deadline = self._worker_lease.require_current()
+                if not isinstance(lease_deadline, deadline_type):
+                    raise RuntimeError("invalid worker lease deadline")
+            except Exception:
+                self._reject("execution_worker_fence_blocked", payload)
+                return
+        if not self._release_allowed(self._now()):
+            self._reject("execution_release_blocked", payload)
+            return
+        send_time = self._now()
+        if _is_expired(
+            payload.get("expires_at"),
+            clock_skew_seconds=self._approval_clock_skew_seconds,
+            now=send_time,
+        ):
+            self._reject("execution_expired_before_send", payload)
+            return  # Keep the durable claim unknown; no invented terminal release.
+        if deadline is not None and (send_time > deadline or send_time < claim_checked_at):
+            self._reject("execution_reconciliation_required", payload)
+            return
+        if lease_deadline is not None:
+            try:
+                lease_deadline.require_current()
+            except Exception:
+                self._reject("execution_worker_fence_blocked", payload)
+                return
+        # No transaction is held over the network. The claim is already unknown.
+        try:
+            status = self.broker_adapter.submit_order(order)
+            self._consume_durable_status(status, client_order_id=order.client_order_id)
+        except Exception:
+            journal.mark_intent_unknown(account, mode, order.client_order_id)
+            self._reject("execution_submission_unresolved", payload)
+            return
+        self._consumed_approval_ids.add(order.client_order_id)
+        self._dispatch_outbox()
+        self.audit("execution_order_observed", {"broker_order": status.to_dict()})
+
+    def _authorized_reduction(self, payload: Mapping[str, Any]) -> bool:
+        policy = self._reduction_policy
+        authorization = payload.get("reduction_authorization")
+        quantity = _as_float(payload.get("quantity"))
+        return bool(
+            policy is not None
+            and isinstance(authorization, Mapping)
+            and authorization.get("policy_name") == policy.name
+            and authorization.get("policy_hash") == policy.content_hash
+            and quantity is not None
+            and quantity < 0
+        )
+
+    def _consume_durable_status(self, status: BrokerOrderStatus, *, client_order_id: str) -> None:
+        store = self._journal_store
+        assert store is not None
+        journal, account, mode = store.journal, store.account_id, store.mode
+        quantity = as_decimal(status.filled_quantity)
+        average = (
+            as_decimal(status.average_fill_price) if status.average_fill_price is not None else None
+        )
+        if quantity and (average is None or average <= 0):
+            raise RecoveryRequired("observed fill average unavailable")
+        observed = OrderObservation(
+            status.broker_order_id,
+            status.client_order_id,
+            status.symbol,
+            status.side,
+            as_decimal(status.quantity),
+            quantity,
+            quantity * average if average is not None else as_decimal(0),
+            status.status,
+        )
+        # Bind only identity; never invent a zero fill observation or clear uncertainty.
+        journal.observe_order(account, mode, client_order_id, observed, identity_only=True)
+        for event in status.economic_events:
+            if (
+                not isinstance(event, EconomicEvent)
+                or event.account_id != account
+                or event.mode != mode
+            ):
+                raise RecoveryRequired("execution event namespace/provenance mismatch")
+            if (
+                not isinstance(event.payload, TradePayload)
+                or event.payload.order_id != status.broker_order_id
+            ):
+                raise RecoveryRequired("status activity must identify its original trade order")
+            journal.apply_order_event(event, client_order_id=client_order_id)
+        journal.observe_order(account, mode, client_order_id, observed)
+
+    def _dispatch_outbox(self) -> None:
+        store = self._journal_store
+        if store is None:
+            return
+        if not isinstance(self.bus, PostgresMessageBus):
+            raise RecoveryRequired("journal dispatch requires PostgreSQL bus")
+        while store.journal.dispatch_outbox(self.bus, store.account_id, store.mode) == 100:
+            pass
+
     def _handle_kill_switch(self, envelope: Envelope) -> None:
         if self._kill_switch_engaged:
             return
@@ -238,11 +569,32 @@ class ExecutionAgent(BaseAgent):
 
     def cancel_order(self, broker_order_id: str) -> BrokerOrderStatus:
         status = self.broker_adapter.cancel_order(broker_order_id)
-        self._record_order_status(status, {}, closed=True)
+        if self._journal_store:
+            self._consume_durable_status(status, client_order_id=status.client_order_id)
+            self._dispatch_outbox()
+        else:
+            self._record_order_status(status, {}, closed=True)
         self.audit("execution_cancel_order", {"broker_order": status.to_dict()})
         return status
 
     def reconcile_pending_orders(self) -> None:
+        if self._journal_store:
+            store = self._journal_store
+            self._dispatch_outbox()  # Recovery does not wait for broker availability.
+            for client_id, state in store.journal.list_order_states(
+                store.account_id, store.mode
+            ).items():
+                if state["broker_order_id"]:
+                    try:
+                        status = self.broker_adapter.get_order_status(state["broker_order_id"])
+                        if status.broker_order_id != state["broker_order_id"]:
+                            raise RecoveryRequired("lookup returned another broker order")
+                        self._consume_durable_status(status, client_order_id=client_id)
+                    except Exception:
+                        store.journal.mark_intent_unknown(store.account_id, store.mode, client_id)
+                        continue
+                    self._dispatch_outbox()
+            return
         self._order_ledger = self._load_order_ledger()
         orders = self._order_ledger.get("orders")
         if not isinstance(orders, dict):
@@ -272,11 +624,55 @@ class ExecutionAgent(BaseAgent):
         self.audit(action, result.to_dict())
         return result
 
-    def _evaluate_safety(self, order: BrokerOrder) -> ExecutionSafetyResult:
+    def _evaluate_safety(
+        self, order: BrokerOrder, payload: Mapping[str, Any] | None = None
+    ) -> ExecutionSafetyResult:
+        account = self.broker_adapter.get_account()
+        if (
+            self._journal_store
+            and self._journal_store.mode in {"paper_broker", "live"}
+            and (account.is_paper != (self._journal_store.mode == "paper_broker"))
+        ):
+            return ExecutionSafetyResult(False, "broker_account_mode_mismatch")
+        if self._journal_store and account.account_id != self._journal_store.account_id:
+            return ExecutionSafetyResult(False, "broker_account_namespace_mismatch")
+        residual = (payload or {}).get("fractional_residual_authorization")
+        policy = self._fractional_residual_policy
+        capability_reader = getattr(self.broker_adapter, "get_fractional_residual_capability", None)
+        if isinstance(residual, Mapping):
+            if (
+                policy is None
+                or residual.get("policy_hash") != policy.content_hash
+                or not callable(capability_reader)
+                or self._journal_store is None
+            ):
+                return ExecutionSafetyResult(False, "fractional_residual_authorization_invalid")
+            try:
+                capability = capability_reader(
+                    account_id=self._journal_store.account_id,
+                    mode=self._journal_store.mode,
+                    symbol=order.symbol,
+                    now=self._now,
+                )
+            except Exception:
+                return ExecutionSafetyResult(False, "fractional_residual_capability_unavailable")
+            if not isinstance(
+                capability, FractionalResidualCapability
+            ) or capability.checksum != residual.get("capability_checksum"):
+                return ExecutionSafetyResult(False, "fractional_residual_capability_changed")
+            return evaluate_fractional_residual_safety(
+                order,
+                config=self._safety_config,
+                account=account,
+                market_clock=self.broker_adapter.get_market_clock(),
+                policy=policy,
+                capability=capability,
+                now=self._now(),
+            )
         return evaluate_order_safety(
             order,
             config=self._safety_config,
-            account=self.broker_adapter.get_account(),
+            account=account,
             positions=self.broker_adapter.get_positions(),
             market_clock=self.broker_adapter.get_market_clock(),
         )
@@ -508,17 +904,25 @@ class ExecutionAgent(BaseAgent):
         self.publish_metric("execution_rejected", 1.0)
 
 
-def _is_expired(value: object, *, clock_skew_seconds: float = 0.0) -> bool:
+def _is_expired(
+    value: object, *, clock_skew_seconds: float = 0.0, now: datetime | None = None
+) -> bool:
     if not isinstance(value, str) or not value:
-        return False
+        return True
+    current = now if now is not None else datetime.now(timezone.utc)
     try:
         parsed = datetime.fromisoformat(value)
-    except ValueError:
-        return False
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    adjusted_deadline = parsed + timedelta(seconds=max(0.0, clock_skew_seconds))
-    return datetime.now(timezone.utc) > adjusted_deadline
+        if (
+            parsed.utcoffset() is None
+            or not isinstance(current, datetime)
+            or current.utcoffset() is None
+        ):
+            return True
+        skew = float(as_decimal(clock_skew_seconds))
+        adjusted_deadline = parsed + timedelta(seconds=max(0.0, skew))
+        return current >= adjusted_deadline
+    except (ValueError, TypeError, ArithmeticError):
+        return True
 
 
 def _utc_now() -> str:

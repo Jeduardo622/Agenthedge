@@ -11,6 +11,7 @@ from typing import Dict, Iterable, Mapping, MutableMapping
 from infra.postgres import ensure_postgres_schema, postgres_connection
 
 from .accounting import AccountingState, PositionState, apply_trade, as_decimal
+from .journal import EconomicEvent, PostgresJournal, RecoveryRequired
 from .store import PortfolioSnapshot, PortfolioStore, Position
 
 
@@ -336,3 +337,48 @@ class PostgresPortfolioStore(PortfolioStore):
                         (float(cash), self._account_id),
                     )
         self._write_mirror(self.snapshot_dict())
+
+
+class JournalPortfolioStore(PortfolioStore):
+    """Read-compatible facade for an explicitly initialized account/mode journal.
+
+    Broker writes require original economic event provenance; no legacy float
+    balance import or fabricated initial cash occurs here.
+    """
+
+    def __init__(self, journal: "PostgresJournal", *, account_id: str, mode: str) -> None:
+        self.journal = journal
+        self.account_id = account_id
+        self.mode = mode
+        journal.snapshot(account_id, mode)  # Fail closed without explicit genesis.
+
+    def snapshot(self) -> PortfolioSnapshot:
+        state, updated_at = self.journal.snapshot_with_timestamp(self.account_id, self.mode)
+        return PortfolioSnapshot(
+            float(state.cash),
+            float(state.realized_pnl),
+            {
+                symbol: Position(symbol, float(pos.quantity), float(pos.average_cost))
+                for symbol, pos in state.positions.items()
+            },
+            last_updated=updated_at.isoformat() if updated_at else "",
+        )
+
+    def apply_fill(
+        self,
+        *,
+        symbol: str,
+        quantity: float,
+        price: float,
+        dedup_key: str | None = None,
+        fee: float = 0.0,
+    ) -> Mapping[str, float]:
+        raise RecoveryRequired("journal writes require economic event provenance")
+
+    def apply_order_event(self, event: "EconomicEvent", *, client_order_id: str) -> bool:
+        if event.account_id != self.account_id or event.mode != self.mode:
+            raise RecoveryRequired("event namespace does not match portfolio binding")
+        return self.journal.apply_order_event(event, client_order_id=client_order_id)
+
+    def bulk_load(self, positions: Iterable[Position], *, cash: float | None = None) -> None:
+        raise RecoveryRequired("journal genesis cannot be replaced by bulk_load")

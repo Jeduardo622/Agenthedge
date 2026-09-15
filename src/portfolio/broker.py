@@ -2,16 +2,26 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, Literal, Mapping, Protocol
+from decimal import Decimal
+from typing import TYPE_CHECKING, Any, Callable, Dict, Literal, Mapping, Protocol, cast
 from urllib.parse import urlsplit
 
 import requests
 
+from .activities import ActivityWindow, read_activity_window
+from .journal import EconomicEvent
 from .store import PortfolioStore
+
+if TYPE_CHECKING:
+    from ops.residual_reduction import FractionalResidualCapability
+
+    from .reconciliation import EconomicSnapshot, OrderWindow, ReconciledOrder
 
 OrderSide = Literal["buy", "sell"]
 OrderStatus = Literal[
@@ -80,9 +90,10 @@ class BrokerOrderStatus:
     reason: str | None = None
     raw_status: str | None = None
     portfolio_persisted: bool = False
+    economic_events: tuple[EconomicEvent, ...] = ()
 
     def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
+        return cast(Dict[str, Any], json.loads(json.dumps(asdict(self), default=str)))
 
 
 class BrokerOrderSubmitUnknown(RuntimeError):
@@ -355,6 +366,58 @@ class AlpacaPaperBrokerAdapter:
             next_close=str(payload.get("next_close")) if payload.get("next_close") else None,
         )
 
+    def get_fractional_residual_capability(
+        self, *, account_id: str, mode: str, symbol: str, now: Callable[[], datetime]
+    ) -> "FractionalResidualCapability":
+        """Read exact Trading API evidence for a fractional residual exit."""
+        from ops.residual_reduction import FractionalResidualCapability
+
+        actual_mode = "live" if isinstance(self, AlpacaLiveBrokerAdapter) else "paper_broker"
+        account = self.get_account()
+        normalized = symbol.strip().upper()
+        if account.account_id != account_id or mode != actual_mode or not normalized:
+            raise ValueError("fractional residual account/mode binding failed")
+        asset_response = self._safe_get(
+            f"{self._base_url}/v2/assets/{normalized}",
+            headers=self._headers,
+            timeout=self._timeout_seconds,
+        )
+        asset_response.raise_for_status()
+        position_response = self._safe_get(
+            f"{self._base_url}/v2/positions/{normalized}",
+            headers=self._headers,
+            timeout=self._timeout_seconds,
+        )
+        position_response.raise_for_status()
+        asset, position = asset_response.json() or {}, position_response.json() or {}
+        if str(asset.get("symbol", "")).upper() != normalized:
+            raise ValueError("fractional residual asset identity mismatch")
+        if str(position.get("symbol", "")).upper() != normalized:
+            raise ValueError("fractional residual position identity mismatch")
+        quantity = Decimal(str(position.get("qty", "")))
+        evidence = json.dumps(
+            {
+                "account_id": account_id,
+                "asset_id": asset.get("id"),
+                "fractionable": asset.get("fractionable"),
+                "mode": mode,
+                "qty": str(position.get("qty")),
+                "symbol": normalized,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return FractionalResidualCapability(
+            account_id,
+            mode,
+            normalized,
+            quantity,
+            asset.get("fractionable") is True,
+            now(),
+            "alpaca-trading-v2",
+            hashlib.sha256(evidence.encode()).hexdigest(),
+        )
+
     def list_open_orders(
         self, client_order_id_prefix: str | None = None
     ) -> list[BrokerOrderStatus]:
@@ -450,6 +513,140 @@ class AlpacaPaperBrokerAdapter:
         if response.status_code == 404:
             return None
         return self._status_from_response(response)
+
+    def get_activity_window(
+        self,
+        *,
+        account_id: str,
+        mode: str,
+        after: datetime,
+        until: datetime,
+        fetched_at: datetime | None = None,
+        page_size: int = 100,
+        max_pages: int = 100,
+    ) -> ActivityWindow:
+        """Read bounded original activities; never claim overall reconciliation."""
+        actual_mode = "live" if isinstance(self, AlpacaLiveBrokerAdapter) else "paper_broker"
+        if mode != actual_mode or not isinstance(account_id, str) or not account_id.strip():
+            raise ValueError("activity account/mode binding required")
+        account = self.get_account()
+        if account.account_id != account_id or account.is_paper is not (mode == "paper_broker"):
+            raise ValueError("activity account/mode mismatch")
+
+        def fetch(params: dict[str, object]) -> object:
+            response = self._safe_get(
+                f"{self._base_url}/v2/account/activities",
+                params=params,
+                headers=self._headers,
+                timeout=self._timeout_seconds,
+            )
+            response.raise_for_status()
+            if response.status_code != 200:
+                raise ValueError("activity response must be HTTP 200")
+            return response.json()
+
+        return read_activity_window(
+            fetch,
+            account_id=account_id,
+            mode=mode,
+            after=after,
+            until=until,
+            fetched_at=fetched_at if fetched_at is not None else datetime.now(timezone.utc),
+            page_size=page_size,
+            max_pages=max_pages,
+        )
+
+    def _bind_reconciliation_read(self, account_id: str, mode: str) -> None:
+        actual_mode = "live" if isinstance(self, AlpacaLiveBrokerAdapter) else "paper_broker"
+        account = self.get_account()
+        if (
+            mode != actual_mode
+            or account.account_id != account_id
+            or account.is_paper != (mode == "paper_broker")
+        ):
+            raise ValueError("reconciliation account/mode mismatch")
+
+    def get_reconciliation_order(
+        self, client_order_id: str, *, account_id: str, mode: str
+    ) -> "ReconciledOrder | None":
+        from .reconciliation import qualified_order, text
+
+        text(client_order_id)
+        self._bind_reconciliation_read(account_id, mode)
+        response = self._safe_get(
+            f"{self._base_url}/v2/orders:by_client_order_id",
+            params={"client_order_id": client_order_id},
+            headers=self._headers,
+            timeout=self._timeout_seconds,
+        )
+        if response.status_code == 404:
+            return None
+        response.raise_for_status()
+        if response.status_code != 200:
+            raise ValueError("order lookup requires HTTP 200")
+        order = qualified_order(response.json())
+        if order.client_order_id != client_order_id:
+            raise ValueError("client order identity mismatch")
+        return order
+
+    def get_economic_snapshot(self, *, account_id: str, mode: str) -> "EconomicSnapshot":
+        from .reconciliation import economic_snapshot
+
+        self._bind_reconciliation_read(account_id, mode)
+        account = self._safe_get(
+            f"{self._base_url}/v2/account", headers=self._headers, timeout=self._timeout_seconds
+        )
+        account.raise_for_status()
+        positions = self._safe_get(
+            f"{self._base_url}/v2/positions", headers=self._headers, timeout=self._timeout_seconds
+        )
+        positions.raise_for_status()
+        if account.status_code != 200 or positions.status_code != 200:
+            raise ValueError("economic reads require HTTP 200")
+        return economic_snapshot(
+            account.json(),
+            positions.json(),
+            account_id=account_id,
+            mode=mode,
+            observed_at=datetime.now(timezone.utc),
+        )
+
+    def get_order_window(
+        self,
+        *,
+        account_id: str,
+        mode: str,
+        scope: str,
+        after: datetime | None = None,
+        page_size: int = 500,
+        max_pages: int = 100,
+    ) -> "OrderWindow":
+        from .reconciliation import read_order_window
+
+        self._bind_reconciliation_read(account_id, mode)
+
+        def fetch(params: dict[str, Any]) -> Any:
+            response = self._safe_get(
+                f"{self._base_url}/v2/orders",
+                params=params,
+                headers=self._headers,
+                timeout=self._timeout_seconds,
+            )
+            response.raise_for_status()
+            if response.status_code != 200:
+                raise ValueError("orders require HTTP 200")
+            return response.json()
+
+        return read_order_window(
+            fetch,
+            account_id=account_id,
+            mode=mode,
+            scope=scope,
+            after=after,
+            observed_at=datetime.now(timezone.utc),
+            page_size=page_size,
+            max_pages=max_pages,
+        )
 
     def reconcile_fills(self, portfolio_store: PortfolioStore) -> BrokerReconciliationResult:
         broker_positions = {position.symbol: position.quantity for position in self.get_positions()}

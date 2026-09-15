@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import uuid
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from typing import Any, Dict, List, Mapping, Sequence, cast
 
 from data.snapshot import CanonicalSnapshot, snapshot_to_mapping
@@ -91,16 +92,34 @@ class DirectorAgent(BaseAgent):
         serialized_fundamentals = cast(dict[str, dict[str, object]], serialized["fundamentals"])
         serialized_news = cast(list[dict[str, object]], serialized["news"])
         price = snapshot.price
+        reference_price = price
+        reference_previous_close = snapshot.quote.previous_close
+        reference_provider = getattr(self.context.ingestion, "get_reference_prices", None)
+        if callable(reference_provider):
+            provided = reference_provider(symbol)
+            if provided is not None:
+                reference_price, reference_previous_close = map(Decimal, map(str, provided))
+                if any(
+                    not value.is_finite() or value <= 0
+                    for value in (reference_price, reference_previous_close)
+                ):
+                    self.logger.warning(
+                        "skipping directive for %s due to invalid reference price", symbol
+                    )
+                    return
         decision_id = str(uuid.uuid4())
         directive = {
             "directive_id": str(uuid.uuid4()),
             "decision_id": decision_id,
             "symbol": symbol,
             "latest_close": float(price),
+            "reference_close": float(reference_price),
             "quote": {
                 **cast(dict[str, object], serialized["quote"]),
                 "c": float(snapshot.quote.last),
                 "pc": float(snapshot.quote.previous_close),
+                "reference_c": float(reference_price),
+                "reference_pc": float(reference_previous_close),
             },
             "fundamentals": {name: item["value"] for name, item in serialized_fundamentals.items()},
             "news": [item["value"] for item in serialized_news],

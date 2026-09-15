@@ -1,10 +1,17 @@
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 
 import pytest
 
 from agents.config import AgentRuntimeConfig
+from ops.residual_reduction import FractionalResidualCapability, FractionalResidualPolicy
 from portfolio.broker import BrokerAccount, BrokerMarketClock, BrokerOrder, BrokerPosition
-from portfolio.safety import ExecutionSafetyConfig, evaluate_order_safety
+from portfolio.safety import (
+    ExecutionSafetyConfig,
+    evaluate_fractional_residual_safety,
+    evaluate_order_safety,
+)
 
 
 def check(order, positions=()):
@@ -70,3 +77,49 @@ def test_oversell_and_invalid_side_reject_before_submission():
 )
 def test_invalid_or_ambiguous_positions_are_rejected(positions):
     assert not check(ORDER, positions).allowed
+
+
+def test_fractional_residual_has_separate_exact_exit_safety_route():
+    now = datetime(2026, 9, 15, tzinfo=timezone.utc)
+    policy = FractionalResidualPolicy(
+        "owner", "acct", "paper_broker", Decimal("0.9"), timedelta(seconds=5), now
+    )
+    capability = FractionalResidualCapability(
+        "acct", "paper_broker", "SPY", Decimal("0.25"), True, now, "alpaca", "a" * 64
+    )
+    order = BrokerOrder("reduction-client", "SPY", 0.25, "sell", 100)
+    result = evaluate_fractional_residual_safety(
+        order,
+        account=BrokerAccount("acct", "ACTIVE", True),
+        market_clock=BrokerMarketClock(True),
+        config=ExecutionSafetyConfig(),
+        policy=policy,
+        capability=capability,
+        now=now,
+    )
+    assert result.allowed
+    assert not evaluate_order_safety(
+        order,
+        account=BrokerAccount("acct", "ACTIVE", True),
+        positions=[BrokerPosition("SPY", 0.25)],
+        market_clock=BrokerMarketClock(True),
+        config=ExecutionSafetyConfig(),
+    ).allowed
+
+
+def test_fractional_residual_retains_hard_share_cap():
+    now = datetime(2026, 9, 15, tzinfo=timezone.utc)
+    result = evaluate_fractional_residual_safety(
+        BrokerOrder("reduction-client", "SPY", 0.25, "sell", 100),
+        account=BrokerAccount("acct", "ACTIVE", True),
+        market_clock=BrokerMarketClock(True),
+        config=ExecutionSafetyConfig(max_order_shares=0.2),
+        policy=FractionalResidualPolicy(
+            "owner", "acct", "paper_broker", Decimal("0.9"), timedelta(seconds=5), now
+        ),
+        capability=FractionalResidualCapability(
+            "acct", "paper_broker", "SPY", Decimal("0.25"), True, now, "alpaca", "a" * 64
+        ),
+        now=now,
+    )
+    assert not result.allowed and result.reason == "max_order_shares_exceeded"

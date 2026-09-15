@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "harness_version": "s4a-v1",
+  "status": "proposed_research_only",
+  "owner_approved": false,
+  "min_history_years": 3,
+  "min_history_days_per_year": 252,
+  "min_closed_trades": 100,
+  "required_checks": ["nonempty_decisions", "future_perturbation_exercised", "prefix_equal", "future_perturbation_equal", "warmup_converged"],
+  "cost_multipliers": ["1", "2"],
+  "allowed_objectives": ["net_return", "net_excess_return"],
+  "required_metrics": ["gross_return", "net_return", "benchmark_return", "net_excess_return", "max_drawdown", "turnover", "mean_exposure", "regime_observations", "regime_net_returns", "observations", "closed_trades"],
+  "exception_authority": "caller_owned_reviewed_protocol_hashes",
+  "description": "Proposed sample and causality screen only. No profitability threshold or owner acceptance is supplied by this profile. CLI consumption is a subsequent integration slice."
+}

@@ -4,13 +4,15 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Mapping, Protocol
+from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
+from apscheduler.triggers.date import DateTrigger
 
 from agents.runtime_builder import build_runtime_from_env
 from cli.paper_broker_health_history import build_history_report
@@ -27,11 +29,16 @@ from infra.postgres import (
 )
 from infra.runtime_state import NullRuntimeStateSink, PostgresRuntimeStateSink, RuntimeStateSink
 from observability.state import ObservabilityState, get_observability_state
+from portfolio.broker import SimulatedBrokerAdapter
+from portfolio.postgres_store import JournalPortfolioStore
 
 from .calendar import USTradingCalendar
 
 
 class SchedulerRuntime(Protocol):
+    @property
+    def broker_adapter(self) -> object: ...
+
     def run_once(self) -> None: ...
     def bootstrap(self) -> None: ...
     def health(self) -> Mapping[str, object]: ...
@@ -56,8 +63,13 @@ class SchedulerService:
         state_sink: RuntimeStateSink | None = None,
         metric_sink: PrometheusMetricSink | None = None,
         health_history_report_builder: HealthHistoryReportBuilder | None = None,
+        now: Callable[[], datetime] | None = None,
+        account_id: str | None = None,
+        mode: str | None = None,
+        clock_skew_seconds: float = 30.0,
     ) -> None:
         self._tz = ZoneInfo(timezone_name)
+        self._venue_tz = ZoneInfo("America/New_York")
         self._scheduler = BlockingScheduler(timezone=self._tz)
         self._state = state or get_observability_state()
         self._calendar = calendar or USTradingCalendar()
@@ -66,12 +78,23 @@ class SchedulerService:
         self._runtime_builder = runtime_builder or (lambda: build_runtime_from_env(load_env=False))
         self._health_history_report_builder = health_history_report_builder or build_history_report
         env = os.environ
+        self._now = now or (lambda: datetime.now(timezone.utc))
+        self._account_explicit = account_id is not None or bool(env.get("PORTFOLIO_ACCOUNT_ID"))
+        self._account_id = (account_id or env.get("PORTFOLIO_ACCOUNT_ID") or "default").strip()
+        self._mode = (mode or env.get("EXECUTION_MODE") or "simulated").strip().lower()
+        if not self._account_id:
+            raise ValueError("scheduler account_id must be nonempty")
+        if self._mode not in {"simulated", "paper_broker", "live"}:
+            raise ValueError("unsupported scheduler mode")
+        self._clock_skew = timedelta(seconds=clock_skew_seconds)
         self._instance_id = env.get("RUN_ID", "scheduler")
         self._runtime_backend = resolve_runtime_backend(env)
         self._governance = RuntimeGovernanceConfig.from_env(env)
         self._postgres_dsn = get_postgres_dsn(env, required=False)
         self._metric_sink = metric_sink or PrometheusMetricSink()
-        self._leader_lock_key = advisory_lock_key("ah_scheduler_leader")
+        self._leader_lock_key = advisory_lock_key(
+            f"ah_scheduler_leader:{self._account_id}:{self._mode}"
+        )
         if state_sink is not None:
             self._state_sink = state_sink
         elif self._runtime_backend == "postgres" and self._postgres_dsn:
@@ -93,14 +116,9 @@ class SchedulerService:
 
     def _register_jobs(self) -> None:
         self._scheduler.add_job(
-            self.run_daily_trade,
-            CronTrigger(hour=6, minute=0, timezone=self._tz),
-            name="run_daily_trade",
-        )
-        self._scheduler.add_job(
-            self.midday_check,
-            CronTrigger(hour=9, minute=0, timezone=self._tz),
-            name="midday_check",
+            self.schedule_session,
+            CronTrigger(hour=0, minute=5, timezone=self._venue_tz),
+            name="schedule_session",
         )
         self._scheduler.add_job(
             self.heartbeat_check,
@@ -117,24 +135,92 @@ class SchedulerService:
             CronTrigger(hour="*", minute=40, timezone=self._tz),
             name="paper_broker_health_history",
         )
-        self._scheduler.add_job(
-            self.eod_closure,
-            CronTrigger(hour=13, minute=30, timezone=self._tz),
-            name="eod_closure",
+        self.schedule_session()
+
+    def schedule_session(self) -> None:
+        now = self._utc_now()
+        try:
+            bounds = self._calendar.session_bounds(now.astimezone(self._venue_tz).date())
+        except RuntimeError:
+            self._record_job(
+                "schedule_session", status="failed", details={"reason": "calendar_unavailable"}
+            )
+            return
+        if bounds is None:
+            self._record_job(
+                "schedule_session", status="skipped", details={"reason": "market_closed"}
+            )
+            return
+        opened, closed = bounds
+        jobs = (
+            ("session_preflight", self.session_preflight, opened - timedelta(minutes=30)),
+            ("run_daily_trade", self.run_daily_trade, opened),
+            ("midday_check", self.midday_check, opened + (closed - opened) / 2),
+            ("eod_closure", self.eod_closure, closed),
         )
+        for name, callback, when in jobs:
+            if when >= now:
+                self._scheduler.add_job(
+                    callback,
+                    DateTrigger(run_date=when),
+                    id=f"{name}:{opened.date().isoformat()}",
+                    name=name,
+                    replace_existing=True,
+                )
+        self._record_job(
+            "schedule_session",
+            status="completed",
+            details={
+                "session": opened.date().isoformat(),
+                "open": opened.isoformat(),
+                "close": closed.isoformat(),
+            },
+        )
+
+    def session_preflight(self) -> None:
+        self._run_as_leader("session_preflight", self._run_session_preflight_impl)
+
+    def _run_session_preflight_impl(self) -> None:
+        runtime = self._runtime_builder()
+        try:
+            runtime.bootstrap()
+            reason = self._admission_failure(runtime, require_open=False)
+            self._record_job(
+                "session_preflight",
+                status="completed" if reason is None else "failed",
+                details={} if reason is None else {"reason": reason},
+            )
+        finally:
+            runtime.stop(wait=False)
 
     def run_daily_trade(self) -> None:
         self._run_as_leader("run_daily_trade", self._run_daily_trade_impl)
 
     def _run_daily_trade_impl(self) -> None:
-        now = datetime.now(self._tz)
-        if not self._calendar.is_trading_day(now.date()):
+        now = self._utc_now()
+        bounds = self._session_bounds(now)
+        if bounds is None or not (bounds[0] <= now < bounds[1]):
             self._record_job(
                 "run_daily_trade", status="skipped", details={"reason": "market_closed"}
             )
             return
         runtime = self._runtime_builder()
         try:
+            runtime.bootstrap()
+            reason = self._admission_failure(runtime, require_open=True)
+            if reason is not None:
+                self._record_job("run_daily_trade", status="failed", details={"reason": reason})
+                return
+            claim_failure = self._claim_submission()
+            if claim_failure is not None:
+                self._record_job(
+                    "run_daily_trade", status="failed", details={"reason": claim_failure}
+                )
+                return
+            reason = self._clock_failure(runtime, require_open=True)
+            if reason is not None:
+                self._record_job("run_daily_trade", status="failed", details={"reason": reason})
+                return
             runtime.run_once()
             health = runtime.health()
             self._record_job(
@@ -267,6 +353,11 @@ class SchedulerService:
         self, job_name: str, *, status: str, details: dict[str, object] | None = None
     ) -> None:
         details = details or {}
+        details.setdefault("account_id", self._account_id)
+        details.setdefault("mode", self._mode)
+        bounds = self._session_bounds(self._utc_now())
+        if bounds is not None:
+            details.setdefault("session", bounds[0].date().isoformat())
         details["timezone"] = str(self._tz)
         if self._runtime_backend == "postgres":
             details.setdefault("leader_instance_id", self._instance_id)
@@ -290,6 +381,16 @@ class SchedulerService:
                     details={"reason": "leader_lock_not_acquired"},
                 )
                 return
+            if job_name in {
+                "session_preflight",
+                "midday_check",
+                "eod_closure",
+            } and self._already_completed(job_name):
+                self._record_job(
+                    job_name, status="skipped", details={"reason": "already_completed"}
+                )
+                unlock_advisory_lock(conn, key=self._leader_lock_key)
+                return
             if self._leader_changed(job_name):
                 self._metric_sink("scheduler_leadership_churn_total", 1.0, {"agent": "scheduler"})
                 churn_24h = self._leadership_churn_last_24h(job_name)
@@ -308,6 +409,150 @@ class SchedulerService:
                 callback()
             finally:
                 unlock_advisory_lock(conn, key=self._leader_lock_key)
+
+    def _utc_now(self) -> datetime:
+        value = self._now()
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise RuntimeError("scheduler clock must be timezone-aware")
+        return value.astimezone(timezone.utc)
+
+    def _session_bounds(self, now: datetime) -> tuple[datetime, datetime] | None:
+        try:
+            return self._calendar.session_bounds(now.astimezone(self._venue_tz).date())
+        except RuntimeError:
+            return None
+
+    @staticmethod
+    def _clock_time(value: object) -> datetime | None:
+        if not isinstance(value, str) or not value.strip():
+            return None
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            return None
+        return parsed.astimezone(timezone.utc)
+
+    def _admission_failure(self, runtime: SchedulerRuntime, *, require_open: bool) -> str | None:
+        if self._mode != "simulated" and not self._account_explicit:
+            return "explicit_account_required"
+        config = getattr(runtime, "config", None)
+        if getattr(config, "execution_mode", None) != self._mode:
+            return "runtime_mode_mismatch"
+        adapter = getattr(runtime, "broker_adapter", None)
+        if self._mode == "simulated":
+            if not isinstance(adapter, SimulatedBrokerAdapter):
+                return "runtime_broker_mismatch"
+        else:
+            store = getattr(runtime, "portfolio_store", None)
+            if (
+                not isinstance(store, JournalPortfolioStore)
+                or store.account_id != self._account_id
+                or store.mode != self._mode
+            ):
+                return "runtime_account_mismatch"
+            get_account = getattr(adapter, "get_account", None)
+            if not callable(get_account):
+                return "runtime_account_mismatch"
+            try:
+                broker_account = get_account()
+            except Exception:
+                return "runtime_account_mismatch"
+            if getattr(broker_account, "account_id", None) != self._account_id:
+                return "runtime_account_mismatch"
+            if getattr(broker_account, "is_paper", None) is not (self._mode == "paper_broker"):
+                return "runtime_mode_mismatch"
+        reconciliation = runtime.reconcile_execution()
+        if reconciliation.get("complete") is not True:
+            return "reconciliation_incomplete"
+        for key in ("mismatches", "unresolved_orders"):
+            values = reconciliation.get(key)
+            if not isinstance(values, (list, tuple)) or values:
+                return "reconciliation_unresolved"
+        return self._clock_failure(runtime, require_open=require_open)
+
+    def _clock_failure(self, runtime: SchedulerRuntime, *, require_open: bool) -> str | None:
+        adapter = getattr(runtime, "broker_adapter", None)
+        get_clock = getattr(adapter, "get_market_clock", None)
+        if not callable(get_clock):
+            return "broker_clock_unavailable"
+        try:
+            clock = get_clock()
+        except Exception:
+            return "broker_clock_unavailable"
+        now = self._utc_now()
+        timestamp = self._clock_time(getattr(clock, "timestamp", None))
+        bounds = self._session_bounds(now)
+        if timestamp is None or bounds is None or abs(timestamp - now) > self._clock_skew:
+            return "broker_clock_disagreement"
+        if require_open and not (bounds[0] <= now < bounds[1]):
+            return "outside_market_session"
+        if bool(getattr(clock, "is_open", False)) != require_open:
+            return "broker_clock_disagreement"
+        expected = bounds[1] if require_open else bounds[0]
+        actual = self._clock_time(
+            getattr(clock, "next_close" if require_open else "next_open", None)
+        )
+        if actual is None or abs(actual - expected) > self._clock_skew:
+            return "broker_clock_disagreement"
+        return None
+
+    def _claim_submission(self) -> str | None:
+        if self._mode == "simulated":
+            return None
+        if self._runtime_backend != "postgres" or not self._postgres_dsn:
+            return "durable_submission_claim_unavailable"
+        bounds = self._session_bounds(self._utc_now())
+        if bounds is None:
+            return "calendar_unavailable"
+        details = {
+            "account_id": self._account_id,
+            "mode": self._mode,
+            "session": bounds[0].date().isoformat(),
+            "timezone": str(self._tz),
+            "leader_instance_id": self._instance_id,
+            "claim": "submission_uncertain_until_completed",
+        }
+        try:
+            with postgres_connection(self._postgres_dsn) as conn, conn.cursor() as cur:
+                cur.execute(
+                    """SELECT status FROM ah_scheduler_runs WHERE job_name='run_daily_trade'
+                    AND status IN ('started','completed')
+                    AND details_json->>'account_id'=%s AND details_json->>'mode'=%s
+                    AND details_json->>'session'=%s ORDER BY created_at DESC LIMIT 1""",
+                    (self._account_id, self._mode, bounds[0].date().isoformat()),
+                )
+                row = cur.fetchone()
+                if row is not None:
+                    return "submission_already_claimed_or_uncertain"
+                cur.execute(
+                    """INSERT INTO ah_scheduler_runs
+                    (run_id,job_name,status,details_json,instance_id,created_at)
+                    VALUES (%s,'run_daily_trade','started',%s::jsonb,%s,NOW())""",
+                    (str(uuid4()), json.dumps(details), self._instance_id),
+                )
+        except Exception:
+            return "durable_submission_claim_unavailable"
+        return None
+
+    def _already_completed(self, job_name: str) -> bool:
+        if self._runtime_backend != "postgres" or not self._postgres_dsn:
+            return False
+        bounds = self._session_bounds(self._utc_now())
+        if bounds is None:
+            return False
+        try:
+            with postgres_connection(self._postgres_dsn) as conn, conn.cursor() as cur:
+                cur.execute(
+                    """SELECT 1 FROM ah_scheduler_runs WHERE job_name=%s AND status='completed'
+                    AND details_json->>'account_id'=%s AND details_json->>'mode'=%s
+                    AND details_json->>'session'=%s LIMIT 1""",
+                    (job_name, self._account_id, self._mode, bounds[0].date().isoformat()),
+                )
+                return cur.fetchone() is not None
+        except Exception:
+            return False
 
     def _leader_changed(self, job_name: str) -> bool:
         previous = self._latest_leader_instance(job_name)

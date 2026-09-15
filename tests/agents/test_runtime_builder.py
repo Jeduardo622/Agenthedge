@@ -23,7 +23,11 @@ def _wire_common_builder_stubs(monkeypatch) -> None:
     monkeypatch.setattr("agents.runtime_builder.get_observability_state", lambda: object())
     monkeypatch.setattr(
         "agents.runtime_builder.AgentRuntimeConfig",
-        type("Cfg", (), {"from_env": staticmethod(lambda: AgentRuntimeConfig())}),
+        type(
+            "Cfg",
+            (),
+            {"from_env_for_recovery": staticmethod(lambda: AgentRuntimeConfig())},
+        ),
     )
     monkeypatch.setattr("agents.runtime_builder.AgentRuntime", _CaptureRuntime)
 
@@ -41,30 +45,15 @@ def test_build_runtime_uses_in_memory_backend_by_default(monkeypatch) -> None:
     assert isinstance(runtime.kwargs["break_glass_store"], NullBreakGlassStore)
 
 
-def test_build_runtime_paper_broker_defaults_to_session_audit_path(monkeypatch) -> None:
-    _wire_common_builder_stubs(monkeypatch)
-    monkeypatch.setattr(
-        "agents.runtime_builder.AgentRuntimeConfig",
-        type(
-            "Cfg",
-            (),
-            {"from_env": staticmethod(lambda: AgentRuntimeConfig(execution_mode="paper_broker"))},
-        ),
-    )
-    monkeypatch.setattr(
-        "agents.runtime_builder.AlpacaPaperBrokerAdapter",
-        type("PaperBroker", (), {"from_env": staticmethod(lambda _env: object())}),
-    )
+def test_paper_broker_defaults_to_session_audit_path(monkeypatch) -> None:
+    import os
+
+    from agents.runtime_builder import _resolve_audit_path
+
     monkeypatch.delenv("AUDIT_LOG_PATH", raising=False)
     monkeypatch.setenv("PAPER_SESSION_DATE", "2026-06-25")
-
-    runtime = build_runtime_from_env(load_env=False)
-
-    assert (
-        runtime.kwargs["audit_sink"]
-        .path.as_posix()
-        .endswith("storage/audit/runtime_events_paper-20260625.jsonl")
-    )
+    path = _resolve_audit_path(os.environ, AgentRuntimeConfig(execution_mode="paper_broker"))
+    assert path.as_posix().endswith("storage/audit/runtime_events_paper-20260625.jsonl")
 
 
 def test_build_runtime_injects_enabled_catalyst_strategy_and_research_input(
@@ -86,7 +75,7 @@ def test_build_runtime_injects_enabled_catalyst_strategy_and_research_input(
             "Cfg",
             (),
             {
-                "from_env": staticmethod(
+                "from_env_for_recovery": staticmethod(
                     lambda: AgentRuntimeConfig(
                         experimental_strategies=["catalyst"],
                         catalyst_research_input_path=str(catalyst_path),
@@ -157,7 +146,11 @@ def test_build_runtime_uses_postgres_components(monkeypatch) -> None:
         type(
             "Cfg",
             (),
-            {"from_env": staticmethod(lambda: AgentRuntimeConfig(break_glass_enabled=True))},
+            {
+                "from_env_for_recovery": staticmethod(
+                    lambda: AgentRuntimeConfig(break_glass_enabled=True)
+                )
+            },
         ),
     )
 

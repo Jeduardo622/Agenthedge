@@ -14,7 +14,7 @@ app = typer.Typer(help="Evaluate promotion_report.json artifacts")
 
 @app.command()
 def main(
-    report: str = typer.Option(..., "--report", help="Path to promotion_report.json"),
+    report: str | None = typer.Option(None, "--report", help="Path to promotion_report.json"),
     profile: str | None = typer.Option(
         None,
         "--profile",
@@ -61,9 +61,37 @@ def main(
         "--require-no-stale-catalyst-trades",
         help="Require validation.no_stale_catalyst_trades to be true",
     ),
+    qualification_artifact: str | None = typer.Option(
+        None, "--qualification-artifact", help="Exact qualified engine research artifact"
+    ),
+    qualification_sha256: str | None = typer.Option(
+        None, "--qualification-sha256", help="Independently pinned qualification artifact SHA-256"
+    ),
 ) -> None:
     """Read a promotion report and fail if any explicit gate condition is unmet."""
 
+    if qualification_artifact is not None:
+        from backtest.validation_adapter import verify_qualification
+
+        if report or profile or not qualification_sha256:
+            raise typer.BadParameter(
+                "qualification requires --qualification-sha256 and no legacy report/profile"
+            )
+        try:
+            qualification = verify_qualification(
+                Path(qualification_artifact), expected_sha256=qualification_sha256
+            )
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            typer.echo(f"QUALIFICATION_GATE_FAIL {exc}")
+            raise typer.Exit(1) from exc
+        failures = evaluate_qualification(qualification)
+        if failures:
+            typer.echo("QUALIFICATION_GATE_FAIL " + "; ".join(failures))
+            raise typer.Exit(1)
+        typer.echo("QUALIFICATION_SCREEN_PASS_RESEARCH_ONLY owner_approved=false")
+        return
+    if report is None or qualification_sha256 is not None:
+        raise typer.BadParameter("provide --report or an exact qualification artifact/hash pair")
     payload = _load_report(report)
     profile_config = _load_profile(profile) if profile else {}
     failures = evaluate_with_profile(
@@ -88,6 +116,31 @@ def main(
             typer.echo(f"- {failure}")
         raise typer.Exit(1)
     typer.echo(f"PROMOTION_GATE_PASS {run_id}")
+
+
+def evaluate_qualification(report: Mapping[str, Any]) -> list[str]:
+    """A research screen pass cannot grant owner or runtime approval."""
+    if report.get("status") != "screen_passed_research_only":
+        return [f"qualification status {report.get('status')} is not screen_passed_research_only"]
+    if report.get("owner_approved") is not False:
+        return ["qualification cannot grant owner approval"]
+    holdout = report.get("holdout")
+    if not isinstance(holdout, Mapping) or holdout.get("status") != "screen_passed_research_only":
+        return ["exact selected holdout evidence required"]
+    results = report.get("results")
+    if not isinstance(results, Mapping) or not results:
+        return ["all enabled strategy evidence required"]
+    for result in [*results.values(), holdout]:
+        if (
+            not isinstance(result, Mapping)
+            or result.get("status") != "screen_passed_research_only"
+            or result.get("bias", {}).get("passed") is not True
+            or result.get("sourced_price_sessions", 0) < 756
+            or result.get("sourced_price_history_complete") is not True
+            or result.get("metrics", {}).get("closed_trades", 0) < 100
+        ):
+            return ["insufficient qualified strategy/holdout evidence"]
+    return []
 
 
 def evaluate_promotion_report(

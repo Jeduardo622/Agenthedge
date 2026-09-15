@@ -12,7 +12,12 @@ from collections import deque
 from datetime import datetime, timezone
 from typing import Any, Deque, Dict, List, Mapping, MutableMapping, Sequence
 
-from infra.postgres import ensure_postgres_schema, postgres_connection
+from infra.postgres import (
+    CursorLike,
+    advisory_lock_key,
+    ensure_postgres_schema,
+    postgres_connection,
+)
 
 from .messaging import Envelope, Message, MessageBus, MessageHandler, Payload, Subscription
 
@@ -26,6 +31,7 @@ class PostgresMessageBus(MessageBus):
         max_history: int = 512,
         poll_interval_seconds: float = 0.1,
         retry_delay_seconds: float = 1.0,
+        initialize_schema: bool = True,
     ) -> None:
         self._dsn = dsn
         self._instance_id = instance_id or str(uuid.uuid4())
@@ -37,9 +43,63 @@ class PostgresMessageBus(MessageBus):
         self._publish_acl: Dict[str, set[str]] = {}
         self._enforce_acl = False
         self._closed = False
+        self._namespace: tuple[str, str] | None = None
+        self._namespace_locked = False
         self._poll_interval_seconds = max(0.01, poll_interval_seconds)
         self._retry_delay_seconds = max(0.1, retry_delay_seconds)
-        ensure_postgres_schema(dsn)
+        if type(initialize_schema) is not bool:
+            raise TypeError("initialize_schema must be a boolean")
+        if initialize_schema:
+            ensure_postgres_schema(dsn)
+        else:
+            # PostgreSQL itself resolves the actual relations and columns. Never DDL.
+            with postgres_connection(dsn) as conn, conn.cursor() as cur:
+                cur.execute("SET TRANSACTION READ ONLY")
+                cur.execute(
+                    """SELECT event_id,topic,payload_json,metadata_json,publisher,
+                    created_at,account_id,mode FROM ah_bus_events LIMIT 0"""
+                )
+                cur.execute(
+                    """SELECT subscription_id,instance_id,topics_json,active,
+                    cursor_event_id,created_at,updated_at,account_id,mode
+                    FROM ah_bus_subscriptions LIMIT 0"""
+                )
+                cur.execute(
+                    """SELECT delivery_id,subscription_id,event_id,status,attempts,
+                    last_error,next_attempt_at,updated_at FROM ah_bus_deliveries LIMIT 0"""
+                )
+
+    @property
+    def namespace(self) -> tuple[str, str] | None:
+        return self._namespace
+
+    @staticmethod
+    def _namespace_schema(cur: CursorLike) -> bool:
+        cur.execute(
+            """SELECT EXISTS(SELECT 1 FROM pg_attribute
+            WHERE attrelid=to_regclass('ah_bus_subscriptions') AND attname='account_id'
+            AND NOT attisdropped)"""
+        )
+        row = cur.fetchone()
+        return bool(row and row[0])
+
+    def bind_namespace(self, account_id: str, mode: str) -> None:
+        if (
+            not isinstance(account_id, str)
+            or not account_id.strip()
+            or mode not in {"simulated", "paper_broker", "live"}
+        ):
+            raise ValueError("invalid bus namespace")
+        requested = (account_id, mode)
+        with self._lock:
+            if self._namespace == requested:
+                return
+            if self._namespace is not None or self._namespace_locked or self._subs:
+                raise RuntimeError("bus namespace cannot change after binding or use")
+            with postgres_connection(self._dsn) as conn, conn.cursor() as cur:
+                if not self._namespace_schema(cur):
+                    raise RuntimeError("bus namespace requires explicit journal v3 migration")
+            self._namespace = requested
 
     def publish(
         self,
@@ -56,56 +116,101 @@ class PostgresMessageBus(MessageBus):
         payload_dict = dict(payload or {})
         metadata_dict = dict(metadata or {})
         metadata_dict["publisher"] = publisher
-        with postgres_connection(self._dsn) as conn:
-            with conn.cursor() as cur:
+        with postgres_connection(self._dsn) as conn, conn.cursor() as cur:
+            envelope = self._publish_in_transaction(
+                cur, topic, payload_dict, publisher=publisher, metadata=metadata
+            )
+        with self._lock:
+            self._history.append(envelope)
+        return envelope
+
+    def _publish_in_transaction(
+        self,
+        cur: CursorLike,
+        topic: str,
+        payload: Payload = None,
+        *,
+        publisher: str | None = None,
+        metadata: Mapping[str, object] | None = None,
+    ) -> Envelope:
+        """SQL enqueue only; caller owns commit. Never invokes a handler."""
+        if self._closed:
+            raise RuntimeError("MessageBus is closed")
+        if not self._is_allowed(topic, publisher):
+            raise PermissionError("publisher not allowed for topic")
+        self._namespace_locked = True
+        namespaced = self._namespace_schema(cur)
+        if self._namespace is not None and not namespaced:
+            raise RuntimeError("bound bus namespace schema unavailable")
+        payload_dict = dict(payload or {})
+        metadata_dict = dict(metadata or {})
+        if self._namespace is None:
+            if "account_id" in metadata_dict or "mode" in metadata_dict:
+                raise RuntimeError("unbound bus cannot claim a namespace")
+        else:
+            for key, value in zip(("account_id", "mode"), self._namespace):
+                if key in metadata_dict and metadata_dict[key] != value:
+                    raise RuntimeError("message namespace differs from bound bus")
+                metadata_dict[key] = value
+        metadata_dict["publisher"] = publisher
+        cur.execute(
+            """
+            INSERT INTO ah_bus_events (
+                topic,
+                payload_json,
+                metadata_json,
+                publisher,
+                created_at
+            )
+            VALUES (%s, %s::jsonb, %s::jsonb, %s, NOW())
+            RETURNING event_id, created_at
+            """,
+            (
+                topic,
+                json.dumps(payload_dict, default=str),
+                json.dumps(metadata_dict, default=str),
+                publisher,
+            ),
+        )
+        row = cur.fetchone()
+        if not row:
+            raise RuntimeError("failed to insert bus event")
+        event_id = _as_int(row[0])
+        created_at = row[1]
+        if namespaced:
+            cur.execute(
+                "UPDATE ah_bus_events SET account_id=%s,mode=%s WHERE event_id=%s",
+                (*(self._namespace or (None, None)), event_id),
+            )
+            cur.execute(
+                """SELECT subscription_id,topics_json FROM ah_bus_subscriptions
+                WHERE active=TRUE AND account_id IS NOT DISTINCT FROM %s
+                AND mode IS NOT DISTINCT FROM %s""",
+                self._namespace or (None, None),
+            )
+        else:
+            cur.execute(
+                "SELECT subscription_id,topics_json FROM ah_bus_subscriptions WHERE active=TRUE"
+            )
+        for sub_row in cur.fetchall():
+            sub_id = str(sub_row[0])
+            topics_json = sub_row[1]
+            topics = _decode_topics(topics_json)
+            if _matches(topic, topics):
                 cur.execute(
                     """
-                    INSERT INTO ah_bus_events (
-                        topic,
-                        payload_json,
-                        metadata_json,
-                        publisher,
-                        created_at
-                    )
-                    VALUES (%s, %s::jsonb, %s::jsonb, %s, NOW())
-                    RETURNING event_id, created_at
+                    INSERT INTO ah_bus_deliveries (
+                        subscription_id,
+                        event_id,
+                        status,
+                        attempts,
+                        next_attempt_at,
+                        updated_at
+                    ) VALUES (%s, %s, 'pending', 0, NOW(), NOW())
+                    ON CONFLICT (subscription_id, event_id) DO NOTHING
                     """,
-                    (
-                        topic,
-                        json.dumps(payload_dict, default=str),
-                        json.dumps(metadata_dict, default=str),
-                        publisher,
-                    ),
+                    (str(sub_id), event_id),
                 )
-                row = cur.fetchone()
-                if not row:
-                    raise RuntimeError("failed to insert bus event")
-                event_id = _as_int(row[0])
-                created_at = row[1]
-                cur.execute("""
-                    SELECT subscription_id, topics_json
-                    FROM ah_bus_subscriptions
-                    WHERE active = TRUE
-                    """)
-                for sub_row in cur.fetchall():
-                    sub_id = str(sub_row[0])
-                    topics_json = sub_row[1]
-                    topics = _decode_topics(topics_json)
-                    if _matches(topic, topics):
-                        cur.execute(
-                            """
-                            INSERT INTO ah_bus_deliveries (
-                                subscription_id,
-                                event_id,
-                                status,
-                                attempts,
-                                next_attempt_at,
-                                updated_at
-                            ) VALUES (%s, %s, 'pending', 0, NOW(), NOW())
-                            ON CONFLICT (subscription_id, event_id) DO NOTHING
-                            """,
-                            (str(sub_id), event_id),
-                        )
         envelope = Envelope(
             id=str(event_id),
             message=Message(
@@ -115,9 +220,29 @@ class PostgresMessageBus(MessageBus):
                 metadata=metadata_dict,
             ),
         )
-        with self._lock:
-            self._history.append(envelope)
         return envelope
+
+    def assert_same_datastore(self, dsn: str) -> None:
+        """Fail closed on another configured principal/endpoint or actual SQL namespace."""
+        from psycopg.conninfo import conninfo_to_dict
+
+        if conninfo_to_dict(dsn) != conninfo_to_dict(self._dsn):
+            raise RuntimeError("journal and bus datastore configurations differ")
+
+        def signature(source: str) -> tuple[object, ...]:
+            with postgres_connection(source) as conn, conn.cursor() as cur:
+                cur.execute(
+                    """SELECT current_database(), current_user, inet_server_addr()::text,
+                    inet_server_port(), current_schema(),
+                    to_regclass('ah_execution_accounts')::oid, to_regclass('ah_bus_events')::oid"""
+                )
+                row = cur.fetchone()
+                if not row or not row[-1] or not row[-2]:
+                    raise RuntimeError("journal/bus namespace unavailable")
+                return row
+
+        if signature(dsn) != signature(self._dsn):
+            raise RuntimeError("journal and bus SQL namespaces differ")
 
     def subscribe(
         self,
@@ -129,6 +254,7 @@ class PostgresMessageBus(MessageBus):
     ) -> Subscription:
         if self._closed:
             raise RuntimeError("MessageBus is closed")
+        self._namespace_locked = True
         subscription_id = subscription_key or str(uuid.uuid4())
         replaced_thread: threading.Thread | None = None
         with self._lock:
@@ -141,6 +267,23 @@ class PostgresMessageBus(MessageBus):
         subscription = Subscription(id=subscription_id, topics=topics, handler=handler)
         with postgres_connection(self._dsn) as conn:
             with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT pg_advisory_xact_lock(%s)",
+                    (advisory_lock_key("bus-subscription:" + subscription.id),),
+                )
+                namespaced = self._namespace_schema(cur)
+                if self._namespace is not None and not namespaced:
+                    raise RuntimeError("bound bus namespace schema unavailable")
+                if namespaced:
+                    cur.execute(
+                        "SELECT account_id,mode FROM ah_bus_subscriptions WHERE subscription_id=%s",
+                        (subscription.id,),
+                    )
+                    prior_namespace = cur.fetchone()
+                    if prior_namespace and tuple(prior_namespace) != (
+                        self._namespace or (None, None)
+                    ):
+                        raise RuntimeError("subscription key belongs to another namespace")
                 cur.execute(
                     """
                     SELECT cursor_event_id
@@ -174,6 +317,12 @@ class PostgresMessageBus(MessageBus):
                         _encode_topics(topics),
                     ),
                 )
+                if namespaced:
+                    cur.execute(
+                        "UPDATE ah_bus_subscriptions SET account_id=%s,mode=%s "
+                        "WHERE subscription_id=%s",
+                        (*(self._namespace or (None, None)), subscription.id),
+                    )
                 self._requeue_processing_deliveries(cur, subscription.id)
                 if existing_row:
                     self._enqueue_backlog_deliveries(
@@ -584,14 +733,20 @@ class PostgresMessageBus(MessageBus):
         topics: Sequence[str] | None,
         replay_last: int,
     ) -> None:
+        namespace_filter = (
+            "account_id IS NOT DISTINCT FROM %s AND mode IS NOT DISTINCT FROM %s"
+            if self._namespace_schema(cur)
+            else "%s::text IS NULL AND %s::text IS NULL"
+        )
         cur.execute(
-            """
+            f"""
             SELECT event_id, topic
             FROM ah_bus_events
+            WHERE {namespace_filter}
             ORDER BY event_id DESC
             LIMIT %s
             """,
-            (replay_last,),
+            (*(self._namespace or (None, None)), replay_last),
         )
         rows = list(reversed(cur.fetchall()))
         for row in rows:
@@ -608,14 +763,20 @@ class PostgresMessageBus(MessageBus):
         topics: Sequence[str] | None,
         after_event_id: int,
     ) -> None:
+        namespace_filter = (
+            "account_id IS NOT DISTINCT FROM %s AND mode IS NOT DISTINCT FROM %s"
+            if self._namespace_schema(cur)
+            else "%s::text IS NULL AND %s::text IS NULL"
+        )
         cur.execute(
-            """
+            f"""
             SELECT event_id, topic
             FROM ah_bus_events
             WHERE event_id > %s
+              AND {namespace_filter}
             ORDER BY event_id ASC
             """,
-            (after_event_id,),
+            (after_event_id, *(self._namespace or (None, None))),
         )
         for row in cur.fetchall():
             event_id = _as_int(row[0])

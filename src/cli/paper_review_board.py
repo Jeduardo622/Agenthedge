@@ -9,6 +9,8 @@ from typing import Any, Mapping
 
 import typer
 
+from ops.release_gate import ReleaseTrust, release_decision
+
 app = typer.Typer(
     help="Summarize recent paper sessions, stability, and reviewer evidence",
     pretty_exceptions_show_locals=False,
@@ -20,6 +22,9 @@ def build_review_board(
     artifact_dir: str | Path,
     min_stable_sessions: int = 5,
     now: datetime | None = None,
+    release_trust: ReleaseTrust | None = None,
+    release_evidence: dict[str, object] | None = None,
+    release_stage: str = "dependable_paper",
 ) -> dict[str, Any]:
     artifact_root = Path(artifact_dir)
     artifact_root.mkdir(parents=True, exist_ok=True)
@@ -47,6 +52,9 @@ def build_review_board(
         "created_at": current_time.isoformat(),
         "status": status,
         "read_only": True,
+        "release_gate": release_decision(
+            release_evidence, trust=release_trust, stage=release_stage, now=current_time
+        ),
         "artifact_dir": str(artifact_root),
         "review_board_artifact": str(json_path),
         "review_board_markdown_artifact": str(markdown_path),
@@ -56,6 +64,7 @@ def build_review_board(
         "reviewer_packet": reviewer_packet,
     }
     markdown = _render_markdown(report)
+    markdown += "\nRelease gate: " + json.dumps(report["release_gate"], sort_keys=True) + "\n"
     report["markdown"] = markdown
     json_path.write_text(json.dumps(report, indent=2, sort_keys=True), encoding="utf-8")
     markdown_path.write_text(markdown, encoding="utf-8")

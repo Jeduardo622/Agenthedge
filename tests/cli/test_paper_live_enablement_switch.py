@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 
-def test_live_enablement_switch_dry_run_ready_with_clean_preflight(
+def test_live_enablement_switch_clean_preflight_still_requires_release_evidence(
     tmp_path: Path, monkeypatch
 ) -> None:
     from cli import paper_live_enablement_switch
@@ -45,12 +45,13 @@ def test_live_enablement_switch_dry_run_ready_with_clean_preflight(
     )
 
     assert packet["artifact_type"] == "paper_live_enablement_switch"
-    assert packet["outcome"] == "ready_to_apply_live_switch"
+    assert packet["outcome"] == "blocked_with_reasons"
+    assert packet["release_gate"]["reasons"] == ["independent_release_trust_required"]
     assert packet["dry_run"] is True
     assert packet["apply_requested"] is False
     assert packet["live_switch_applied"] is False
     assert packet["scheduler_mutation"] is False
-    assert packet["fresh_preflight"]["status"] == "passed"
+    assert packet["fresh_preflight"]["status"] == "failed"
     assert packet["switch_diff"]["env_var_changes"][0]["name"] == "EXECUTION_MODE"
     assert packet["switch_diff"]["env_var_changes"][0]["from"] == "paper_broker"
     assert packet["switch_diff"]["env_var_changes"][0]["to"] == "live"
@@ -62,7 +63,7 @@ def test_live_enablement_switch_dry_run_ready_with_clean_preflight(
     )
     markdown = Path(packet["switch_transcript_markdown_artifact"]).read_text(encoding="utf-8")
     assert "LIVE_ENABLEMENT_SWITCH" in markdown
-    assert "outcome: ready_to_apply_live_switch" in markdown
+    assert "outcome: blocked_with_reasons" in markdown
 
 
 def test_live_enablement_switch_blocks_without_approved_final_decision(tmp_path: Path) -> None:

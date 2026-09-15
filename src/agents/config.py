@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
+from datetime import datetime, timezone
 from math import isfinite
 from typing import List, Mapping
 
 from infra.governance import RuntimeGovernanceConfig
+from ops.release_gate import ReleaseTrust, release_decision
 from portfolio.safety import ExecutionSafetyConfig
 
 DEFAULT_EXECUTION_CAP = 1_000_000.0
@@ -142,14 +146,44 @@ class AgentRuntimeConfig:
     governance: RuntimeGovernanceConfig = field(default_factory=RuntimeGovernanceConfig.from_env)
 
     @classmethod
-    def from_env(cls, env: Mapping[str, str] | None = None) -> "AgentRuntimeConfig":
+    def from_env(
+        cls,
+        env: Mapping[str, str] | None = None,
+        *,
+        release_trust: ReleaseTrust | None = None,
+        release_evidence: dict[str, object] | None = None,
+        now: datetime | None = None,
+    ) -> "AgentRuntimeConfig":
+        return cls._parse_env(
+            env,
+            release_trust=release_trust,
+            release_evidence=release_evidence,
+            now=now,
+            require_live_release=True,
+        )
+
+    @classmethod
+    def from_env_for_recovery(cls, env: Mapping[str, str] | None = None) -> "AgentRuntimeConfig":
+        """Parse a typed restart configuration without granting live authorization."""
+        return cls._parse_env(env, require_live_release=False)
+
+    @classmethod
+    def _parse_env(
+        cls,
+        env: Mapping[str, str] | None = None,
+        *,
+        release_trust: ReleaseTrust | None = None,
+        release_evidence: dict[str, object] | None = None,
+        now: datetime | None = None,
+        require_live_release: bool,
+    ) -> "AgentRuntimeConfig":
         source = env if env is not None else os.environ
         runtime_name = (source.get("RUNTIME_NAME") or "default").strip() or "default"
         execution_mode = _get_execution_mode(source)
         live_enablement_readiness = LiveEnablementReadiness.from_env(source)
         _validate_live_enablement(source, execution_mode, live_enablement_readiness)
         paper_defaults = execution_mode == "paper_broker"
-        return cls(
+        config = cls(
             tick_interval_seconds=_get_float(source, "AGENT_TICK_INTERVAL", 5.0),
             max_ticks=_get_int(source, "AGENT_MAX_TICKS", 0, allow_zero=True) or None,
             concurrency=_get_int(source, "AGENT_CONCURRENCY", 1),
@@ -205,6 +239,31 @@ class AgentRuntimeConfig:
             ),
             governance=RuntimeGovernanceConfig.from_env(source),
         )
+        if execution_mode == "live" and require_live_release:
+            if release_trust is not None and (
+                release_trust.expected.mode != "live"
+                or release_trust.expected.config_hash != config.release_config_hash()
+            ):
+                raise ValueError(
+                    "release mode/config_hash differs from parsed runtime configuration"
+                )
+            decision = release_decision(
+                release_evidence,
+                trust=release_trust,
+                stage="live_start",
+                now=now if now is not None else datetime.now(timezone.utc),
+            )
+            if not decision["passed"]:
+                raise ValueError(
+                    "live release evidence required; LIVE_ENABLEMENT boolean assertions are "
+                    "deprecated as authorization: " + ", ".join(str(r) for r in decision["reasons"])
+                )
+        return config
+
+    def release_config_hash(self) -> str:
+        """Bind all parsed runtime settings, without reading or hashing environment secrets."""
+        encoded = json.dumps(asdict(self), sort_keys=True, separators=(",", ":"), allow_nan=False)
+        return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
 def _validate_live_enablement(
