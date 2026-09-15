@@ -6,7 +6,7 @@ import json
 import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, Mapping, cast
+from typing import Any, Dict, Mapping, NoReturn, cast
 
 from portfolio.accounting import as_decimal
 from portfolio.broker import (
@@ -314,10 +314,29 @@ class ExecutionAgent(BaseAgent):
         if not isinstance(orders, dict):
             orders = {}
             self._order_ledger["orders"] = orders
-        record = orders.get(status.broker_order_id)
+        original_id = source.get("broker_order_id", status.broker_order_id)
+        record = orders.get(original_id)
         if not isinstance(record, dict):
-            record = {}
-            orders[status.broker_order_id] = record
+            record = {
+                "broker_order_id": original_id,
+                "client_order_id": source.get(
+                    "client_order_id", source.get("director_approval_id", status.client_order_id)
+                ),
+                "symbol": source.get("symbol", status.symbol),
+                "side": source.get("side", status.side),
+                "quantity": source.get("quantity", status.quantity),
+            }
+            if "broker_order_id" not in source and "quantity" in source:
+                requested = as_decimal(source["quantity"])
+                record["quantity"] = float(abs(requested))
+                record["side"] = "buy" if requested > 0 else "sell"
+                if isinstance(record["symbol"], str):
+                    record["symbol"] = record["symbol"].upper()
+            orders[original_id] = record
+        try:
+            self._validate_broker_identity(record, status)
+        except (ValueError, ArithmeticError) as exc:
+            self._fail_recovery(record, status, exc)
         record.update(
             {
                 "broker_order_id": status.broker_order_id,
@@ -345,6 +364,36 @@ class ExecutionAgent(BaseAgent):
         self._save_order_ledger()
         return record
 
+    def _validate_broker_identity(
+        self, record: Mapping[str, Any], status: BrokerOrderStatus
+    ) -> None:
+        for key in ("broker_order_id", "client_order_id", "symbol", "side"):
+            value = getattr(status, key)
+            if not value or record.get(key) != value:
+                raise ValueError(f"broker order {key} changed or missing")
+        if status.side not in {"buy", "sell"}:
+            raise ValueError("invalid order side")
+        requested = as_decimal(record.get("quantity"))
+        reported = as_decimal(status.quantity)
+        filled = as_decimal(status.filled_quantity)
+        if requested <= 0 or reported != requested:
+            raise ValueError("broker requested quantity changed or invalid")
+        if filled < 0 or filled > requested:
+            raise ValueError("cumulative fill outside requested quantity")
+
+    def _fail_recovery(
+        self, record: Dict[str, Any], status: BrokerOrderStatus, exc: Exception
+    ) -> NoReturn:
+        record["recovery_required"] = True
+        record["recovery_reason"] = str(exc)
+        record["closed"] = False
+        self._save_order_ledger()
+        self.audit(
+            "execution_reconciliation_required",
+            {"broker_order_id": status.broker_order_id, "reason": str(exc)},
+        )
+        raise ValueError(f"reconciliation required: {exc}") from exc
+
     def _persist_new_broker_fill(
         self,
         record: Dict[str, Any],
@@ -353,6 +402,7 @@ class ExecutionAgent(BaseAgent):
         fallback_price: float,
     ) -> Dict[str, Any] | None:
         try:
+            self._validate_broker_identity(record, status)
             if record.get("recovery_required"):
                 raise ValueError("unresolved economic correction")
             previous_quantity = as_decimal(record.get("persisted_filled_quantity", 0))
@@ -381,15 +431,7 @@ class ExecutionAgent(BaseAgent):
             fill_price = float(delta_value / delta_quantity)
             signed_fill_quantity = float(delta_quantity) * (1 if status.side == "buy" else -1)
         except (ValueError, ArithmeticError) as exc:
-            record["recovery_required"] = True
-            record["recovery_reason"] = str(exc)
-            record["closed"] = False
-            self._save_order_ledger()
-            self.audit(
-                "execution_reconciliation_required",
-                {"broker_order_id": status.broker_order_id, "reason": str(exc)},
-            )
-            raise ValueError(f"reconciliation required: {exc}") from exc
+            self._fail_recovery(record, status, exc)
         fill: Mapping[str, float]
         if status.portfolio_persisted:
             snapshot = self.portfolio_store.snapshot()
