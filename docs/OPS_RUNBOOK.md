@@ -133,6 +133,13 @@ Escalation steps follow `GOVERNANCE.md` matrix; severe incidents require manual 
 - Staged release drills:
   - `poetry run python scripts/canary_postgres_runtime.py --dsn <POSTGRES_DSN>`
   - `poetry run python scripts/failover_drill.py --dsn <POSTGRES_DSN>`
+  - For the maintained disposable journal restore drill, provision two new empty
+    local `qualification_*` databases, set `E5B2_TEST_POSTGRES_DSN`,
+    `O4_RESTORE_TEST_POSTGRES_DSN`, and `O4_POSTGRES_CONTAINER`, then run
+    `poetry run python scripts/qualify_runtime.py --drill journal-restore
+    --disposable-database --output .cache/completion/journal-restore.json`.
+    Preserve both databases and the report for inspection; never point this command
+    at an existing trading database or reuse either database.
 - Troubleshooting local auth failures:
   - If you see `password authentication failed for user "postgres"` while using `localhost:5432`, verify you are hitting the Docker container and not a host Postgres service.
   - Preferred local command: `docker run --name agenthedge-pg -e POSTGRES_USER=postgres -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=agenthedge -p 55432:5432 -d postgres:16`
@@ -1161,7 +1168,101 @@ Manual remediation for open paper canary orders:
 3. Re-query open orders with the same prefix and confirm the count is zero.
 4. Save the cleanup failure artifact and the post-remediation evidence with the release record.
 
-### Bootstrap Procedure
+### Durable account worker
+
+Use `worker-run` only with an existing execution-journal v6 account and control-command
+v1 schema. Provision and review those schemas separately; worker construction performs
+schema reads and fails if they are absent. It does not create schemas, accounts, a start
+request, or a broker authorization.
+
+The trust file contains the complete approved release identity and names of environment
+variables holding issuer keys. The evidence file is the signed release dossier. The
+strategy and runtime-data descriptor files must match the hashes in that identity; the
+runtime-data descriptor in turn binds its adjacent research bundle and public provider
+configuration. Put credentials only in the named process environment. Do not copy keys,
+DSNs, or webhook URLs into these files, command arguments, or operator records.
+
+Set the explicit runtime environment for the same account and mode, including
+`POSTGRES_DSN`, `RUNTIME_BACKEND=postgres`, `PORTFOLIO_ACCOUNT_ID`, `RUNTIME_NAME`,
+`EXECUTION_MODE`, the issuer-key variables named by the trust file, and the provider and
+broker variables required by the selected mode. Then start a bounded worker with absolute,
+distinct state paths:
+
+```powershell
+poetry run python -m cli.runtime worker-run `
+  --trust-file C:\approved\worker-trust.json `
+  --evidence-file C:\approved\release-evidence.json `
+  --checkout C:\installed\Agenthedge `
+  --strategy-file C:\approved\strategy.json `
+  --data-file C:\approved\runtime-data.json `
+  --performance-file C:\agenthedge-state\performance.json `
+  --audit-file C:\agenthedge-state\audit.jsonl `
+  --report-directory C:\agenthedge-state\reports `
+  --instance-id worker-host-a `
+  --max-iterations 1 `
+  --poll-seconds 1
+```
+
+Run this bounded construction and readback before the venue opens, with no start command
+pending. An `idle` result only confirms that the existing configuration could be composed;
+it is not broker, provider, or release qualification. Construction is recovery-only. It
+does not activate agents, obtain durable trading authority, or automatically resume a
+previous start after process restart. A supervisor must invoke the worker again after an
+interruption; the new process receives a new fenced worker identity and resolves durable
+uncertain commands through controller readback.
+
+To collect session coverage, submit `reconcile` before the same-day venue open,
+within the approved session-control boundary grace. Run the worker and inspect
+`control-status`: require `state=succeeded`, `preflight_qualified=true`, and the
+original `session_coverage` record in its details. A reconcile outside that window
+can succeed without qualifying coverage. Use a distinct stable ID for each action:
+
+```powershell
+poetry run python -m cli.runtime control-submit --account-id ACCOUNT `
+  --mode paper_broker --command-id PREFLIGHT_ID --action reconcile `
+  --release COMMIT_SHA --actor OPERATOR_ALIAS
+poetry run python -m cli.runtime control-status --account-id ACCOUNT `
+  --mode paper_broker --command-id PREFLIGHT_ID
+```
+
+At the open, submit an explicit paper start request with another stable command ID:
+
+```powershell
+poetry run python -m cli.runtime control-submit --account-id ACCOUNT `
+  --mode paper_broker --command-id START_ID --action start_paper `
+  --release COMMIT_SHA --actor OPERATOR_ALIAS
+poetry run python -m cli.runtime control-status --account-id ACCOUNT `
+  --mode paper_broker --command-id START_ID
+```
+
+The worker must independently accept the signed release and report a fresh successful
+observation before `applied` is true. Keep the same worker running through the session
+so it can observe the closing valuation. At or after the venue close, close with a new
+stable command ID and verify the durable outcome the same way:
+
+```powershell
+poetry run python -m cli.runtime control-submit --account-id ACCOUNT `
+  --mode paper_broker --command-id CLOSE_ID --action close_session `
+  --release COMMIT_SHA --actor OPERATOR_ALIAS
+poetry run python -m cli.runtime control-status --account-id ACCOUNT `
+  --mode paper_broker --command-id CLOSE_ID
+```
+
+Current session-risk opening valuation requires an original quote event timestamp exactly
+at the reviewed venue open for every nonzero held position. A later quote cannot be
+backdated. Delayed processing uses the separate opening-input callback, retaining the
+original event and availability timestamps. It remains bounded by the approved freshness
+and boundary grace; later economic events cannot be relabeled as opening holdings.
+Missing, stale, or future-visible opening data is a recovery condition. A midday halt
+does not produce a completed-session artifact. Successful `CLOSED` readback includes the
+source-backed closeout and its hash; pending or recovery outcomes are not completed sessions.
+
+The optional `--paper-account`, `--paper-release`, and `--paper-dsn-environment` flags must
+be supplied together for a live worker's independently configured rollback target. The
+last value names an existing environment variable; it is not a literal DSN. Pairing does
+not start or qualify the paper worker.
+
+### Legacy bootstrap procedure
 1. `poetry install && poetry shell`
 2. Populate `.env` with API keys + runtime config (tick interval, enabled agents).
 3. Validate data providers: `poetry run python -m cli.runtime health`

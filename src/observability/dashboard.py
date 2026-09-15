@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import atexit
+import math
 from typing import Any, Dict, List, Mapping
 
 import pandas as pd
@@ -28,6 +29,17 @@ def dashboard_session() -> DashboardSession:
     session = DashboardSession()
     atexit.register(session.stop)
     return session
+
+
+def _risk_metric(observation: Mapping[str, Any], key: str, template: str) -> str:
+    if "available" in observation and observation.get("available") is not True:
+        return "Unavailable"
+    value = observation.get(key)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return "Unavailable"
+    if not math.isfinite(float(value)):
+        return "Unavailable"
+    return template.format(value=value)
 
 
 @st.fragment(run_every=2.0)
@@ -117,13 +129,11 @@ def render_dashboard() -> None:
 
     st.subheader("Risk KPIs")
     risk_cols = st.columns(4)
-    risk_cols[0].metric("NAV", f"${risk_obs.get('nav', 0):,.2f}")
-    risk_cols[1].metric("Gross Exposure", f"${risk_obs.get('gross_exposure', 0):,.2f}")
-    risk_cols[2].metric("Leverage", f"{risk_obs.get('leverage', 0):.2f}x")
-    risk_cols[3].metric("VaR %", f"{risk_obs.get('var_pct', 0) * 100:.2f}%")
-    drawdown = risk_obs.get("drawdown_pct")
-    if drawdown is not None:
-        st.metric("Drawdown", f"{drawdown * 100:.2f}%")
+    risk_cols[0].metric("NAV", _risk_metric(risk_obs, "nav", "${value:,.2f}"))
+    risk_cols[1].metric("Gross Exposure", _risk_metric(risk_obs, "gross_exposure", "${value:,.2f}"))
+    risk_cols[2].metric("Leverage", _risk_metric(risk_obs, "leverage", "{value:.2f}x"))
+    risk_cols[3].metric("VaR %", _risk_metric(risk_obs, "var_pct", "{value:.2%}"))
+    st.metric("Drawdown", _risk_metric(risk_obs, "drawdown_pct", "{value:.2%}"))
     if risk_obs.get("last_stress_run"):
         st.json({"last_stress_run": risk_obs["last_stress_run"]})
 
@@ -214,6 +224,8 @@ def render_dashboard() -> None:
     ]
     if unavailable:
         st.warning("Unavailable providers: " + ", ".join(unavailable) + ". Data may be degraded.")
+    if snapshot["provider_status"] == "checked" and not snapshot["providers"]:
+        st.info("No providers configured. Market data is unavailable for this session.")
     providers_df = provider_frame(runtime_health.get("providers", {}))
     st.dataframe(providers_df, width="stretch", hide_index=True)
 
