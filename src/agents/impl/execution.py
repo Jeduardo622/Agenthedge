@@ -423,6 +423,7 @@ class ExecutionAgent(BaseAgent):
             if not safety_result.allowed:
                 self._reject("execution_reconciliation_required", payload)
                 return
+        execution_snapshot = None
         if self._paper_mandate is not None:
             try:
                 state = journal.paper_experiment_state(account, mode, self._paper_mandate)
@@ -438,7 +439,7 @@ class ExecutionAgent(BaseAgent):
                     state,
                     reservations,
                 )
-                cast(Any, self.context.ingestion).revalidate_order(
+                execution_snapshot = cast(Any, self.context.ingestion).revalidate_order(
                     order.symbol, order.side, as_decimal(order.limit_price)
                 )
             except (ValueError, ArithmeticError):
@@ -483,6 +484,14 @@ class ExecutionAgent(BaseAgent):
         if not self._release_allowed(self._now()):
             self._reject("execution_release_blocked", payload)
             return
+        if self._paper_mandate is not None:
+            try:
+                cast(Any, self.context.ingestion).validate_execution_snapshot(
+                    execution_snapshot, self._now()
+                )
+            except (ValueError, ArithmeticError):
+                self._reject("execution_paper_quote_expired_before_send", payload)
+                return  # Keep the durable claim unknown until reconciliation proves the outcome.
         send_time = self._now()
         if _is_expired(
             payload.get("expires_at"),
