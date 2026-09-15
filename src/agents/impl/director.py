@@ -5,7 +5,9 @@ from __future__ import annotations
 import os
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Mapping, Sequence
+from typing import Any, Dict, List, Mapping, Sequence, cast
+
+from data.snapshot import CanonicalSnapshot, snapshot_to_mapping
 
 from ..base import BaseAgent
 from ..context import AgentContext
@@ -23,8 +25,11 @@ class DirectorAgent(BaseAgent):
         self.bus: MessageBus = bus
         self.symbols = self._resolve_symbols(context.extras or {})
         self.research_inputs = self._resolve_research_inputs(context.extras or {})
+        candidate_now = (context.extras or {}).get("now")
+        self._now = candidate_now if callable(candidate_now) else lambda: datetime.now(timezone.utc)
         self._approval_subscription: Subscription | None = None
         self._approval_ttl_seconds = int(os.environ.get("DIRECTOR_APPROVAL_TTL_SECONDS", "900"))
+        self._quote_freshness_seconds = int(os.environ.get("DATA_QUOTE_FRESHNESS_SECONDS", "300"))
 
     def _resolve_symbols(self, extras: Mapping[str, object]) -> List[str]:
         from_extras = extras.get("symbols")
@@ -62,45 +67,89 @@ class DirectorAgent(BaseAgent):
             self._approval_subscription = None
 
     def tick(self) -> None:
-        run_id = self.context.run_id
         for symbol in self.symbols:
-            snapshot = self.context.ingestion.get_market_snapshot(symbol)
-            price = snapshot.latest_close or snapshot.quote.get("c")
-            if price is None:
-                self.logger.warning("skipping directive for %s due to missing price", symbol)
-                continue
-            decision_id = str(uuid.uuid4())
-            directive = {
-                "directive_id": str(uuid.uuid4()),
-                "decision_id": decision_id,
-                "symbol": symbol,
-                "latest_close": float(price),
-                "quote": snapshot.quote,
-                "fundamentals": snapshot.fundamentals,
-                "data_metadata": getattr(snapshot, "metadata", {}),
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "run_id": run_id,
-            }
-            symbol_research_inputs = self.research_inputs.get(symbol.upper())
-            if symbol_research_inputs:
-                directive["research_inputs"] = dict(symbol_research_inputs)
-            fundamentals = snapshot.fundamentals or {}
-            metadata = getattr(snapshot, "metadata", {})
-            degraded = metadata.get("degraded_mode") if isinstance(metadata, dict) else False
-            self.logger.info(
-                "fundamentals attached for %s (keys=%s degraded=%s)",
-                symbol,
-                len(fundamentals) if isinstance(fundamentals, dict) else 0,
-                degraded,
-            )
-            self.bus.publish(
-                "market.snapshot",
-                payload={"symbol": symbol, "latest_close": float(price)},
-                publisher=self.name,
-            )
-            self.bus.publish("director.directive", payload=directive, publisher=self.name)
-            self.publish_metric("directive_emitted", 1.0, {"symbol": symbol})
-            self.logger.info("directive emitted for %s", symbol)
+            self.emit_symbol(symbol)
+
+    def emit_symbol(self, symbol: str) -> None:
+        run_id = self.context.run_id
+        snapshot = self.context.ingestion.get_market_snapshot(symbol)
+        if not isinstance(snapshot, CanonicalSnapshot):
+            self.logger.warning("skipping directive for %s due to noncanonical snapshot", symbol)
+            return
+        decision_at = self._utc_now()
+        snapshot_age = (decision_at - snapshot.event_at).total_seconds()
+        if (
+            snapshot.symbol.upper() != symbol.upper()
+            or snapshot.available_at > decision_at
+            or snapshot.received_at > decision_at
+            or snapshot_age < 0
+            or snapshot_age > self._quote_freshness_seconds
+        ):
+            self.logger.warning("skipping directive for %s due to stale canonical snapshot", symbol)
+            return
+        serialized = snapshot_to_mapping(snapshot)
+        serialized_fundamentals = cast(dict[str, dict[str, object]], serialized["fundamentals"])
+        serialized_news = cast(list[dict[str, object]], serialized["news"])
+        price = snapshot.price
+        decision_id = str(uuid.uuid4())
+        directive = {
+            "directive_id": str(uuid.uuid4()),
+            "decision_id": decision_id,
+            "symbol": symbol,
+            "latest_close": float(price),
+            "quote": {
+                **cast(dict[str, object], serialized["quote"]),
+                "c": float(snapshot.quote.last),
+                "pc": float(snapshot.quote.previous_close),
+            },
+            "fundamentals": {name: item["value"] for name, item in serialized_fundamentals.items()},
+            "news": [item["value"] for item in serialized_news],
+            "data_metadata": {
+                "event_at": serialized["event_at"],
+                "available_at": serialized["available_at"],
+                "received_at": serialized["received_at"],
+                "source": snapshot.source,
+                "revision": snapshot.revision,
+                "checksum": snapshot.checksum,
+                "research": {
+                    "fundamentals": serialized["fundamentals"],
+                    "news": serialized["news"],
+                },
+                "research_participation": {
+                    "fundamentals": bool(snapshot.fundamentals),
+                    "news": bool(snapshot.news),
+                },
+            },
+            "timestamp": decision_at.isoformat(),
+            "run_id": run_id,
+        }
+        symbol_research_inputs = self.research_inputs.get(symbol.upper())
+        visible_research = _visible_research_inputs(symbol_research_inputs, decision_at)
+        if visible_research:
+            directive["research_inputs"] = visible_research
+        fundamentals = snapshot.fundamentals or {}
+        self.logger.info(
+            "fundamentals attached for %s (keys=%s degraded=%s)",
+            symbol,
+            len(fundamentals),
+            False,
+        )
+        self.bus.publish(
+            "market.snapshot",
+            payload={"symbol": symbol, "latest_close": float(price)},
+            publisher=self.name,
+        )
+        if not self.bus.drain(2.0):
+            raise RuntimeError("market snapshot processing timed out")
+        self.bus.publish("director.directive", payload=directive, publisher=self.name)
+        self.publish_metric("directive_emitted", 1.0, {"symbol": symbol})
+        self.logger.info("directive emitted for %s", symbol)
+
+    def _utc_now(self) -> datetime:
+        value = self._now()
+        if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("now must return a UTC-aware datetime")
+        return value.astimezone(timezone.utc)
 
     def _handle_compliance_approval(self, envelope: Envelope) -> None:
         payload: Dict[str, Any] = dict(envelope.message.payload or {})
@@ -109,11 +158,12 @@ class DirectorAgent(BaseAgent):
             return
         decision_id = payload.get("decision_id") or proposal_id
         approvals = dict(payload.get("approvals") or {})
+        approved_at = self._utc_now()
         approvals["director"] = {
             "status": "approved",
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": approved_at.isoformat(),
         }
-        expires_at = datetime.now(timezone.utc) + timedelta(seconds=self._approval_ttl_seconds)
+        expires_at = approved_at + timedelta(seconds=self._approval_ttl_seconds)
         director_payload = {
             **payload,
             "decision_id": decision_id,
@@ -124,3 +174,26 @@ class DirectorAgent(BaseAgent):
         self.bus.publish("director.approval", payload=director_payload, publisher=self.name)
         self.audit("director_approval", director_payload)
         self.publish_metric("director_approved", 1.0, {"proposal_id": proposal_id})
+
+
+def _visible_research_inputs(
+    inputs: Mapping[str, Any] | None, decision_at: datetime
+) -> dict[str, Any]:
+    visible: dict[str, Any] = {}
+    for name, value in (inputs or {}).items():
+        raw_created = getattr(value, "created_at", None)
+        if raw_created is None and isinstance(value, Mapping):
+            raw_created = value.get("created_at")
+        created_at: datetime | None = None
+        if isinstance(raw_created, datetime):
+            created_at = raw_created
+        elif isinstance(raw_created, str):
+            try:
+                created_at = datetime.fromisoformat(raw_created.replace("Z", "+00:00"))
+            except ValueError:
+                continue
+        if created_at is None or created_at.tzinfo is None or created_at.utcoffset() is None:
+            continue
+        if created_at.astimezone(timezone.utc) <= decision_at:
+            visible[str(name)] = value
+    return visible

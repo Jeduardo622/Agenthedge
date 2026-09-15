@@ -5,9 +5,9 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
-from typing import Any, Dict, List, Mapping
+from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal, InvalidOperation
+from typing import Any, Callable, Dict, List, Mapping
 
 import pandas as pd
 
@@ -15,18 +15,11 @@ from ..cache import TTLCache
 from ..config import DataProviderConfig, ProviderConfigError
 from ..providers import AlphaVantageProvider, FinnhubProvider, FredProvider, NewsProvider
 from ..providers.base import DataProviderError
-from ..quality import DataQualityChecker
+from ..quality import DataQualityChecker, DataQualityIssue
 from ..quarantine import QuarantineStore
+from ..snapshot import CanonicalQuote, CanonicalSnapshot, ResearchObservation
 
-
-@dataclass
-class MarketSnapshot:
-    symbol: str
-    quote: Dict[str, Any]
-    latest_close: float | None
-    fundamentals: Dict[str, Any]
-    news: List[Dict[str, Any]]
-    metadata: Dict[str, Any] = field(default_factory=dict)
+MarketSnapshot = CanonicalSnapshot
 
 
 class DataIngestionService:
@@ -36,6 +29,7 @@ class DataIngestionService:
         self,
         config: DataProviderConfig | None = None,
         cache: TTLCache | None = None,
+        now: Callable[[], datetime] | None = None,
     ) -> None:
         self.config = config or DataProviderConfig.from_env()
         self.cache = cache or TTLCache(
@@ -45,6 +39,7 @@ class DataIngestionService:
         )
         self._providers: Dict[str, Any] = {}
         self.logger = logging.getLogger("agenthedge.ingestion")
+        self._now = now or (lambda: datetime.now(timezone.utc))
         self._quality = DataQualityChecker(
             quote_freshness_seconds=self.config.data_quote_freshness_seconds,
             news_freshness_seconds=self.config.data_news_freshness_seconds,
@@ -54,6 +49,7 @@ class DataIngestionService:
         self._degraded_mode = False
         self._degraded_reasons: set[str] = set()
         self._provider_health_cache: Dict[str, tuple[float, Dict[str, Any]]] = {}
+        self._availability_by_checksum: Dict[str, datetime] = {}
         self._wire_providers()
 
     def _wire_providers(self) -> None:
@@ -72,100 +68,222 @@ class DataIngestionService:
         return self._providers[name]
 
     def get_market_snapshot(self, symbol: str) -> MarketSnapshot:
-        av: AlphaVantageProvider = self._require_provider("alpha_vantage")
         finnhub_provider: FinnhubProvider = self._require_provider("finnhub")
-        news_provider: NewsProvider = self._require_provider("newsapi")
-
         quote = finnhub_provider.get_quote(symbol)
-        fundamentals = self._fetch_fundamentals(symbol, av)
-        latest_close = None
-        if not self.config.alpha_vantage_timeseries_enabled:
-            self.logger.info(
-                "skipping alpha_vantage_timeseries symbol=%s reason=disabled",
-                symbol,
-            )
-            latest_close = _quote_close(quote)
-        elif fundamentals:
+        quote_received_at = self._utc_now()
+        quote_available_at = self._remember_availability(
+            "finnhub", symbol, quote, quote_received_at
+        )
+        issues = self._quality.check_quote(quote, now=quote_received_at)
+        self._record_quote_issues(symbol, quote, issues)
+        blocking = [issue.reason for issue in issues if issue.severity == "error"]
+        if blocking:
+            self._mark_degraded("invalid_canonical_quote")
+            raise DataProviderError("canonical quote rejected: " + ",".join(sorted(blocking)))
+        event_at = datetime.fromtimestamp(float(quote["t"]), tz=timezone.utc)
+        fundamentals: dict[str, ResearchObservation] = {}
+        alpha_provider = self._providers.get("alpha_vantage")
+        latest_receipt = quote_received_at
+        snapshot_available_at = quote_available_at
+        if alpha_provider is not None:
             try:
-                ts = av.get_equity_timeseries(symbol, interval="daily", outputsize="compact")
-                latest_close = _latest_close_from_timeseries(ts)
-            except DataProviderError as exc:
-                self.logger.warning(
-                    "alpha_vantage_timeseries_failed symbol=%s error=%s", symbol, exc
+                raw_fundamentals = alpha_provider.get_company_overview(symbol)
+                fundamentals_received_at = self._utc_now()
+                self._remember_availability(
+                    "alpha_vantage", symbol, raw_fundamentals, fundamentals_received_at
                 )
-                ts = {}
-                latest_close = _latest_close_from_timeseries(ts) or _quote_close(quote)
-        else:
-            self.logger.info(
-                "skipping alpha_vantage_timeseries symbol=%s reason=fundamentals_unavailable",
-                symbol,
-            )
-            latest_close = _quote_close(quote)
-        news = news_provider.get_company_news(symbol)
-        metadata: Dict[str, Any] = {
-            "symbol": symbol,
-            "fetched_at": datetime.now().astimezone().isoformat(),
-            "lineage": {
-                "quote": self._lineage_entry(
-                    source="finnhub",
-                    key_alias=self.config.finnhub_key_alias,
-                    payload=quote,
-                ),
-                "fundamentals": self._lineage_entry(
-                    source=str(fundamentals.get("_source", "unknown")),
-                    key_alias=(
-                        self.config.alpha_vantage_key_alias
-                        if fundamentals.get("_source") == "alpha_vantage"
-                        else self.config.finnhub_key_alias
-                    ),
-                    payload=fundamentals,
-                ),
-                "news": self._lineage_entry(
-                    source="newsapi",
-                    key_alias=self.config.news_api_key_alias,
-                    payload=news,
-                ),
-            },
-        }
-        quality_issues: List[Dict[str, str]] = []
-        if self.config.data_quality_enabled:
-            quality_issues = (
-                [issue.__dict__ for issue in self._quality.check_quote(quote)]
-                + [issue.__dict__ for issue in self._quality.check_fundamentals(fundamentals)]
-                + [issue.__dict__ for issue in self._quality.check_news(news)]
-            )
-            if quality_issues:
-                metadata["quality_issues"] = quality_issues
-                self._mark_degraded("data_quality_issue")
-                for issue in quality_issues:
-                    self.logger.warning(
-                        "data_quality_issue symbol=%s type=%s reason=%s",
-                        symbol,
-                        issue["data_type"],
-                        issue["reason"],
+                latest_receipt = max(latest_receipt, fundamentals_received_at)
+                fundamentals = self._canonical_fundamentals(
+                    raw_fundamentals, fundamentals_received_at
+                )
+                if fundamentals:
+                    snapshot_available_at = max(
+                        snapshot_available_at,
+                        max(item.available_at for item in fundamentals.values()),
                     )
-                    if self.config.quarantine_enabled:
-                        self._quarantine.quarantine(
-                            symbol=symbol,
-                            data_type=issue["data_type"],
-                            reason=issue["reason"],
-                            payload={
-                                "quote": quote,
-                                "fundamentals": fundamentals,
-                                "news": news[:3],
-                            },
-                        )
-        metadata["degraded_mode"] = self._degraded_mode
-        metadata["degraded_reasons"] = sorted(self._degraded_reasons)
-
-        return MarketSnapshot(
-            symbol=symbol,
-            quote=quote,
-            latest_close=latest_close,
+            except (DataProviderError, ValueError, TypeError):
+                self._mark_degraded("fundamentals_unavailable")
+                self.logger.warning("fundamentals_provider_failed symbol=%s", symbol)
+        raw_news: List[Dict[str, Any]] = []
+        news_available_at = latest_receipt
+        news_provider = self._providers.get("newsapi")
+        if news_provider is not None:
+            try:
+                raw_news = news_provider.get_company_news(symbol)
+                news_received_at = self._utc_now()
+                news_available_at = self._remember_availability(
+                    "newsapi", symbol, raw_news, news_received_at
+                )
+                latest_receipt = max(latest_receipt, news_received_at)
+            except DataProviderError:
+                self._mark_degraded("news_unavailable")
+                self.logger.warning("news_provider_failed symbol=%s", symbol)
+        news = self._canonical_news(raw_news, news_available_at)
+        if news:
+            snapshot_available_at = max(
+                snapshot_available_at, max(item.available_at for item in news)
+            )
+        assembly_at = self._utc_now()
+        final_issues = self._quality.check_quote(quote, now=assembly_at)
+        initial_reasons = {issue.reason for issue in issues}
+        self._record_quote_issues(
+            symbol,
+            quote,
+            [issue for issue in final_issues if issue.reason not in initial_reasons],
+        )
+        if self.config.data_quality_enabled:
+            self._record_news_issues(
+                symbol,
+                raw_news,
+                self._quality.check_news(raw_news, now=assembly_at),
+            )
+        final_blocking = [issue.reason for issue in final_issues if issue.severity == "error"]
+        if final_blocking:
+            self._mark_degraded("invalid_canonical_quote")
+            raise DataProviderError("canonical quote rejected: " + ",".join(sorted(final_blocking)))
+        return CanonicalSnapshot(
+            symbol=symbol.upper(),
+            event_at=event_at,
+            available_at=snapshot_available_at,
+            received_at=latest_receipt,
+            quote=CanonicalQuote(
+                last=_decimal(quote.get("c"), "c"),
+                previous_close=_decimal(quote.get("pc"), "pc"),
+            ),
+            source="finnhub",
+            revision=str(quote["t"]),
+            checksum=_checksum(quote),
             fundamentals=fundamentals,
             news=news,
-            metadata=metadata,
         )
+
+    def _canonical_news(
+        self, payload: List[Dict[str, Any]], received_at: datetime
+    ) -> tuple[ResearchObservation, ...]:
+        observations: list[ResearchObservation] = []
+        for item in payload:
+            published = item.get("publishedAt")
+            event_at = _parse_utc(published) if isinstance(published, str) else None
+            if event_at is None or event_at > received_at:
+                self._mark_degraded("invalid_news_provenance")
+                continue
+            observations.append(
+                ResearchObservation(
+                    value=item,
+                    event_at=event_at,
+                    available_at=received_at,
+                    source="newsapi",
+                    revision=str(item.get("url") or published),
+                    checksum=_checksum(item),
+                )
+            )
+        return tuple(observations)
+
+    def _record_quote_issues(
+        self, symbol: str, quote: Mapping[str, Any], issues: List[DataQualityIssue]
+    ) -> None:
+        if not issues:
+            return
+        self._mark_degraded("data_quality_issue")
+        safe_payload = {
+            "source": "finnhub",
+            "checksum": _checksum(quote),
+            "quote": {name: _safe_market_value(quote.get(name)) for name in ("c", "pc", "t")},
+        }
+        for issue in issues:
+            self.logger.warning(
+                "data_quality_issue symbol=%s type=%s reason=%s",
+                symbol,
+                issue.data_type,
+                issue.reason,
+            )
+            if self.config.quarantine_enabled:
+                self._quarantine.quarantine(
+                    symbol=symbol,
+                    data_type=issue.data_type,
+                    reason=issue.reason,
+                    payload=safe_payload,
+                )
+
+    def _record_news_issues(
+        self, symbol: str, news: List[Dict[str, Any]], issues: List[DataQualityIssue]
+    ) -> None:
+        if not issues:
+            return
+        self._mark_degraded("data_quality_issue")
+        safe_payload = {
+            "source": "newsapi",
+            "count": len(news),
+            "items": [
+                {
+                    "publishedAt": item.get("publishedAt"),
+                    "checksum": _checksum(item),
+                }
+                for item in news[:3]
+            ],
+        }
+        for issue in issues:
+            self.logger.warning(
+                "data_quality_issue symbol=%s type=%s reason=%s",
+                symbol,
+                issue.data_type,
+                issue.reason,
+            )
+            if self.config.quarantine_enabled:
+                self._quarantine.quarantine(
+                    symbol=symbol,
+                    data_type=issue.data_type,
+                    reason=issue.reason,
+                    payload=safe_payload,
+                )
+
+    def _canonical_fundamentals(
+        self, payload: Mapping[str, Any], received_at: datetime
+    ) -> dict[str, ResearchObservation]:
+        event_at = _parse_utc(payload.get("_event_at"))
+        available_at = _parse_utc(payload.get("_available_at"))
+        source = payload.get("_source")
+        revision = payload.get("_revision")
+        if (
+            event_at is None
+            or available_at is None
+            or available_at < event_at
+            or available_at > received_at
+            or not isinstance(source, str)
+            or not source.strip()
+            or not isinstance(revision, str)
+            or not revision.strip()
+        ):
+            return {}
+        result: dict[str, ResearchObservation] = {}
+        for name, value in payload.items():
+            if name.startswith("_"):
+                continue
+            result[name] = ResearchObservation(
+                value=value,
+                event_at=event_at,
+                available_at=available_at,
+                source=source,
+                revision=revision,
+                checksum=_checksum({"name": name, "value": value}),
+            )
+        return result
+
+    def _remember_availability(
+        self,
+        provider: str,
+        symbol: str,
+        payload: object,
+        observed_at: datetime,
+    ) -> datetime:
+        identity = f"{provider}:{symbol.strip().upper()}:{_checksum(payload)}"
+        return self._availability_by_checksum.setdefault(identity, observed_at)
+
+    def _utc_now(self) -> datetime:
+        value = self._now()
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("now must return a UTC-aware datetime")
+        return value.astimezone(timezone.utc)
 
     def _fetch_fundamentals(
         self, symbol: str, alpha_provider: AlphaVantageProvider
@@ -178,9 +296,9 @@ class DataIngestionService:
             self.logger.info("alpha_vantage_overview_empty symbol=%s fallback=finnhub", symbol)
         except DataProviderError as exc:
             self.logger.warning(
-                "alpha_vantage_fundamentals_failed symbol=%s error=%s",
+                "alpha_vantage_fundamentals_failed symbol=%s error_type=%s",
                 symbol,
-                exc,
+                type(exc).__name__,
             )
             if not self.config.alpha_vantage_fallback_enabled:
                 raise
@@ -211,7 +329,11 @@ class DataIngestionService:
         try:
             raw = get_fundamentals(symbol)
         except DataProviderError as exc:
-            self.logger.warning("finnhub_fallback_failed symbol=%s error=%s", symbol, exc)
+            self.logger.warning(
+                "finnhub_fallback_failed symbol=%s error_type=%s",
+                symbol,
+                type(exc).__name__,
+            )
             return None
         normalized = self._normalize_finnhub_fundamentals(raw)
         if not normalized:
@@ -325,7 +447,7 @@ class DataIngestionService:
             payload["available"] = True
         except Exception as exc:
             payload["available"] = False
-            payload["probe_error"] = f"{type(exc).__name__}: {exc}"
+            payload["probe_error"] = type(exc).__name__
         ttl = float(max(1, self.config.provider_health_ttl_seconds))
         self._provider_health_cache[name] = (now_epoch + ttl, dict(payload))
         return payload
@@ -407,3 +529,37 @@ def _quote_close(quote: Mapping[str, Any]) -> float | None:
     if isinstance(close, (int, float)):
         return float(close)
     return None
+
+
+def _decimal(value: object, field_name: str) -> Decimal:
+    try:
+        return Decimal(str(value))
+    except (InvalidOperation, ValueError) as exc:
+        raise DataProviderError(f"invalid canonical quote field: {field_name}") from exc
+
+
+def _checksum(payload: object) -> str:
+    serialized = json.dumps(payload, sort_keys=True, default=str, ensure_ascii=True)
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
+def _parse_utc(value: object) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    candidate = f"{value[:-1]}+00:00" if value.endswith("Z") else value
+    try:
+        parsed = datetime.fromisoformat(candidate)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None
+    return parsed.astimezone(timezone.utc)
+
+
+def _safe_market_value(value: object) -> object:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        numeric = Decimal(str(value))
+        return value if numeric.is_finite() else None
+    return value if isinstance(value, str) else None
