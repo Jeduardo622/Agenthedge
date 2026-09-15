@@ -48,6 +48,10 @@ and `newsapi`; the command exits nonzero when a required provider is not configu
 `--artifact-dir` writes a timestamped, redacted readiness artifact for the paper evidence flow;
 omitting it preserves stdout-only behavior.
 
+The durable account worker uses explicit files and process environment without loading
+`.env`; see [Durable account worker](docs/OPS_RUNBOOK.md#durable-account-worker) for its
+bounded invocation, preflight/start/close commands, and opening-data requirements.
+
 Provider health checks now use live lightweight probes (cached by TTL) instead of static `ping()`:
 - `PROVIDER_HEALTH_TTL_SECONDS` (default `300`)
 - `PROVIDER_HEALTH_PROBE_SYMBOL` (default `SPY`)

@@ -1,8 +1,14 @@
 # Implementation Roadmap
 
+The dated phases below are historical. Current owner-operated release acceptance
+is tracked in [first-release closeout](release/first-release-closeout.md) and the
+[implementation tracker](release/implementation-tracker.md). Software completion,
+observed paper qualification and supervised live-pilot acceptance remain separate.
+The original multi-asset and customer-account scope remains a later milestone.
+
 Derived from `Designing an Autonomous Multi-Agent Financial Trading System.pdf` and `Technical Implementation Plan_ Agentic Hedge Fund Simulator.pdf`.
 
-> **Go-Live Gate:** Before promoting a phase to production/paper-trading, complete the steps in [`docs/READINESS_CHECKLIST.md`](docs/READINESS_CHECKLIST.md).
+> **Go-Live Gate:** Before promoting a phase to production/paper-trading, complete the steps in [the readiness checklist](READINESS_CHECKLIST.md).
 
 ## Phase 0 — Foundation (Week 0-1)
 - Finalize governance docs (this set) and agent charters.

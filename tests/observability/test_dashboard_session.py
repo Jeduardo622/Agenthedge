@@ -2,6 +2,7 @@ from pathlib import Path
 from threading import Event
 from types import SimpleNamespace
 
+import pytest
 import streamlit as st
 from streamlit.testing.v1 import AppTest
 
@@ -157,3 +158,106 @@ def test_dashboard_exposes_halt_reason_and_disabled_agents(monkeypatch):
     assert not app.exception
     assert any("disabled agents: director" in item.value for item in app.warning)
     assert any("test halt" in item.value for item in app.json)
+
+
+def _render_health(monkeypatch, health):
+    st.cache_resource.clear()
+    runtime = FakeRuntime()
+    runtime.release.set()
+    runtime.config.max_ticks = 1
+    runtime.health = lambda **kwargs: health
+    session = DashboardSession(lambda: runtime)
+    session.start()
+    assert session.wait_stopped(2)
+    monkeypatch.setattr("observability.dashboard_session.DashboardSession", lambda: session)
+    app = AppTest.from_file(str(Path(__file__).parents[2] / "src/observability/dashboard.py"))
+    app.run(timeout=10)
+    assert not app.exception
+    return app
+
+
+@pytest.mark.parametrize(
+    "risk",
+    [
+        {},
+        {"nav": None, "gross_exposure": None, "leverage": None, "var_pct": None},
+        {
+            "nav": float("nan"),
+            "gross_exposure": float("inf"),
+            "leverage": float("-inf"),
+            "var_pct": float("nan"),
+        },
+        {
+            "available": False,
+            "nav": 0,
+            "gross_exposure": 0,
+            "leverage": 0,
+            "var_pct": 0,
+        },
+    ],
+)
+def test_dashboard_marks_missing_or_invalid_risk_observations_unavailable(monkeypatch, risk):
+    app = _render_health(
+        monkeypatch,
+        {
+            "tick_count": 1,
+            "kill_switch": {"engaged": False},
+            "portfolio": {"cash": 1_000_000},
+            "observability": {"risk": risk},
+        },
+    )
+    metrics = {item.label: item.value for item in app.metric}
+    assert metrics["NAV"] == "Unavailable"
+    assert metrics["Gross Exposure"] == "Unavailable"
+    assert metrics["Leverage"] == "Unavailable"
+    assert metrics["VaR %"] == "Unavailable"
+    assert metrics["Drawdown"] == "Unavailable"
+    assert any("No providers configured" in item.value for item in app.info)
+
+
+def test_dashboard_preserves_true_observed_zero_risk_metrics(monkeypatch):
+    app = _render_health(
+        monkeypatch,
+        {
+            "tick_count": 1,
+            "kill_switch": {"engaged": False},
+            "portfolio": {"cash": 1_000_000},
+            "observability": {
+                "risk": {
+                    "available": True,
+                    "nav": 0,
+                    "gross_exposure": 0,
+                    "leverage": 0,
+                    "var_pct": 0,
+                    "drawdown_pct": 0,
+                }
+            },
+        },
+    )
+    metrics = {item.label: item.value for item in app.metric}
+    assert metrics["NAV"] == "$0.00"
+    assert metrics["Gross Exposure"] == "$0.00"
+    assert metrics["Leverage"] == "0.00x"
+    assert metrics["VaR %"] == "0.00%"
+    assert metrics["Drawdown"] == "0.00%"
+
+
+@pytest.mark.parametrize("provider_status", ["checking", "unavailable"])
+def test_dashboard_does_not_call_incomplete_provider_probe_unconfigured(
+    monkeypatch, provider_status
+):
+    st.cache_resource.clear()
+    snapshot = {
+        "status": "running",
+        "updated_at": None,
+        "error": None,
+        "health": {"tick_count": 0, "kill_switch": {"engaged": False}},
+        "providers": {},
+        "provider_status": provider_status,
+    }
+    session = SimpleNamespace(snapshot=lambda: snapshot, start=lambda: None, stop=lambda: None)
+    monkeypatch.setattr("observability.dashboard_session.DashboardSession", lambda: session)
+    app = AppTest.from_file(str(Path(__file__).parents[2] / "src/observability/dashboard.py"))
+    app.run(timeout=10)
+    assert not app.exception
+    assert not any("No providers configured" in item.value for item in app.info)

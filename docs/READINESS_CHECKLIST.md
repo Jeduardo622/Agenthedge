@@ -1,5 +1,10 @@
 # Phase 4 Readiness Checklist
 
+> Historical record. For the current owner-operated release, use the
+> [first-release closeout](release/first-release-closeout.md) and
+> [implementation tracker](release/implementation-tracker.md). The checked items
+> below describe the dated 2025 run; they do not authorize the current release.
+
 Use this checklist before enabling a full daily trading cycle. It consolidates requirements captured across `README.md`, `docs/ROADMAP.md`, `docs/OPS_RUNBOOK.md`, `docs/TESTING.md`, and related governance artifacts. **Status recorded: 2025-11-29 (Run ID `bt-20251129T190306`).**
 
 ## 1. Environment & Credentials
