@@ -57,12 +57,16 @@ class HaltController:
             raise ValueError("explicit broker namespace and positive timeout required")
         self.journal, self.broker, self.reconciler = journal, broker, reconciler
         self.account_id, self.mode, self.now, self.timeout = account_id, mode, now, timeout
+        self._submission_gate = journal.submission_gate(account_id, mode)
 
     def halt(self, *, command_id: str, reason: str) -> ControlResult:
         if not command_id.strip() or not reason.strip():
             raise ValueError("command_id and reason are required")
         command_id, reason, now = command_id.strip(), reason.strip(), _aware(self.now())
-        deadline, token = self._claim(command_id, reason, now)
+        # The claim's deadline is anchored before the bounded dispatch wait. No
+        # database transaction spans broker I/O; an in-flight submit finishes first.
+        with self._submission_gate.halt_claim(timeout=self.timeout.total_seconds()):
+            deadline, token = self._claim(command_id, reason, now)
         if token is None:
             return self.status()
         unresolved: set[str] = set()

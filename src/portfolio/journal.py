@@ -12,6 +12,7 @@ import time
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+from threading import Lock
 from typing import TYPE_CHECKING, Any, Mapping, Sequence, cast
 from uuid import uuid4
 
@@ -19,6 +20,7 @@ from infra.postgres import CursorLike, postgres_connection
 from risk.valuation import WorkingOrderReservation
 
 from .accounting import AccountingState, PositionState, apply_trade, as_decimal
+from .submission import SubmissionGate
 
 if TYPE_CHECKING:
     from agents.postgres_bus import PostgresMessageBus
@@ -387,6 +389,15 @@ class PostgresJournal:
 
     def __init__(self, dsn: str):
         self.dsn = dsn
+        self._submission_gates: dict[tuple[str, str], SubmissionGate] = {}
+        self._submission_gate_lock = Lock()
+
+    def submission_gate(self, account_id: str, mode: str) -> SubmissionGate:
+        """Shared by the installed execution consumer and its actual halt controller."""
+        _identity(account_id)
+        _identity(mode)
+        with self._submission_gate_lock:
+            return self._submission_gates.setdefault((account_id, mode), SubmissionGate())
 
     def risk_control_status(self, account_id: str, mode: str) -> dict[str, Any]:
         """Read the durable halt identity; broker consumers require this v5+ capability."""

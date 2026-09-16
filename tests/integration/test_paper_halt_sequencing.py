@@ -7,6 +7,8 @@ Ordinary run_once acceptance remains in test_paper_built_worker.py.
 """
 
 import json
+from concurrent.futures import ThreadPoolExecutor
+from datetime import timedelta
 from decimal import Decimal
 from threading import Event
 from types import SimpleNamespace
@@ -15,6 +17,7 @@ from uuid import uuid4
 import pytest
 
 from portfolio.journal import RecoveryRequired
+from portfolio.submission import SubmissionGate
 from tests.integration import test_paper_built_worker as installed
 
 
@@ -245,4 +248,165 @@ def test_http_already_in_flight_is_owned_canceled_and_late_fill_reconciled(halt_
     assert boundary.journal.snapshot(account, "paper_broker") == snapshot
     assert boundary.journal.outbox(account, "paper_broker") == events
     assert len(transport.cancel_calls) == 1
+    _assert_new_exposure_blocked(boundary)
+
+
+def test_concurrent_halt_inhibits_dispatch_before_waiting_for_claim(
+    halt_boundary_worker, monkeypatch
+):
+    boundary = halt_boundary_worker
+    gate = boundary.controller._submission_gate
+    lock = gate._dispatch
+    risk_read = boundary.journal.require_risk_unblocked
+    read_allowed, halt_waiting = Event(), Event()
+    triggered = False
+
+    class ObservedLock:
+        def acquire(self, *args, **kwargs):
+            if "timeout" in kwargs:
+                # Actual halt_claim has already installed its inhibition marker.
+                assert gate._inhibited
+                boundary.trace.append("halt_inhibited_before_wait")
+                halt_waiting.set()
+            return lock.acquire(*args, **kwargs)
+
+        def release(self):
+            return lock.release()
+
+    def hold_risk_read(account, mode):
+        nonlocal triggered
+        result = risk_read(account, mode)
+        if "submission_claim_committed" in boundary.trace and not triggered:
+            triggered = True
+            boundary.trace.append("guard_read_allowed")
+            read_allowed.set()
+            assert halt_waiting.wait(5)
+        return result
+
+    monkeypatch.setattr(gate, "_dispatch", ObservedLock())
+    monkeypatch.setattr(boundary.journal, "require_risk_unblocked", hold_risk_read)
+
+    def halt_after_read():
+        assert read_allowed.wait(5)
+        return _halt(boundary)
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        halted = pool.submit(halt_after_read)
+        _drive(boundary)
+        outcome = halted.result(timeout=5)
+    assert boundary.state.transport.posts == [], boundary.trace
+    assert (
+        boundary.trace.index("guard_read_allowed")
+        < boundary.trace.index("halt_inhibited_before_wait")
+        < boundary.trace.index("halt_committed")
+    )
+    assert outcome.state == "RECOVERY_REQUIRED"
+    assert outcome.unresolved
+    assert boundary.journal.reservations(boundary.state.mandate.account_id, "paper_broker")
+    _assert_new_exposure_blocked(boundary)
+
+
+@pytest.mark.parametrize("replacement", ["gate", "journal", "controller", "cancellation"])
+def test_installed_binding_rejects_rebound_halt_boundary(
+    halt_boundary_worker, monkeypatch, replacement
+):
+    boundary = halt_boundary_worker
+    runtime = boundary.state.worker.runtime
+    if replacement == "gate":
+        monkeypatch.setattr(boundary.controller, "_submission_gate", SubmissionGate())
+    elif replacement == "journal":
+        monkeypatch.setattr(
+            boundary.controller, "journal", type(boundary.journal)(boundary.journal.dsn)
+        )
+    elif replacement == "controller":
+        monkeypatch.setattr(runtime, "_halt_controller", object())
+    else:
+        monkeypatch.setattr(boundary.controller, "broker", runtime.broker_adapter)
+    guard = runtime._release_authorization.installed_guard
+    with pytest.raises(ValueError, match="loaded artifact binding changed"):
+        guard.require_current()
+    assert boundary.state.transport.posts == []
+
+
+def test_failed_halt_claim_stays_locally_inhibited_without_false_halted(
+    halt_boundary_worker, monkeypatch
+):
+    boundary = halt_boundary_worker
+
+    def fail_claim(*_args, **_kwargs):
+        raise RuntimeError("synthetic claim unavailable")
+
+    monkeypatch.setattr(boundary.controller, "_claim", fail_claim)
+    with pytest.raises(RuntimeError, match="synthetic claim unavailable"):
+        _halt(boundary)
+    assert boundary.controller.status().state != "HALTED"
+    _drive(boundary)
+    assert boundary.state.transport.posts == []
+    assert boundary.journal.reservations(boundary.state.mandate.account_id, "paper_broker")
+    assert boundary.trace == ["submission_claim_committed"]
+
+
+@pytest.mark.parametrize("expire_while_waiting", [False, True])
+def test_concurrent_halt_waits_for_entered_http_and_keeps_original_deadline(
+    halt_boundary_worker, monkeypatch, expire_while_waiting
+):
+    boundary = halt_boundary_worker
+    transport = boundary.state.transport
+    gate = boundary.controller._submission_gate
+    lock = gate._dispatch
+    post_entered, release_post, halt_waiting = Event(), Event(), Event()
+
+    class ObservedLock:
+        def acquire(self, *args, **kwargs):
+            if "timeout" in kwargs:
+                assert gate._inhibited
+                boundary.trace.append("halt_inhibited_before_wait")
+                halt_waiting.set()
+            return lock.acquire(*args, **kwargs)
+
+        def release(self):
+            return lock.release()
+
+    def hold_response():
+        post_entered.set()
+        assert release_post.wait(5)
+        boundary.trace.append("http_response_released")
+
+    monkeypatch.setattr(gate, "_dispatch", ObservedLock())
+    transport.on_post = hold_response
+    transport.fill_on_cancel = True
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        driving = pool.submit(_drive, boundary)
+        assert post_entered.wait(5)
+        halted = pool.submit(_halt, boundary)
+        try:
+            assert halt_waiting.wait(5)
+            assert "halt_committed" not in boundary.trace
+            if expire_while_waiting:
+                # Advance only this synthetic market clock: the original30s halt
+                # budget must include the wait, not restart after gate acquisition.
+                boundary.state.now[0] += timedelta(seconds=31)
+        finally:
+            release_post.set()
+        driving.result(timeout=5)
+        outcome = halted.result(timeout=5)
+    assert (
+        boundary.trace.index("http_post_entered")
+        < boundary.trace.index("halt_inhibited_before_wait")
+        < boundary.trace.index("http_response_released")
+        < boundary.trace.index("halt_committed")
+    )
+    assert len(transport.posts) == 1
+    if expire_while_waiting:
+        assert outcome.state == "RECOVERY_REQUIRED"
+        assert "deadline" in outcome.unresolved
+        assert transport.cancel_calls == []
+        assert boundary.journal.reservations(boundary.state.mandate.account_id, "paper_broker")
+    else:
+        assert outcome.state == "HALTED"
+        assert not outcome.unresolved
+        assert len(transport.cancel_calls) == 1
+        assert boundary.journal.snapshot(
+            boundary.state.mandate.account_id, "paper_broker"
+        ).cash == Decimal("99898.99")
     _assert_new_exposure_blocked(boundary)

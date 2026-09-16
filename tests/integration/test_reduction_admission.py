@@ -226,6 +226,11 @@ def test_actual_execution_submits_once_while_halted_and_restart_does_not_repeat(
         },
     )
     fixture = (journal, account, dsn)
+    # A failed local halt also inhibits new exposure. The existing typed, durable
+    # reduce-only authority must remain usable without reopening ordinary dispatch.
+    with pytest.raises(RuntimeError, match="synthetic claim failure"):
+        with journal.submission_gate(account, "paper_broker").halt_claim(timeout=1):
+            raise RuntimeError("synthetic claim failure")
     executor = execution_agent(fixture, broker, tmp_path, reduction_policy=POLICY, now=broker.now)
     rejected = []
     executor._reject = lambda reason, *_args, **kwargs: rejected.append((reason, kwargs))
