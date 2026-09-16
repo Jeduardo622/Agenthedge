@@ -81,12 +81,17 @@ class CanonicalSnapshot:
     checksum: str
     fundamentals: dict[str, ResearchObservation] = field(default_factory=dict)
     news: tuple[ResearchObservation, ...] = ()
+    quote_event_at: datetime | None = None
 
     def __post_init__(self) -> None:
         _require_identity(self.symbol, field_name="symbol")
         _require_utc(self.event_at, field_name="event_at")
         _require_utc(self.available_at, field_name="available_at")
         _require_utc(self.received_at, field_name="received_at")
+        if self.quote_event_at is not None:
+            _require_utc(self.quote_event_at, field_name="quote_event_at")
+            if self.quote_event_at > self.available_at:
+                raise ValueError("quote_event_at must be at or before available_at")
         if self.available_at < self.event_at:
             raise ValueError("available_at must be at or after event_at")
         if self.received_at < self.available_at:
@@ -138,6 +143,11 @@ def snapshot_to_mapping(snapshot: CanonicalSnapshot) -> dict[str, object]:
         "event_at": snapshot.event_at.isoformat(),
         "available_at": snapshot.available_at.isoformat(),
         "received_at": snapshot.received_at.isoformat(),
+        **(
+            {"quote_event_at": snapshot.quote_event_at.isoformat()}
+            if snapshot.quote_event_at
+            else {}
+        ),
         "quote": {
             "last": str(snapshot.quote.last),
             "previous_close": str(snapshot.quote.previous_close),

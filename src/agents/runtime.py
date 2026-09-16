@@ -932,7 +932,25 @@ class AgentRuntime:
                 session_id = "XNYS:" + bounds[0].date().isoformat()
                 if previous is None or previous.decision.state.session_id != session_id:
                     provider = opening_provider
-            observer.observe(provider(now), now=now)
+            observation = observer.observe(provider(now), now=now)
+            if (
+                observation.experiment_warning
+                and observation.experiment is not None
+                and self._alert_sink
+            ):
+                self._alert_sink(
+                    "paper_experiment_loss_warning",
+                    {
+                        "account_id": observer.account_id,
+                        "mode": observer.mode,
+                        "session_id": observation.experiment.state.session_id,
+                        "opening_equity": str(observation.experiment.state.opening_equity),
+                        "experiment_return_fraction": str(observation.experiment.return_fraction),
+                        "account_return_fraction": str(observation.decision.return_fraction),
+                        "checkpoint": observation.checkpoint,
+                    },
+                    severity="warning",
+                )
             if now >= bounds[1]:
                 self._state_sink.heartbeat(status="market_closed")
                 return False
@@ -1070,13 +1088,24 @@ class AgentRuntime:
         wait_raw = getattr(self.bus, "wait_until_caught_up", None)
         try:
             if callable(wait_raw):
-                caught_up = bool(
-                    wait_raw(
-                        target_event_id,
-                        self._bus_drain_timeout_seconds,
-                        None,
-                    )
-                )
+                deadline = time.monotonic() + self._bus_drain_timeout_seconds
+                while True:
+                    remaining = max(0.0, deadline - time.monotonic())
+                    caught_up = bool(wait_raw(target_event_id, remaining, None))
+                    if not caught_up:
+                        break
+                    # Handlers publish their children before completing the parent.
+                    # Include those descendants before a tick can reconcile again.
+                    latest = self.bus.high_watermark()
+                    if time.monotonic() > deadline:
+                        caught_up = False
+                        break
+                    if latest <= target_event_id:
+                        break
+                    target_event_id = latest
+                    if time.monotonic() >= deadline:
+                        caught_up = False
+                        break
             else:
                 caught_up = self.bus.drain(self._bus_drain_timeout_seconds)
         except Exception as exc:

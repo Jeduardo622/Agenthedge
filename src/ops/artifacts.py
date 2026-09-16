@@ -42,6 +42,7 @@ from ops.observer_bindings import (
 from ops.release_gate import ReleaseTrust
 from ops.runtime_data import RuntimeMarketData
 from ops.worker_config import parse_session_controls
+from portfolio.paper_mandate import PaperMandate
 from portfolio.postgres_store import JournalPortfolioStore
 from risk.service import RiskEvaluationService
 from risk.session_store import PostgresSessionRisk
@@ -92,6 +93,7 @@ class _Binding:
     runtime_observers: RuntimeObserverBinding
     contexts: AgentContextsBinding | None = None
     worker_lease: Any = None
+    paper_mandate: PaperMandate | None = None
 
 
 def _service_settings(service: RiskEvaluationService) -> tuple[Any, ...]:
@@ -152,7 +154,7 @@ class InstalledArtifacts:
         document = json.loads(self.strategy.read_text(encoding="utf-8"))
         if (
             not isinstance(document, dict)
-            or set(document) - {"strategy_safety_revisions"}
+            or set(document) - {"strategy_safety_revisions", "paper_mandate"}
             != {
                 "schema_version",
                 "factories",
@@ -194,6 +196,17 @@ class InstalledArtifacts:
             document["agent_parameters"]
         ) != set(names):
             raise ValueError("complete approved agent parameters required")
+        mandate = None
+        if "paper_mandate" in document:
+            mandate = PaperMandate.from_mapping(document["paper_mandate"])
+            if (
+                trust.expected.mode != "paper_broker"
+                or mandate.account_id != trust.expected.account_id
+                or set(weights) != {"momentum"}
+            ):
+                raise ValueError(
+                    "paper mandate requires its dedicated account and momentum-only roster"
+                )
         weights = {name: float(value) for name, value in weights.items()}
         symbols = document["symbols"]
         if (
@@ -216,6 +229,10 @@ class InstalledArtifacts:
         if type(config) is not DataProviderConfig:
             raise ValueError("explicit provider configuration required")
         ingestion = RuntimeMarketData.load(self.data, config=config, now=clock)
+        if mandate is not None:
+            if cast(Any, ingestion).provider_name != "alpaca_iex" or symbols != [mandate.symbol]:
+                raise ValueError("paper mandate requires approved authenticated IEX inputs")
+            store.journal.paper_experiment_state(store.account_id, store.mode, mandate)
         factory = qualified_risk_service_factory(ingestion.bundle)
 
         def projection() -> dict[str, Any]:
@@ -244,6 +261,7 @@ class InstalledArtifacts:
         controls = parse_session_controls(document["session_control"])
         if (
             type(observer) is not PostgresSessionRisk
+            or getattr(observer, "paper_mandate", None) != mandate
             or observer.policy.content_hash != service.policy.content_hash
             or observer.journal is not store.journal
             or (observer.account_id, observer.mode) != (store.account_id, store.mode)
@@ -271,6 +289,7 @@ class InstalledArtifacts:
             session_opening_market_inputs=opening_market,
             strategy_weights=weights,
             symbols=tuple(symbols),
+            paper_mandate=mandate,
         )
         # Empty manifest performance means the real account tracker is authoritative.
         runtime._agent_extras.pop("strategy_performance", None)
@@ -297,6 +316,7 @@ class InstalledArtifacts:
             runtime._release_authorization,
             opening_market,
             capture_runtime_observers(runtime),
+            paper_mandate=mandate,
         )
         self.require(runtime, trust)
 
@@ -331,6 +351,7 @@ class InstalledArtifacts:
             or runtime.portfolio_store is not binding.store
             or runtime.broker_adapter is not binding.broker
             or runtime._performance_tracker is not binding.tracker
+            or extras.get("paper_mandate") is not binding.paper_mandate
             or runtime._release_authorization is not binding.authorization
         ):
             raise ValueError("loaded artifact binding changed")
@@ -338,6 +359,13 @@ class InstalledArtifacts:
             runtime, binding.runtime_observers, binding.contexts or AgentContextsBinding(())
         )
         document = json.loads(self.strategy.read_text(encoding="utf-8"))
+        approved_mandate = (
+            PaperMandate.from_mapping(document["paper_mandate"])
+            if "paper_mandate" in document
+            else None
+        )
+        if binding.paper_mandate != approved_mandate:
+            raise ValueError("loaded paper mandate differs from approved artifact")
         if extras.get("symbols") != tuple(document["symbols"]):
             raise ValueError("loaded symbols differ from approved artifact")
         if (
@@ -378,6 +406,7 @@ class InstalledArtifacts:
                 approved_weights=binding.weights,
                 approved_symbols=document["symbols"],
                 agent_parameters=document["agent_parameters"],
+                paper_mandate=binding.paper_mandate,
             )
 
     def activate(self, runtime: AgentRuntime, trust: ReleaseTrust) -> None:
