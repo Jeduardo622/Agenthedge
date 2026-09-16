@@ -305,9 +305,6 @@ class InstalledArtifacts:
             strategy_weights=weights,
             symbols=tuple(symbols),
             paper_mandate=mandate,
-            halt_controller=halt,
-            submission_gate=gate,
-            journal=store.journal,
         )
         # Empty manifest performance means the real account tracker is authoritative.
         runtime._agent_extras.pop("strategy_performance", None)
@@ -335,6 +332,9 @@ class InstalledArtifacts:
             opening_market,
             capture_runtime_observers(runtime),
             paper_mandate=mandate,
+            halt_controller=halt,
+            submission_gate=gate,
+            journal=store.journal,
         )
         self.require(runtime, trust)
 
