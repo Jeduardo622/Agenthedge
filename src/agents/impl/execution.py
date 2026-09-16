@@ -33,6 +33,7 @@ from portfolio.safety import (
     evaluate_order_safety,
 )
 from portfolio.store import PortfolioStore
+from portfolio.submission import SubmissionBlocked
 from risk.service import RiskEvaluationService
 from risk.valuation import WorkingOrderReservation
 
@@ -461,58 +462,65 @@ class ExecutionAgent(BaseAgent):
             except (RecoveryRequired, ValueError, ArithmeticError):
                 self._reject("execution_reconciliation_required", payload)
                 return  # The durable claim stays unknown.
-        if not self._authorized_reduction(payload):
-            try:
-                journal.require_risk_unblocked(account, mode)
-            except RecoveryRequired:
-                self._reject("execution_halt_blocked", payload)
-                return
-        lease_deadline = None
-        if self._worker_lease is not None:
-            try:
-                fencing = import_module("ops.fencing")
-                worker_lease_type = getattr(fencing, "WorkerLease")
-                deadline_type = getattr(fencing, "WorkerLeaseDeadline")
-                if not isinstance(self._worker_lease, worker_lease_type):
-                    raise RuntimeError("invalid worker lease")
-                lease_deadline = self._worker_lease.require_current()
-                if not isinstance(lease_deadline, deadline_type):
-                    raise RuntimeError("invalid worker lease deadline")
-            except Exception:
-                self._reject("execution_worker_fence_blocked", payload)
-                return
-        if not self._release_allowed(self._now()):
-            self._reject("execution_release_blocked", payload)
-            return
-        if self._paper_mandate is not None:
-            try:
-                cast(Any, self.context.ingestion).validate_execution_snapshot(
-                    execution_snapshot, self._now()
-                )
-            except (ValueError, ArithmeticError):
-                self._reject("execution_paper_quote_expired_before_send", payload)
-                return  # Keep the durable claim unknown until reconciliation proves the outcome.
-        send_time = self._now()
-        if _is_expired(
-            payload.get("expires_at"),
-            clock_skew_seconds=self._approval_clock_skew_seconds,
-            now=send_time,
-        ):
-            self._reject("execution_expired_before_send", payload)
-            return  # Keep the durable claim unknown; no invented terminal release.
-        if deadline is not None and (send_time > deadline or send_time < claim_checked_at):
-            self._reject("execution_reconciliation_required", payload)
-            return
-        if lease_deadline is not None:
-            try:
-                lease_deadline.require_current()
-            except Exception:
-                self._reject("execution_worker_fence_blocked", payload)
-                return
-        # No transaction is held over the network. The claim is already unknown.
         try:
-            status = self.broker_adapter.submit_order(order)
+            with journal.submission_gate(account, mode).dispatch(
+                allow_halted=self._authorized_reduction(payload)
+            ) as dispatch:
+                if not self._authorized_reduction(payload):
+                    try:
+                        journal.require_risk_unblocked(account, mode)
+                    except RecoveryRequired:
+                        self._reject("execution_halt_blocked", payload)
+                        return
+                lease_deadline = None
+                if self._worker_lease is not None:
+                    try:
+                        fencing = import_module("ops.fencing")
+                        worker_lease_type = getattr(fencing, "WorkerLease")
+                        deadline_type = getattr(fencing, "WorkerLeaseDeadline")
+                        if not isinstance(self._worker_lease, worker_lease_type):
+                            raise RuntimeError("invalid worker lease")
+                        lease_deadline = self._worker_lease.require_current()
+                        if not isinstance(lease_deadline, deadline_type):
+                            raise RuntimeError("invalid worker lease deadline")
+                    except Exception:
+                        self._reject("execution_worker_fence_blocked", payload)
+                        return
+                if not self._release_allowed(self._now()):
+                    self._reject("execution_release_blocked", payload)
+                    return
+                if self._paper_mandate is not None:
+                    try:
+                        cast(Any, self.context.ingestion).validate_execution_snapshot(
+                            execution_snapshot, self._now()
+                        )
+                    except (ValueError, ArithmeticError):
+                        self._reject("execution_paper_quote_expired_before_send", payload)
+                        return  # Reconciliation must prove the unknown claim's outcome.
+                send_time = self._now()
+                if _is_expired(
+                    payload.get("expires_at"),
+                    clock_skew_seconds=self._approval_clock_skew_seconds,
+                    now=send_time,
+                ):
+                    self._reject("execution_expired_before_send", payload)
+                    return  # Keep the durable claim unknown; no invented terminal release.
+                if deadline is not None and (send_time > deadline or send_time < claim_checked_at):
+                    self._reject("execution_reconciliation_required", payload)
+                    return
+                if lease_deadline is not None:
+                    try:
+                        lease_deadline.require_current()
+                    except Exception:
+                        self._reject("execution_worker_fence_blocked", payload)
+                        return
+                # The local gate spans HTTP, never a database transaction.
+                dispatch.require_current()
+                status = self.broker_adapter.submit_order(order)
             self._consume_durable_status(status, client_order_id=order.client_order_id)
+        except SubmissionBlocked:
+            self._reject("execution_halt_blocked", payload)
+            return  # Retain the committed unknown claim and reservation.
         except Exception:
             journal.mark_intent_unknown(account, mode, order.client_order_id)
             self._reject("execution_submission_unresolved", payload)

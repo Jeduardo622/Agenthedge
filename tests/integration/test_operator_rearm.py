@@ -173,7 +173,12 @@ def test_succeeded_close_rearms_without_changing_economic_or_session_history(pre
     before_state = journal.snapshot(commands.account_id, commands.mode)
     before_session = observer.status()
     before_reconciliation = journal.reconciliation_state(commands.account_id, commands.mode)
-    controller, lease, start, current = close_then_start(prepared)
+    gate = journal.submission_gate(commands.account_id, commands.mode)
+    with gate.halt_claim(timeout=1):
+        controller, lease, start, current = close_then_start(prepared)
+    with gate.dispatch():
+        with pytest.raises(RecoveryRequired, match="persisted risk blocked"):
+            journal.require_risk_unblocked(commands.account_id, commands.mode)
     result = controller.rearm_for_start(
         start_command_id=start,
         lease=lease,
@@ -194,6 +199,9 @@ def test_succeeded_close_rearms_without_changing_economic_or_session_history(pre
     assert journal.reconciliation_state(commands.account_id, commands.mode) == before_reconciliation
     assert commands.status(result.previous_command_id)["state"] == "succeeded"
     assert commands.status(start)["state"] == "acknowledged"
+    with gate.dispatch() as dispatch:
+        journal.require_risk_unblocked(commands.account_id, commands.mode)
+        dispatch.require_current()
 
 
 @pytest.mark.parametrize(

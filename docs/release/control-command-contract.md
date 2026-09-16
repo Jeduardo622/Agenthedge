@@ -38,6 +38,17 @@ I/O. `require_worker` is required immediately before each controller operation;
 final broker submission also needs this consumer fence. Database fencing cannot
 revoke an HTTP request already in flight. Single-owner deployment remains required.
 
+Within that worker process, the installed execution journal and halt controller
+share one gate per account/mode. It orders final submission against the durable
+halt claim without holding a database transaction over HTTP. A halt request
+invalidates pending ordinary dispatch authority before waiting for an entered
+request; entered requests still require owned cancellation and reconciliation.
+The wait consumes the existing halt deadline. A failed or timed-out halt claim
+keeps that journal instance inhibited: inspect durable recovery state and use a
+fresh verified worker before resuming. Successful ordinary close and authorized
+rearm retain their existing behavior. This gate does not coordinate separate
+worker processes or make an earlier timeout audit event an atomic submission stop.
+
 If a lease expires after acknowledgment, a new owner marks the command
 recovery_required. It must inspect actual controller state; the store never
 automatically retries that action. Recovery adoption/readback is a subsequent

@@ -9,10 +9,12 @@ import threading
 import time
 import uuid
 from collections import deque
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from typing import Any, Deque, Dict, List, Mapping, MutableMapping, Sequence
 
 from infra.postgres import (
+    ConnectionLike,
     CursorLike,
     advisory_lock_key,
     ensure_postgres_schema,
@@ -599,10 +601,9 @@ class PostgresMessageBus(MessageBus):
 
     def _poll_subscription(self, subscription: Subscription) -> None:
         while not self._closed and subscription.active:
-            claimed = self._claim_next_delivery(subscription.id)
+            claimed = self._poll_until_claimed(subscription)
             if not claimed:
-                time.sleep(self._poll_interval_seconds)
-                continue
+                return
             delivery_id = _as_int(claimed["delivery_id"])
             event_id = _as_int(claimed["event_id"])
             envelope = Envelope(
@@ -627,8 +628,30 @@ class PostgresMessageBus(MessageBus):
                 continue
             self._mark_done(subscription.id, delivery_id, event_id)
 
-    def _claim_next_delivery(self, subscription_id: str) -> Mapping[str, object] | None:
+    def _poll_until_claimed(self, subscription: Subscription) -> Mapping[str, object] | None:
+        # Only this polling thread owns the session. Each empty poll ends its
+        # transaction, and the successful claim commits/closes before any handler.
         with postgres_connection(self._dsn) as conn:
+            try:
+                while not self._closed and subscription.active:
+                    claimed = self._claim_next_delivery(subscription.id, connection=conn)
+                    if claimed:
+                        return claimed
+                    conn.commit()
+                    time.sleep(self._poll_interval_seconds)
+            except BaseException:
+                conn.rollback()
+                raise
+        return None
+
+    def _claim_next_delivery(
+        self, subscription_id: str, *, connection: ConnectionLike | None = None
+    ) -> Mapping[str, object] | None:
+        # A supplied connection belongs to _poll_until_claimed, which owns its
+        # transaction boundary. Standalone claims retain their original lifetime.
+        with (
+            postgres_connection(self._dsn) if connection is None else nullcontext(connection)
+        ) as conn:
             with conn.cursor() as cur:
                 cur.execute(
                     """

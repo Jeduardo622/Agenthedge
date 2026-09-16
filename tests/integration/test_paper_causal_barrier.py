@@ -44,9 +44,9 @@ def test_installed_readback_waits_for_causal_submission(
     waits = []
     elapsed = [0.0]
 
-    def claim(subscription_id):
+    def claim(subscription_id, **kwargs):
         # The first target is captured before any handler can publish a child.
-        claimed = original_claim(subscription_id)
+        claimed = original_claim(subscription_id, **kwargs)
         if claimed and claimed["topic"] == "director.directive":
             assert start_delivery.wait(30), "runtime never entered its delivery barrier"
         return claimed

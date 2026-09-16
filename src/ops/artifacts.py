@@ -32,6 +32,7 @@ from backtest.engine import BacktestDataset, QualifiedDatasetLoader
 from data.config import DataProviderConfig
 from learning.promotion import StrategyAcceptance
 from ops.agent_bindings import require_agent_bindings
+from ops.control import HaltController
 from ops.observer_bindings import (
     AgentContextsBinding,
     RuntimeObserverBinding,
@@ -94,6 +95,10 @@ class _Binding:
     contexts: AgentContextsBinding | None = None
     worker_lease: Any = None
     paper_mandate: PaperMandate | None = None
+    halt_controller: Any = None
+    submission_gate: Any = None
+    journal: Any = None
+    cancellation: Any = None
 
 
 def _service_settings(service: RiskEvaluationService) -> tuple[Any, ...]:
@@ -222,6 +227,16 @@ class InstalledArtifacts:
         store = runtime.portfolio_store
         if not isinstance(store, JournalPortfolioStore):
             raise ValueError("actual broker journal store required")
+        halt = runtime._halt_controller
+        gate = store.journal.submission_gate(store.account_id, store.mode)
+        if (
+            type(halt) is not HaltController
+            or halt.journal is not store.journal
+            or (halt.account_id, halt.mode) != (store.account_id, store.mode)
+            or halt._submission_gate is not gate
+            or halt.broker is not runtime.broker_adapter
+        ):
+            raise ValueError("installed halt and execution submission gate must match")
         clock = runtime._agent_extras.get("now")
         if not callable(clock):
             raise ValueError("explicit runtime decision clock required")
@@ -317,10 +332,15 @@ class InstalledArtifacts:
             opening_market,
             capture_runtime_observers(runtime),
             paper_mandate=mandate,
+            halt_controller=halt,
+            submission_gate=gate,
+            journal=store.journal,
         )
         self.require(runtime, trust)
 
     def require(self, runtime: AgentRuntime, trust: ReleaseTrust) -> None:
+        from agents.runtime import _WorkerCancellation
+
         self.require_code(runtime, trust)
         binding = getattr(runtime, "_installed_binding", None)
         if not isinstance(binding, _Binding):
@@ -353,6 +373,29 @@ class InstalledArtifacts:
             or runtime._performance_tracker is not binding.tracker
             or extras.get("paper_mandate") is not binding.paper_mandate
             or runtime._release_authorization is not binding.authorization
+            or runtime._halt_controller is not binding.halt_controller
+            or binding.store.journal is not binding.journal
+            or binding.halt_controller.journal is not binding.journal
+            or (binding.halt_controller.account_id, binding.halt_controller.mode)
+            != (binding.store.account_id, binding.store.mode)
+            or (
+                extras.get("worker_lease") is None
+                and binding.halt_controller.broker is not binding.broker
+            )
+            or (
+                extras.get("worker_lease") is not None
+                and (
+                    type(binding.halt_controller.broker) is not _WorkerCancellation
+                    or binding.halt_controller.broker.runtime is not runtime
+                )
+            )
+            or (
+                binding.cancellation is not None
+                and binding.halt_controller.broker is not binding.cancellation
+            )
+            or binding.halt_controller._submission_gate is not binding.submission_gate
+            or binding.journal.submission_gate(binding.store.account_id, binding.store.mode)
+            is not binding.submission_gate
         ):
             raise ValueError("loaded artifact binding changed")
         require_observer_bindings(
@@ -424,7 +467,9 @@ class InstalledArtifacts:
             binding.clock,
         )
         binding.tracker.install_accepted_weights(acceptance)
-        runtime._installed_binding = replace(binding, worker_lease=lease)
+        runtime._installed_binding = replace(
+            binding, worker_lease=lease, cancellation=binding.halt_controller.broker
+        )
 
     def refresh(self, runtime: AgentRuntime, trust: ReleaseTrust) -> None:
         self.require(runtime, trust)
