@@ -47,6 +47,93 @@ consumers accept trust explicitly. Current historical review-board CLI entry poi
 not load independent trust, so their reports are descriptive intake and must not be used
 as the canonical signed decision.
 
+## Capture a read-only qualification preflight
+
+After the owner/reviewer prerequisites above, use the current release's separate
+collector before considering worker construction. It does not construct or activate a
+worker, submit/cancel orders, access the journal, change limits, or load `.env`. It reads
+only the explicitly supplied process environment and approved files. No live credentials
+are required for its tests; all test responses, accounts and signing keys are synthetic.
+
+Run from the clean approved checkout with the same reviewed runtime configuration,
+strategy and data descriptor used for that release. The collector binds the actual SHA,
+source cleanliness, configuration hash, strategy bytes, and data descriptor bytes to
+the independent trust identity. The policy hash remains the owner's declared identity;
+this probe does not validate risk/research coverage or replace other G0-G2 checks.
+The trust format is documented in [worker-authority.md](worker-authority.md). Its issuer
+key environment references must already exist; the collector never provisions keys or
+derives trust from candidate evidence.
+
+This bounded collector supports the current `alpaca_iex` runtime descriptor only. It
+compares its provider configuration and approved quote policy with the process settings,
+and probes both latest quotes and trades for every strategy symbol using explicit
+`feed=iex`. Unsupported providers, unavailable subscriptions, wrong symbols, stale or
+future data, invalid prices and excessive spreads produce a hold; it never substitutes
+SIP, cached data or another provider. It does not claim readiness of news/macro providers
+or historical research data. Outside trading hours, stale IEX data can correctly hold
+the preflight even when authentication succeeds.
+
+Supply `EXECUTION_MODE=paper_broker`, `ALPACA_PAPER_BASE_URL=https://paper-api.alpaca.markets`,
+and the existing paper-only `ALPACA_API_KEY_ID` / `ALPACA_API_SECRET_KEY` variables without
+printing their values. The authenticated account UUID must exactly match the independent
+trust account; an account number is not silently substituted. Choose and record explicit
+clock budgets with the reviewer; both must be finite, positive and at most 60 seconds.
+These are observation thresholds and do not modify any trading limit.
+
+```powershell
+poetry run python -m cli.paper_qualification_preflight `
+  --trust-file C:\approved\paper-trust.json `
+  --checkout C:\installed\Agenthedge `
+  --strategy-file C:\approved\strategy.json `
+  --data-file C:\approved\runtime-data.json `
+  --artifact-dir C:\approved\preflight-archive `
+  --issuer APPROVED_ISSUER_ALIAS `
+  --max-clock-skew-seconds REVIEWED_SKEW_BUDGET `
+  --max-round-trip-seconds REVIEWED_RTT_BUDGET
+```
+
+Replace the uppercase budget/issuer placeholders with reviewed values; the command
+has no implicit clock tolerance. The archive directory must already exist outside the
+checkout and be access-controlled by the operator. All network requests are bounded,
+authenticated GETs to fixed Alpaca paper-account/clock and data URLs with redirects
+disabled. A 401/403, rate limit, timeout, malformed response or calendar outage blocks
+the observation. Provider errors and raw responses are never printed or persisted.
+
+The future timestamp is the broker clock's actual `next_open`, checked against the next
+XNYS calendar opening, including holidays and DST, and again against capture completion.
+It is a planning timestamp, not a fabricated future trade or an observed session. Host
+skew is measured against the authenticated broker's `timestamp`: server minus the
+midpoint of local UTC send/receive timestamps. The packet records monotonic round-trip
+time, uncertainty, and a conservative absolute-skew bound. Excessive latency, host-clock
+jumps or a skew bound above the approved budget fail closed. This is a broker-relative
+clock measurement, not independent NTP certification of the broker's own clock.
+
+Exit zero means the captured observations passed at capture time; it grants no activation
+authority. Any hold exits nonzero. Once trust and release inputs validate, failed provider
+probes also produce a signed hold packet with sanitized blocker codes. Invalid trust,
+release binding, timestamps or output writes can fail without a packet; stdout reports
+HOLD and must never be treated as qualification. Review `payload.blockers` and retain
+failed captures alongside successful ones.
+
+The resulting `paper_qualification_preflight_<sha256>.json` contains a separate observation
+envelope authenticated with the existing HMAC-SHA256 issuer contract. HMAC is shared-secret
+issuer authentication, not an asymmetric signature or proof of human review. Source
+response hashes and selected safe fields are signed with the exact release identity.
+Creation is exclusive, flushed, fsynced and read back; existing files are never overwritten.
+`ops.paper_preflight.verify_preflight` verifies signature, independent identity and the
+300-second observation envelope age, and rejects a passed packet once its planned opening
+has arrived. Verification of a signed hold authenticates the hold, not readiness: inspect
+`payload.passed` separately. Fresh quotes must be recollected for subsequent trading checks.
+
+Local exclusive creation and signatures provide application-level immutability and tamper
+detection, not OS-level WORM protection against a privileged writer. Preserve exact signed
+bytes in the approved external write-once retention system. Never edit, retimestamp or
+overwrite a packet. The observation envelope intentionally fails `release_decision` as a
+standalone dossier. An approved issuer must still review the sources and all other G0-G2
+evidence before separately issuing `current_preflight` in a release dossier. This command
+does not publish or renew a worker's active evidence file, authorize an account, validate
+existing holdings, or count toward the five observed paper sessions.
+
 ## Prepare the worker
 
 Use a clean checkout at the approved SHA and an existing schema-v6 journal/control-v1
@@ -120,7 +207,7 @@ poetry run python -m cli.runtime control-submit `
 
 Keep the same worker's signed dossier current using the
 [evidence renewal procedure](worker-authority.md#renew-evidence-during-a-running-session).
-The current-preflight artifact has a300-second maximum age. Collect and sign fresh
+The current-preflight artifact has a 300-second maximum age. Collect and sign fresh
 observations before that limit; a renewal failure stops new ticks and requires
 recovery review. Replacing a file does not automatically resume an interrupted session.
 
