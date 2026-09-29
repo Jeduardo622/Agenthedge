@@ -40,9 +40,19 @@ def load_worker_authority(
     if trust_path.resolve(strict=True) == evidence_path.resolve(strict=True):
         raise ValueError("owner trust and candidate evidence require distinct files")
     try:
-        document = json.loads(trust_path.read_bytes())
         evidence = evidence_path.read_bytes()
         candidate = json.loads(evidence)
+    except (OSError, ValueError) as exc:
+        raise ValueError("worker authority files must contain readable JSON") from exc
+    if not isinstance(candidate, dict):
+        raise ValueError("explicit owner worker trust schema required")
+    return WorkerAuthority(load_release_trust(trust_path, environment=environment), evidence)
+
+
+def load_release_trust(trust_path: Path, *, environment: Mapping[str, str]) -> ReleaseTrust:
+    """Load independent owner trust without requiring or issuing candidate evidence."""
+    try:
+        document = json.loads(trust_path.read_bytes())
     except (OSError, ValueError) as exc:
         raise ValueError("worker authority files must contain readable JSON") from exc
     if (
@@ -52,7 +62,6 @@ def load_worker_authority(
         or type(document["schema_version"]) is not int
         or document["schema_version"] != 1
         or not isinstance(document["identity"], dict)
-        or not isinstance(candidate, dict)
     ):
         raise ValueError("explicit owner worker trust schema required")
     try:
@@ -83,7 +92,7 @@ def load_worker_authority(
     paper = document["paper_account_id"]
     if paper is not None and (not isinstance(paper, str) or not paper or paper != paper.strip()):
         raise ValueError("canonical qualification paper account required")
-    return WorkerAuthority(ReleaseTrust(identity, keys, paper), evidence)
+    return ReleaseTrust(identity, keys, paper)
 
 
 def parse_session_controls(value: object) -> SessionControlConfig:
