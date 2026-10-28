@@ -23,6 +23,7 @@ from zoneinfo import ZoneInfo
 import requests
 
 from data.iex import IexQuotePolicy
+from data.sip import SipQuotePolicy
 from ops.calendar import USTradingCalendar
 from ops.release_gate import ReleaseTrust
 
@@ -78,7 +79,7 @@ def capture_preflight(
     issuer: str,
     environment: Mapping[str, str],
     symbols: tuple[str, ...],
-    quote_policy: IexQuotePolicy,
+    quote_policy: IexQuotePolicy | SipQuotePolicy,
     limits: ClockLimits,
     get: Callable[..., Any] = requests.get,
     now: Callable[[], datetime] = utc_now,
@@ -99,11 +100,14 @@ def capture_preflight(
         or any(re.fullmatch(r"[A-Z][A-Z0-9.\-]{0,14}", symbol) is None for symbol in symbols)
     ):
         raise ValueError("independent paper identity, approved issuer and symbols required")
+    if type(quote_policy) not in {IexQuotePolicy, SipQuotePolicy}:
+        raise ValueError("explicit approved Alpaca quote policy required")
+    feed = "sip" if type(quote_policy) is SipQuotePolicy else "iex"
     started = _time(now())
     started_mono = monotonic()
     details: dict[str, Any] = {
         "provider": "alpaca",
-        "feed": "iex",
+        "feed": feed,
         "symbols": list(symbols),
         "clock_limits": asdict(limits),
         "quote_policy": {
@@ -205,8 +209,8 @@ def capture_preflight(
 
         for symbol in symbols:
             stage = f"feed:{symbol}"
-            quote = read(f"{DATA_URL}/v2/stocks/{symbol}/quotes/latest", params={"feed": "iex"})
-            trade = read(f"{DATA_URL}/v2/stocks/{symbol}/trades/latest", params={"feed": "iex"})
+            quote = read(f"{DATA_URL}/v2/stocks/{symbol}/quotes/latest", params={"feed": feed})
+            trade = read(f"{DATA_URL}/v2/stocks/{symbol}/trades/latest", params={"feed": feed})
             if quote.get("symbol") != symbol or trade.get("symbol") != symbol:
                 raise ValueError("feed symbol mismatch")
             bid, ask, price = (
@@ -231,7 +235,7 @@ def capture_preflight(
             checks[stage] = {
                 "passed": True,
                 "authenticated": True,
-                "feed": "iex",
+                "feed": feed,
                 "quote_timestamp": times[0].isoformat(),
                 "trade_timestamp": times[1].isoformat(),
                 "quote_sha256": digest(quote),

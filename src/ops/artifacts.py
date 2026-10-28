@@ -245,8 +245,11 @@ class InstalledArtifacts:
             raise ValueError("explicit provider configuration required")
         ingestion = RuntimeMarketData.load(self.data, config=config, now=clock)
         if mandate is not None:
-            if cast(Any, ingestion).provider_name != "alpaca_iex" or symbols != [mandate.symbol]:
-                raise ValueError("paper mandate requires approved authenticated IEX inputs")
+            if cast(Any, ingestion).provider_name not in {
+                "alpaca_iex",
+                "alpaca_sip",
+            } or symbols != [mandate.symbol]:
+                raise ValueError("paper mandate requires approved authenticated Alpaca inputs")
             store.journal.paper_experiment_state(store.account_id, store.mode, mandate)
         factory = qualified_risk_service_factory(ingestion.bundle)
 
