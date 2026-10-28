@@ -43,6 +43,7 @@ class PaperTransport:
 
     def __init__(self, account, clock):
         self.account, self.clock = account, clock
+        self.feed = "iex"
         self.last, self.bid, self.ask = 101, 100.99, 101.01
         self.posts, self.orders, self.reads = [], {}, []
         self.positions = []
@@ -59,11 +60,12 @@ class PaperTransport:
         self.reads.append(url)
         at = self.clock().isoformat()
         if url.endswith("/quotes/latest"):
-            assert kwargs["params"] == {"feed": "iex"}
+            assert kwargs["params"] == {"feed": self.feed}
             return self.response(
                 {"symbol": "SPY", "quote": {"bp": self.bid, "ap": self.ask, "t": at}}
             )
         if url.endswith("/trades/latest"):
+            assert kwargs["params"] == {"feed": self.feed}
             return self.response({"symbol": "SPY", "trade": {"p": self.last, "t": at}})
         if url.endswith("/account/activities"):
             return self.response([])
@@ -150,7 +152,8 @@ def _authority(args, config, policy, now):
 
 
 @pytest.fixture
-def paper_built_worker(tmp_path, monkeypatch):
+def paper_built_worker(tmp_path, monkeypatch, *, feed="iex"):
+    assert feed in {"iex", "sip"}
     dsn = os.environ.get("WORKER_BUILDER_TEST_POSTGRES_DSN")
     if not dsn:
         pytest.skip("dedicated WORKER_BUILDER_TEST_POSTGRES_DSN required")
@@ -161,6 +164,7 @@ def paper_built_worker(tmp_path, monkeypatch):
 
     account = str(uuid4())
     transport = PaperTransport(account, clock)
+    transport.feed = feed
     monkeypatch.setattr(requests, "get", transport.get)
     monkeypatch.setattr(requests, "post", transport.post)
     monkeypatch.setattr(requests, "delete", transport.delete)
@@ -250,7 +254,7 @@ def paper_built_worker(tmp_path, monkeypatch):
     ]
     for row in rows:
         if row["kind"] in {"price", "risk_liquidity"}:
-            row["source"] = "alpaca:iex"
+            row["source"] = f"alpaca:{feed}"
     contract = risk_contract()
     contract["policy"] = {}
     bundle = tmp_path / "research.json"
@@ -262,15 +266,15 @@ def paper_built_worker(tmp_path, monkeypatch):
     data.write_text(
         json.dumps(
             {
-                "schema_version": 2,
-                "provider": "alpaca_iex",
+                "schema_version": 3 if feed == "sip" else 2,
+                "provider": f"alpaca_{feed}",
                 "provider_config": public_provider_config(provider_config),
                 "research_file": bundle.name,
                 "research_sha256": hashlib.sha256(bundle.read_bytes()).hexdigest(),
                 "quote_policy": {
                     "max_age_seconds": 5,
                     "max_spread_fraction": "0.001",
-                    "research_feed": "iex",
+                    "research_feed": feed,
                 },
             }
         )
