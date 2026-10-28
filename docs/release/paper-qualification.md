@@ -64,14 +64,20 @@ The trust format is documented in [worker-authority.md](worker-authority.md). It
 key environment references must already exist; the collector never provisions keys or
 derives trust from candidate evidence.
 
-This bounded collector supports the current `alpaca_iex` runtime descriptor only. It
+This bounded collector supports explicit schema 2 `alpaca_iex` and schema 3
+`alpaca_sip` runtime descriptors. It
 compares its provider configuration and approved quote policy with the process settings,
 and probes both latest quotes and trades for every strategy symbol using explicit
-`feed=iex`. Unsupported providers, unavailable subscriptions, wrong symbols, stale or
+`feed=iex` or `feed=sip` matching the approved policy. Unsupported providers,
+unavailable subscriptions, wrong symbols, stale or
 future data, invalid prices and excessive spreads produce a hold; it never substitutes
-SIP, cached data or another provider. It does not claim readiness of news/macro providers
+another feed, cached data or another provider. It does not claim readiness of news/macro providers
 or historical research data. Outside trading hours, stale IEX data can correctly hold
-the preflight even when authentication succeeds.
+the preflight even when authentication succeeds. SIP additionally validates the
+adjacent research path/hash and raw SIP price/liquidity provenance before the GETs,
+then rechecks research immutability. Read the [SIP contract](sip-runtime.md) before
+preparing a new data identity; entitlement and full data-manifest acceptance are
+separate prerequisites.
 
 Supply `EXECUTION_MODE=paper_broker`, `ALPACA_PAPER_BASE_URL=https://paper-api.alpaca.markets`,
 and the existing paper-only `ALPACA_API_KEY_ID` / `ALPACA_API_SECRET_KEY` variables without

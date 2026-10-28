@@ -6,14 +6,19 @@ import hashlib
 import json
 import os
 import subprocess
+from dataclasses import replace
+from datetime import timedelta
+from decimal import Decimal
 from pathlib import Path
 from typing import Mapping
 
 import typer
 
 from agents.config import AgentRuntimeConfig
+from backtest.datasets import qualified_risk_service_factory
 from data.config import DataProviderConfig
 from data.iex import IexQuotePolicy
+from data.sip import SipQuotePolicy
 from ops.paper_preflight import (
     ClockLimits,
     capture_preflight,
@@ -21,7 +26,7 @@ from ops.paper_preflight import (
     verify_preflight,
     write_preflight,
 )
-from ops.runtime_data import public_provider_config
+from ops.runtime_data import load_runtime_research, public_provider_config, validate_alpaca_research
 from ops.worker_config import load_release_trust
 
 app = typer.Typer(help=__doc__, pretty_exceptions_enable=False)
@@ -81,12 +86,43 @@ def run_preflight(
     symbols = strategy.get("symbols")
     if not isinstance(symbols, list) or not all(isinstance(symbol, str) for symbol in symbols):
         raise ValueError("approved strategy symbols required")
-    if data.get("schema_version") != 2 or data.get("provider") != "alpaca_iex":
-        raise ValueError("this preflight requires the approved IEX runtime descriptor")
+    descriptor = (data.get("schema_version"), data.get("provider"))
+    if type(data.get("schema_version")) is not int or descriptor not in {
+        (2, "alpaca_iex"),
+        (3, "alpaca_sip"),
+    }:
+        raise ValueError("this preflight requires an approved explicit Alpaca runtime descriptor")
     provider_config = DataProviderConfig.from_env(environment)
     if data.get("provider_config") != public_provider_config(provider_config):
         raise ValueError("approved provider configuration mismatch")
-    policy = IexQuotePolicy.parse(data.get("quote_policy"), provider_config)
+    policy: IexQuotePolicy | SipQuotePolicy
+    if descriptor == (3, "alpaca_sip"):
+        if set(data) != {
+            "schema_version",
+            "provider",
+            "provider_config",
+            "research_file",
+            "research_sha256",
+            "quote_policy",
+        }:
+            raise ValueError("explicit SIP runtime descriptor fields required")
+        policy = SipQuotePolicy.parse(data.get("quote_policy"), provider_config)
+        research, bundle = load_runtime_research(data_file, data)
+        validate_alpaca_research(bundle, "sip")
+        if qualified_risk_service_factory(bundle) is None:
+            raise ValueError("qualified sourced SIP risk contract required")
+        risk_contract = bundle.manifest.risk_contract
+        assert risk_contract is not None
+        mark = timedelta(seconds=float(risk_contract["freshness_seconds"]["mark"]))
+        policy = replace(
+            policy,
+            max_age_seconds=min(policy.max_age_seconds, Decimal(str(mark.total_seconds()))),
+        )
+        artifacts[research] = research.read_bytes()
+        if hashlib.sha256(artifacts[research]).hexdigest() != data["research_sha256"]:
+            raise ValueError("approved research changed during validation")
+    else:
+        policy = IexQuotePolicy.parse(data.get("quote_policy"), provider_config)
     envelope = capture_preflight(
         trust=trust,
         issuer=issuer,

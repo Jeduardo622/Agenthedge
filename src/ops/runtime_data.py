@@ -27,6 +27,7 @@ from data.config import DataProviderConfig
 from data.iex import AlpacaIexProvider, IexQuotePolicy
 from data.ingestion import DataIngestionService
 from data.providers import FinnhubProvider
+from data.sip import AlpacaSipProvider, SipQuotePolicy
 from data.snapshot import CanonicalSnapshot
 from ops.calendar import USTradingCalendar
 from risk.evaluator import FreshnessThresholds, MarketRiskInputs, SourcedMark
@@ -55,6 +56,45 @@ def _digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def load_runtime_research(path: Path, document: dict[str, Any]) -> tuple[Path, PointInTimeDataset]:
+    """Load only the hash-bound research file beside an explicit descriptor."""
+    name = document["research_file"]
+    if (
+        not isinstance(name, str)
+        or not name
+        or Path(name).name != name
+        or "/" in name
+        or "\\" in name
+        or ":" in name
+    ):
+        raise ValueError("research must be a file beside the runtime descriptor")
+    research = path.resolve(strict=True).parent / name
+    if research.resolve(strict=True).parent != path.resolve(strict=True).parent:
+        raise ValueError("research path escaped the descriptor directory")
+    expected = document["research_sha256"]
+    if _digest(research) != expected:
+        raise ValueError("research digest mismatch")
+    bundle = load_dataset_bundle(research)
+    if _digest(research) != expected:
+        raise ValueError("research changed during load")
+    return research, bundle
+
+
+def validate_alpaca_research(bundle: PointInTimeDataset, feed: str) -> None:
+    """Reject mixed-feed history and liquidity; observation time is never rewritten."""
+    if feed not in {"iex", "sip"}:
+        raise ValueError("explicit Alpaca research feed required")
+    if bundle.manifest.price_convention != "raw" or any(
+        row["source"] != f"alpaca:{feed}"
+        for row in bundle.records
+        if row["kind"] in {"price", "risk_liquidity"}
+    ):
+        raise ValueError(
+            f"{feed.upper()} requires compatible raw "
+            f"{feed.upper()} close/history/liquidity provenance"
+        )
+
+
 class RuntimeMarketData:
     """A frozen provider contract and replaceable, provenance-preserving quote batch."""
 
@@ -65,10 +105,10 @@ class RuntimeMarketData:
     bundle: PointInTimeDataset
     dataset: BacktestDataset
     now: Callable[[], datetime]
-    provider: DataIngestionService | AlpacaIexProvider
+    provider: DataIngestionService | AlpacaIexProvider | AlpacaSipProvider
     provider_name: str
-    _approved_provider: DataIngestionService | AlpacaIexProvider
-    _quote_policy: IexQuotePolicy | None
+    _approved_provider: DataIngestionService | AlpacaIexProvider | AlpacaSipProvider
+    _quote_policy: IexQuotePolicy | SipQuotePolicy | None
     _execution_bindings: tuple[Any, ...]
     _capture_binding: Any
     _last_execution_snapshot: CanonicalSnapshot | None
@@ -87,49 +127,35 @@ class RuntimeMarketData:
     def load(
         cls, path: Path, *, config: DataProviderConfig, now: Callable[[], datetime]
     ) -> RuntimeMarketData:
-        document = json.loads(path.read_text(encoding="utf-8"))
+        descriptor_bytes = path.read_bytes()
+        document = json.loads(descriptor_bytes.decode("utf-8"))
         iex = isinstance(document, dict) and document.get("provider") == "alpaca_iex"
+        sip = isinstance(document, dict) and document.get("provider") == "alpaca_sip"
+        alpaca = iex or sip
         if (
             not isinstance(document, dict)
             or set(document)
             != {"schema_version", "provider", "provider_config", "research_file", "research_sha256"}
-            | ({"quote_policy"} if iex else set())
-            or document["schema_version"] != (2 if iex else 1)
-            or document["provider"] not in {"finnhub", "alpaca_iex"}
+            | ({"quote_policy"} if alpaca else set())
+            or type(document["schema_version"]) is not int
+            or document["schema_version"] != (3 if sip else 2 if iex else 1)
+            or document["provider"] not in {"finnhub", "alpaca_iex", "alpaca_sip"}
         ):
             raise ValueError("explicit runtime provider descriptor required")
         if (
             type(config) is not DataProviderConfig
-            or (not iex and not config.finnhub_key)
+            or (not alpaca and not config.finnhub_key)
             or document["provider_config"] != public_provider_config(config)
         ):
             raise ValueError("runtime provider configuration differs from approved artifact")
-        name = document["research_file"]
-        if (
-            not isinstance(name, str)
-            or not name
-            or Path(name).name != name
-            or "/" in name
-            or "\\" in name
-            or ":" in name
-        ):
-            raise ValueError("research must be a file beside the runtime descriptor")
-        research = path.resolve(strict=True).parent / name
-        if research.resolve(strict=True).parent != path.resolve(strict=True).parent:
-            raise ValueError("research path escaped the descriptor directory")
-        if _digest(research) != document["research_sha256"]:
-            raise ValueError("research digest mismatch")
-        bundle = load_dataset_bundle(research)
-        quote_policy = IexQuotePolicy.parse(document["quote_policy"], config) if iex else None
-        if iex and (
-            bundle.manifest.price_convention != "raw"
-            or any(
-                row["source"] != "alpaca:iex"
-                for row in bundle.records
-                if row["kind"] in {"price", "risk_liquidity"}
-            )
-        ):
-            raise ValueError("IEX requires compatible raw IEX close/history/liquidity provenance")
+        research, bundle = load_runtime_research(path, document)
+        quote_policy: IexQuotePolicy | SipQuotePolicy | None = None
+        if iex:
+            quote_policy = IexQuotePolicy.parse(document["quote_policy"], config)
+        elif sip:
+            quote_policy = SipQuotePolicy.parse(document["quote_policy"], config)
+        if alpaca:
+            validate_alpaca_research(bundle, "sip" if sip else "iex")
         factory = qualified_risk_service_factory(bundle)
         if factory is None:
             raise ValueError("qualified sourced risk contract required")
@@ -152,14 +178,17 @@ class RuntimeMarketData:
         provider_config = replace(
             config, alpha_vantage_key=None, fred_api_key=None, news_api_key=None
         )
-        provider: DataIngestionService | AlpacaIexProvider = (
-            AlpacaIexProvider(provider_config, now, quote_policy)
-            if quote_policy is not None
-            else DataIngestionService(config=provider_config, now=now)
-        )
+        provider: DataIngestionService | AlpacaIexProvider | AlpacaSipProvider
+        if isinstance(quote_policy, SipQuotePolicy):
+            provider = AlpacaSipProvider(provider_config, now, quote_policy)
+        elif isinstance(quote_policy, IexQuotePolicy):
+            provider = AlpacaIexProvider(provider_config, now, quote_policy)
+        else:
+            provider = DataIngestionService(config=provider_config, now=now)
         result = cls()
         result.path, result.research = path, research
-        result._descriptor_digest, result._research_digest = _digest(path), _digest(research)
+        result._descriptor_digest = hashlib.sha256(descriptor_bytes).hexdigest()
+        result._research_digest = document["research_sha256"]
         result.bundle, result.dataset, result.now = bundle, dataset, now
         result.provider, result._config = provider, provider_config
         result.provider_name = document["provider"]
@@ -172,7 +201,9 @@ class RuntimeMarketData:
         )
         result._last_execution_snapshot = None
         result._capture_binding = (
-            provider.capture if isinstance(provider, AlpacaIexProvider) else None
+            provider.capture
+            if isinstance(provider, (AlpacaIexProvider, AlpacaSipProvider))
+            else None
         )
         if isinstance(provider, DataIngestionService):
             result._provider = provider._providers["finnhub"]
@@ -215,10 +246,12 @@ class RuntimeMarketData:
             != self._execution_bindings
         ):
             raise ValueError("loaded runtime provider changed")
-        if isinstance(self.provider, AlpacaIexProvider):
+        if isinstance(self.provider, (AlpacaIexProvider, AlpacaSipProvider)):
             if (
-                type(self.provider) is not AlpacaIexProvider
-                or self.provider_name != "alpaca_iex"
+                type(self.provider)
+                is not {"alpaca_iex": AlpacaIexProvider, "alpaca_sip": AlpacaSipProvider}.get(
+                    self.provider_name
+                )
                 or self.provider.config != self._config
                 or self.provider.now is not self.now
                 or self.provider.policy is not self._quote_policy
@@ -269,7 +302,7 @@ class RuntimeMarketData:
         return snapshot
 
     def _capture(self, symbol: str) -> CanonicalSnapshot:
-        if isinstance(self.provider, AlpacaIexProvider):
+        if isinstance(self.provider, (AlpacaIexProvider, AlpacaSipProvider)):
             at = self.now()
             if not self.dataset.includes_symbol(symbol, at):
                 raise ValueError("symbol outside approved point-in-time universe")
@@ -283,7 +316,7 @@ class RuntimeMarketData:
 
     def execution_limit(self, symbol: str, side: str) -> Decimal:
         if self._quote_policy is None or side not in {"buy", "sell"}:
-            raise ValueError("explicit IEX execution quote policy and side required")
+            raise ValueError("explicit Alpaca execution quote policy and side required")
         quote = self.get_market_snapshot(symbol).quote
         price = quote.ask if side == "buy" else quote.bid
         assert price is not None
@@ -294,7 +327,7 @@ class RuntimeMarketData:
         self.require()
         self._last_execution_snapshot = None
         if self._quote_policy is None or side not in {"buy", "sell"}:
-            raise ValueError("explicit IEX execution quote policy and side required")
+            raise ValueError("explicit Alpaca execution quote policy and side required")
         if not isinstance(limit_price, Decimal) or not limit_price.is_finite() or limit_price <= 0:
             raise ValueError("finite positive approved limit required")
         snapshot = self._capture(symbol)
@@ -310,9 +343,12 @@ class RuntimeMarketData:
     def validate_execution_snapshot(self, snapshot: CanonicalSnapshot, at: datetime) -> None:
         """Pure final check after release authorization; never perform blocking I/O here."""
         if (
-            type(self.provider) is not AlpacaIexProvider
+            not isinstance(self.provider, (AlpacaIexProvider, AlpacaSipProvider))
+            or type(self.provider)
+            is not {"alpaca_iex": AlpacaIexProvider, "alpaca_sip": AlpacaSipProvider}.get(
+                self.provider_name
+            )
             or self.provider is not self._approved_provider
-            or self.provider_name != "alpaca_iex"
             or self.provider.config != self._config
             or self.provider.now is not self.now
             or self.provider.policy is not self._quote_policy
