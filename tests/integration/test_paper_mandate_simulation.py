@@ -55,8 +55,15 @@ def strict_worker(tmp_path, monkeypatch):
                 payload["cash"] = str(state.synthetic_cash)
                 return state.transport.response(payload)
             if url.endswith("/orders"):
-                orders = list(state.transport.orders.values())
-                if kwargs.get("params", {}).get("status") == "open":
+                params = kwargs.get("params", {})
+                orders = sorted(
+                    state.transport.orders.values(),
+                    key=lambda order: datetime.fromisoformat(
+                        order["submitted_at"].replace("Z", "+00:00")
+                    ),
+                    reverse=params.get("direction", "desc") == "desc",
+                )
+                if params.get("status") == "open":
                     orders = [
                         order
                         for order in orders
