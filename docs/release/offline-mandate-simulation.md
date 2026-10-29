@@ -138,6 +138,46 @@ poetry run pytest tests/integration/test_five_second_simulation.py
 These are synthetic trial results, not an operational timeout change or release
 approval. A longer delivery wait never extends an input's validity.
 
+### Prepared opening and independent halt observations
+
+The intraday five-second campaign explicitly observes its synthetic opening
+baseline through the real session-risk observer during preparation. Only then
+does its single monotonic decision clock start, before either worker build or
+signed authority generation. The clock is never reset afterward. The original
+unprepared fixture remains available and still advances throughout construction;
+it must reject an opening snapshot processed after its five-second lifetime.
+Prepared intraday success does not qualify delayed first-opening startup.
+
+Companion tests retain rejection of a genuinely stale opening snapshot and stale
+current data, and verify that a fresh later observation preserves the original
+account and experiment opening baselines. Runtime configuration, financial
+limits, five-second freshness/risk TTLs and the production two-second delivery
+default remain unchanged.
+
+In-flight halt testing uses an independent control caller. The synthetic POST
+first enters the dispatch boundary; the control caller installs inhibition while
+waiting for that dispatch to return. Cancellation and late-fill reconciliation
+then run on the control caller, rather than synchronously inside the fake HTTP
+response. Completion matches the actual approval event and captured Execution
+subscription identity after its durable acknowledgment. An unrelated control
+acknowledgment cannot satisfy the test, and teardown cannot erase that identity.
+The observer leaves installed agent methods unchanged.
+
+All existing five-second phase observations and the separate thirty-second halt
+controller budget are retained. Passing phase observations do not establish an
+end-to-end five-second halt guarantee. Cancellation, owned-fill accounting,
+reservation release, idempotency and subsequent exposure-block assertions remain
+required. Windows qualification stays on HOLD until the declared campaign passes;
+passing Linux CI does not clear that hold.
+
+Installed-source validation uses one fresh Git porcelain-v2 status invocation for
+both the exact approved commit and source-tree cleanliness. It rejects missing,
+duplicate or mismatched commit headers and every source change record. It does
+not cache a successful check or skip later validations. Runtime checkout binding,
+artifact and agent binding checks, and the final decision-clock sample after
+integrity I/O remain required. Removing a process launch is a measured overhead
+reduction, not evidence that Windows meets its delivery deadline.
+
 Passing these scenarios is software/synthetic evidence only. Historical strategy
 performance, current market entitlement, observed paper sessions and the actual
 reviewed release dossier remain separate requirements.

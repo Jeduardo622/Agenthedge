@@ -10,7 +10,7 @@ import json
 from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
 from decimal import Decimal
-from threading import Event
+from threading import Event, Lock
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -86,11 +86,48 @@ class CancelCapableTransport(installed.PaperTransport):
         return self.response(None, 204)
 
 
+def _observe_approval_completion(bus, execution, monkeypatch):
+    """Wait for this approval's durable ACK, using the installed subscription ID."""
+    done = Event()
+    lock = Lock()
+    subscription_id = execution._subscription.id
+    approval_events, acknowledged = set(), set()
+    original_publish = bus.publish
+    original_done = bus._mark_done
+
+    def observed_publish(topic, *args, **kwargs):
+        envelope = original_publish(topic, *args, **kwargs)
+        if topic == "director.approval":
+            with lock:
+                event_id = int(envelope.id)
+                approval_events.add(event_id)
+                if event_id in acknowledged:
+                    done.set()
+        return envelope
+
+    def observed_done(ack_subscription_id, delivery_id, event_id):
+        original_done(ack_subscription_id, delivery_id, event_id)
+        if ack_subscription_id == subscription_id:
+            with lock:
+                acknowledged.add(event_id)
+                if event_id in approval_events:
+                    done.set()
+
+    monkeypatch.setattr(bus, "publish", observed_publish)
+    monkeypatch.setattr(bus, "_mark_done", observed_done)
+    return done
+
+
 @pytest.fixture
-def halt_boundary_worker(tmp_path, monkeypatch, *, five_second_trial=False):
+def halt_boundary_worker(
+    tmp_path, monkeypatch, *, five_second_trial=False, already_observed_opening=False
+):
     monkeypatch.setattr(installed, "PaperTransport", CancelCapableTransport)
     fixture = installed.paper_built_worker.__wrapped__(
-        tmp_path, monkeypatch, five_second_trial=five_second_trial
+        tmp_path,
+        monkeypatch,
+        five_second_trial=five_second_trial,
+        already_observed_opening=already_observed_opening,
     )
     state = next(fixture)
     try:
@@ -100,15 +137,9 @@ def halt_boundary_worker(tmp_path, monkeypatch, *, five_second_trial=False):
         runtime = state.worker.runtime
         execution = next(agent for agent in runtime._agents if agent.name == "execution")
         director = next(agent for agent in runtime._agents if agent.name == "director")
-        done = Event()
-        original_done = runtime.bus._mark_done
-
-        def observed_done(subscription_id, delivery_id, event_id):
-            original_done(subscription_id, delivery_id, event_id)
-            if subscription_id == execution._subscription.id:
-                done.set()
-
-        monkeypatch.setattr(runtime.bus, "_mark_done", observed_done)
+        parameters = installed.agent_parameters(execution)
+        done = _observe_approval_completion(runtime.bus, execution, monkeypatch)
+        assert installed.agent_parameters(execution) == parameters
         journal = runtime.portfolio_store.journal
         claim = journal.claim_intent_submission
 
@@ -230,9 +261,37 @@ def test_http_already_in_flight_is_owned_canceled_and_late_fill_reconciled(halt_
     boundary = halt_boundary_worker
     transport = boundary.state.transport
     transport.fill_on_cancel = True
-    outcomes = []
-    transport.on_post = lambda: outcomes.append(_halt(boundary))
-    _drive(boundary)
+    gate = boundary.controller._submission_gate
+    lock = gate._dispatch
+    post_entered, halt_waiting = Event(), Event()
+
+    class ObservedLock:
+        def acquire(self, *args, **kwargs):
+            if "timeout" in kwargs:
+                assert gate._inhibited
+                halt_waiting.set()
+            return lock.acquire(*args, **kwargs)
+
+        def release(self):
+            return lock.release()
+
+    def in_flight_response():
+        post_entered.set()
+        assert halt_waiting.wait(5), "independent halt did not inhibit entered HTTP"
+
+    def independent_halt():
+        assert post_entered.wait(5)
+        return _halt(boundary)
+
+    gate._dispatch = ObservedLock()
+    transport.on_post = in_flight_response
+    try:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            halted = pool.submit(independent_halt)
+            _drive(boundary)
+            outcome = halted.result(timeout=5)
+    finally:
+        gate._dispatch = lock
     assert boundary.trace.index("http_post_entered") < boundary.trace.index("halt_committed")
     assert boundary.trace.index("halt_committed") < boundary.trace.index("owned_cancel_entered")
     assert boundary.trace.index("owned_cancel_entered") < boundary.trace.index("late_fill_visible")
@@ -242,8 +301,8 @@ def test_http_already_in_flight_is_owned_canceled_and_late_fill_reconciled(halt_
     assert snapshot.cash == Decimal("99898.99")
     assert snapshot.positions["SPY"].quantity == 1
     assert not boundary.journal.reservations(account, "paper_broker")
-    assert outcomes[0].state == "HALTED", outcomes[0]
-    assert outcomes[0].unresolved == outcomes[0].open_owned_orders == ()
+    assert outcome.state == "HALTED", outcome
+    assert outcome.unresolved == outcome.open_owned_orders == ()
     events = boundary.journal.outbox(account, "paper_broker")
     assert len(events) == 1
     _halt(boundary)

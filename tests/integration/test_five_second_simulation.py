@@ -1,4 +1,8 @@
-"""Opt-in five-second trial; real elapsed clocks, synthetic HTTP and authority."""
+"""Prepared intraday five-second trial; real elapsed clocks and synthetic authority.
+
+OPEN is genuinely observed during preparation, before the single advancing clock
+starts and before both worker builds. This is not delayed first-opening proof.
+"""
 
 import json
 import time
@@ -21,7 +25,9 @@ from tests.integration import (
 
 @pytest.fixture
 def trial_worker(tmp_path, monkeypatch):
-    fixture = scenarios.strict_worker.__wrapped__(tmp_path, monkeypatch, five_second_trial=True)
+    fixture = scenarios.strict_worker.__wrapped__(
+        tmp_path, monkeypatch, five_second_trial=True, already_observed_opening=True
+    )
     try:
         yield next(fixture)
     finally:
@@ -65,7 +71,7 @@ def test_existing_fixture_keeps_default_budget_and_frozen_clock(tmp_path, monkey
         fixture.close()
 
 
-def test_positive_signal_at_initial_start_can_submit(trial_worker):
+def test_positive_signal_at_initial_intraday_start_can_submit(trial_worker):
     installed._start(trial_worker)
     assert len(trial_worker.transport.posts) == 1
 
@@ -304,7 +310,9 @@ def test_real_five_second_stall_halts_and_cannot_send_later(trial_worker, monkey
 
 @pytest.fixture
 def trial_halt_boundary(tmp_path, monkeypatch):
-    fixture = halts.halt_boundary_worker.__wrapped__(tmp_path, monkeypatch, five_second_trial=True)
+    fixture = halts.halt_boundary_worker.__wrapped__(
+        tmp_path, monkeypatch, five_second_trial=True, already_observed_opening=True
+    )
     try:
         yield next(fixture)
     finally:

@@ -27,7 +27,9 @@ from tests.integration.test_paper_built_worker import (
 
 
 @pytest.fixture
-def strict_worker(tmp_path, monkeypatch, *, five_second_trial=False):
+def strict_worker(
+    tmp_path, monkeypatch, *, five_second_trial=False, already_observed_opening=False
+):
     def unexpected_http(*args, **kwargs):
         pytest.fail("unqualified external HTTP transport attempted")
 
@@ -39,6 +41,7 @@ def strict_worker(tmp_path, monkeypatch, *, five_second_trial=False):
         monkeypatch,
         strict_mandate_simulation=True,
         five_second_trial=five_second_trial,
+        already_observed_opening=already_observed_opening,
     )
     try:
         state = next(fixture)

@@ -31,8 +31,10 @@ from ops.commands import migrate_control_commands
 from ops.release_gate import ReleaseIdentity
 from ops.runtime_data import RuntimeMarketData, public_provider_config
 from ops.worker_builder import WorkerPaths, build_worker
+from ops.worker_config import parse_session_controls
 from portfolio.accounting import AccountingState
 from portfolio.journal import PostgresJournal
+from risk.session_store import PostgresSessionRisk
 from tests.backtest.test_datasets import manifest, price_record, record, risk_contract
 from tests.ops.release_fixtures import paper_release
 from tests.ops.test_release_gate import KEY, digest, sign
@@ -152,18 +154,25 @@ def _authority(args, config, policy, now):
 
 @pytest.fixture
 def paper_built_worker(
-    tmp_path, monkeypatch, *, strict_mandate_simulation=False, five_second_trial=False
+    tmp_path,
+    monkeypatch,
+    *,
+    strict_mandate_simulation=False,
+    five_second_trial=False,
+    already_observed_opening=False,
 ):
     dsn = os.environ.get("WORKER_BUILDER_TEST_POSTGRES_DSN")
     if not dsn:
         pytest.skip("dedicated WORKER_BUILDER_TEST_POSTGRES_DSN required")
     now = [datetime(2026, 9, 14, 13, 30, tzinfo=timezone.utc)]
-    clock_anchor = time.monotonic()
+    # An explicitly prepared intraday scenario observes OPEN before elapsed time
+    # starts. The original cold-start trial still advances throughout setup.
+    clock_anchor = None if already_observed_opening else time.monotonic()
     if five_second_trial:
         strict_mandate_simulation = True
 
     def clock():
-        if five_second_trial:
+        if (five_second_trial or already_observed_opening) and clock_anchor is not None:
             return now[0] + timedelta(seconds=time.monotonic() - clock_anchor)
         return now[0]
 
@@ -324,6 +333,31 @@ def paper_built_worker(
         ),
         clock=clock,
     )
+    if already_observed_opening:
+        controls = parse_session_controls(document["session_control"])
+        observer = PostgresSessionRisk(
+            journal,
+            account_id=account,
+            mode="paper_broker",
+            policy=ingestion.policy,
+            max_mark_age=controls.max_mark_age,
+            boundary_grace=controls.boundary_grace,
+            window_sessions=controls.window_sessions,
+            max_drawdown=controls.max_drawdown,
+            control_timeout=controls.control_timeout,
+            paper_mandate=approved,
+        )
+        opened_at = now[0]
+        opening_market = ingestion.opening_market_inputs(opened_at)
+        assert clock() == opened_at and opening_market.as_of == opened_at
+        observation = observer.observe(opening_market, now=opened_at)
+        assert observer.status() == observation
+        assert observation.observed_at == opened_at and observation.checkpoint == 0
+        assert observation.experiment is not None
+        assert not journal.recovery_required(account, "paper_broker")
+        # Start once, before either worker build and either signed authority.
+        # Never rebase a decision clock or backdate an already elapsed opening.
+        clock_anchor = time.monotonic()
     _authority(args, config, ingestion.policy, now[0])
     prototype = build_worker(**args)
     try:
