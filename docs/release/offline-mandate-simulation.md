@@ -40,6 +40,14 @@ local ordering for broker ticks; all other agent relative ordering and the
 simulated-mode order remain unchanged. Initial reconciliation, admission checks,
 failure handling and the existing causal wait deadline remain in force.
 
+Final paper-mandate validation also uses the existing locked submission-claim
+proof. A new pristine claim is the only permitted addition to the last covered
+revision. The validator binds the durable candidate to its original reservation
+and installed mandate, applies allocation-scoped accounting and the covered prior
+orders, then checks the same mandate limits. General reservation reads remain
+conservative when a proof is incomplete or its revision changes. Another unknown
+order, changed candidate or unqualified proof cannot be excluded by this path.
+
 ## Run locally
 
 Use a newly created, owned, disposable PostgreSQL 16 instance bound to loopback.
@@ -51,6 +59,7 @@ The fixtures create and migrate synthetic test schemas/accounts.
 poetry run pytest tests/agents/test_audit_chain.py
 poetry run pytest tests/agents/test_runtime_reconciliation_order.py
 poetry run pytest tests/integration/test_paper_mandate_simulation.py
+poetry run pytest tests/integration/test_paper_mandate_claim.py
 poetry run pytest tests/portfolio/test_paper_mandate.py tests/portfolio/test_paper_mandate_construction.py tests/integration/test_paper_mandate_install.py tests/integration/test_paper_mandate_inventory.py tests/integration/test_paper_mandate_execution.py
 ```
 

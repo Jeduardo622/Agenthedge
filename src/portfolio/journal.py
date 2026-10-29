@@ -1088,6 +1088,7 @@ class PostgresJournal:
         *,
         decision_time: datetime,
         reduction_policy: "ReductionPolicy | None" = None,
+        paper_mandate: "PaperMandate | None" = None,
     ) -> datetime:
         """Recheck a committed claim without treating uncertainty as new permission."""
         from .reconciliation import aware
@@ -1108,6 +1109,56 @@ class PostgresJournal:
                 decision + timedelta(seconds=time.monotonic() - entered),
                 expected_status="unknown",
             )
+            if paper_mandate is not None:
+                experiment = self._paper_experiment_state(cur, account_id, mode, paper_mandate)
+                cur.execute(
+                    "SELECT intents.payload,orders.state FROM ah_execution_intents intents "
+                    "JOIN ah_execution_orders orders USING(account_id,mode,client_order_id) "
+                    "WHERE intents.account_id=%s AND intents.mode=%s "
+                    "AND intents.client_order_id=%s AND intents.status='unknown'",
+                    (account_id, mode, client_order_id),
+                )
+                claimed = cur.fetchone()
+                if not claimed:
+                    raise RecoveryRequired("unknown paper mandate intent identity")
+                payload, order = _mapping(claimed[0]), _mapping(claimed[1])
+                reservation = _reservation(order["initial_reservation"])
+                quantity = (
+                    reservation.remaining_quantity
+                    if reservation.side == "buy"
+                    else -reservation.remaining_quantity
+                )
+                client_field = (
+                    "reduction_client_order_id"
+                    if reduction_policy is not None
+                    else "director_approval_id"
+                )
+                if (
+                    reservation.order_id != client_order_id
+                    or payload.get(client_field) != client_order_id
+                    or payload.get("paper_mandate_hash") != paper_mandate.content_hash
+                    or payload.get("symbol") != reservation.symbol
+                    or payload.get("side", reservation.side) != reservation.side
+                    or as_decimal(payload.get("quantity")) != quantity
+                    or as_decimal(payload.get("price")) != reservation.worst_price
+                ):
+                    raise ValueError("paper mandate request differs from its durable reservation")
+                # The complete proof was checked above under this same account lock.
+                # Only this exact pristine own UNKNOWN claim may differ from that base.
+                view = self._reconciliation_view(
+                    cur,
+                    account_id,
+                    mode,
+                    exclude_prepared=client_order_id,
+                    expected_status="unknown",
+                )
+                paper_mandate.require_order(
+                    reservation.symbol,
+                    quantity,
+                    reservation.worst_price,
+                    experiment,
+                    self._reservations_from_states(view["orders"], terminal_proven=True),
+                )
             if reduction_policy is not None:
                 cur.execute(
                     "SELECT payload FROM ah_execution_intents WHERE account_id=%s AND mode=%s "
