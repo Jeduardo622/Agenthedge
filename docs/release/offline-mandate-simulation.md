@@ -81,6 +81,37 @@ Windows `PermissionError` before audit append. It does not establish an operatin
 system root cause, change Windows permissions, alter production audit locking or
 certify all Windows IPC behavior.
 
+## Windows delivery-budget diagnosis
+
+The broker runtime retains one two-second monotonic deadline for the complete
+causal delivery chain. A completed database read after that deadline still fails
+the runtime barrier; an empty pending-delivery readback taken afterward does not
+prove timely completion. This deadline is separate from Windows clock accuracy
+and the five-second quote/mark/risk-artifact freshness limits.
+
+Readiness polling uses one function-owned PostgreSQL session per wait. Each check
+commits before sleeping, so subsequent checks see external acknowledgements in a
+fresh transaction. The session closes on success, timeout or failure. Subscriber
+claim sessions still close before handlers, and no handler connection pool is used.
+
+Outbox readiness retains both independent datastore identity sessions. Its schema,
+namespace and snapshot checks share one short-lived read-only journal session,
+which closes before the separate account-lock/write transaction. The dispatch path
+uses four connections instead of six without caching a permission or proof.
+
+Run the connection-lifetime and real PostgreSQL regression files with the
+maintained disposable-database map:
+
+```text
+poetry run pytest tests/agents/test_postgres_barrier_sessions.py
+poetry run pytest tests/integration/test_postgres_barrier_sessions.py tests/integration/test_outbox_readiness_sessions.py
+```
+
+These regressions prove transaction and guard preservation, not Windows latency
+acceptance. Measure the installed mandate scenarios with the actual elapsed clock
+and retain every deadline failure. Instrumentation adds overhead; record whether
+it was enabled. Do not extend the deadline or retry until a passing run appears.
+
 Passing these scenarios is software/synthetic evidence only. Historical strategy
 performance, current market entitlement, observed paper sessions and the actual
 reviewed release dossier remain separate requirements.

@@ -448,22 +448,25 @@ class PostgresJournal:
     def require_submission_ready(self, account_id: str, mode: str) -> None:
         """Read-only admission: explicit v2 schema and existing namespace required."""
         with postgres_connection(self.dsn) as conn, conn.cursor() as cur:
-            cur.execute("SELECT version FROM ah_execution_schema")
-            row = cur.fetchone()
-            if (
-                not row
-                or row[0] not in {2, 3, 4, 5, 6}
-                or (row[0] in {5, 6} and not _supported_reconciliation_schema(cur, row))
-            ):
-                raise RecoveryRequired("PostgreSQL journal migration v2 required")
-        self.snapshot_with_timestamp(account_id, mode)
+            self._require_submission_ready(cur, account_id, mode)
+
+    def _require_submission_ready(self, cur: CursorLike, account_id: str, mode: str) -> None:
+        cur.execute("SELECT version FROM ah_execution_schema")
+        row = cur.fetchone()
+        if (
+            not row
+            or row[0] not in {2, 3, 4, 5, 6}
+            or (row[0] in {5, 6} and not _supported_reconciliation_schema(cur, row))
+        ):
+            raise RecoveryRequired("PostgreSQL journal migration v2 required")
+        self._snapshot_with_timestamp(cur, account_id, mode)
 
     def require_dispatch_ready(self, bus: "PostgresMessageBus", account_id: str, mode: str) -> None:
         if bus.namespace != (account_id, mode):
             raise RecoveryRequired("bus must bind the exact journal namespace")
         bus.assert_same_datastore(self.dsn)
-        self.require_submission_ready(account_id, mode)
         with postgres_connection(self.dsn) as conn, conn.cursor() as cur:
+            self._require_submission_ready(cur, account_id, mode)
             cur.execute("SELECT version FROM ah_execution_schema")
             row = cur.fetchone()
             if (
@@ -1522,18 +1525,24 @@ class PostgresJournal:
         """Consistent projection and operational DB write time; never event time."""
         _namespace(account_id, mode)
         with postgres_connection(self.dsn) as conn, conn.cursor() as cur:
-            cur.execute("SELECT version FROM ah_execution_schema")
-            version = cur.fetchone()
-            stamp = "projection_updated_at" if version and int(str(version[0])) >= 2 else "NULL"
-            cur.execute(
-                "SELECT projection," + stamp + " FROM ah_execution_accounts "
-                "WHERE account_id=%s AND mode=%s",
-                (account_id, mode),
-            )
-            row = cur.fetchone()
-            if not row:
-                raise RecoveryRequired("namespace has no explicit genesis")
-            return _state(_mapping(row[0])), cast(datetime | None, row[1])
+            return self._snapshot_with_timestamp(cur, account_id, mode)
+
+    def _snapshot_with_timestamp(
+        self, cur: CursorLike, account_id: str, mode: str
+    ) -> tuple[AccountingState, datetime | None]:
+        _namespace(account_id, mode)
+        cur.execute("SELECT version FROM ah_execution_schema")
+        version = cur.fetchone()
+        stamp = "projection_updated_at" if version and int(str(version[0])) >= 2 else "NULL"
+        cur.execute(
+            "SELECT projection," + stamp + " FROM ah_execution_accounts "
+            "WHERE account_id=%s AND mode=%s",
+            (account_id, mode),
+        )
+        row = cur.fetchone()
+        if not row:
+            raise RecoveryRequired("namespace has no explicit genesis")
+        return _state(_mapping(row[0])), cast(datetime | None, row[1])
 
     def snapshot(self, account_id: str, mode: str) -> AccountingState:
         return _state(self._account(account_id, mode)[0])
