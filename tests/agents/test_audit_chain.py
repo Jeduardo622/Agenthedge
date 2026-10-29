@@ -13,12 +13,15 @@ import audit.sink as audit_sink
 from audit import JsonlAuditSink, verify_jsonl_hash_chain
 
 
-def _append_audit_after_release(path, action, ready, release) -> None:
-    sink = JsonlAuditSink(path)
-    ready.set()
-    if not release.wait(timeout=10):
-        raise RuntimeError("timed out waiting to append audit record")
-    sink(action, {"proposal_id": "p1"})
+def _append_audit_after_release(path, action, coordination) -> None:
+    with coordination:
+        sink = JsonlAuditSink(path)
+        coordination.send_bytes(b"ready")
+        if not coordination.poll(timeout=10):
+            raise RuntimeError("timed out waiting to append audit record")
+        if coordination.recv_bytes() != b"append":
+            raise RuntimeError("unexpected audit append release")
+        sink(action, {"proposal_id": "p1"})
 
 
 def test_verify_jsonl_hash_chain_passes_for_valid_log(tmp_path) -> None:
@@ -159,21 +162,28 @@ def test_jsonl_audit_sink_revalidates_tail_before_append(tmp_path) -> None:
 def test_jsonl_audit_sink_serializes_hash_chain_across_processes(tmp_path) -> None:
     path = tmp_path / "audit.jsonl"
     context = multiprocessing.get_context("spawn")
-    ready = [context.Event(), context.Event()]
-    release = context.Event()
+    # Use independent IPC channels: Event.notify() can fail on Windows SemLocks
+    # before either child exercises the audit writer's own file locking.
+    channels = [context.Pipe(duplex=True), context.Pipe(duplex=True)]
     processes = [
         context.Process(
             target=_append_audit_after_release,
-            args=(str(path), action, ready_event, release),
+            args=(str(path), action, child),
         )
-        for action, ready_event in zip(("risk_approval", "execution_fill"), ready)
+        for action, (_, child) in zip(("risk_approval", "execution_fill"), channels)
     ]
 
     try:
-        for process in processes:
+        for process, (_, child) in zip(processes, channels):
             process.start()
-        assert all(event.wait(timeout=10) for event in ready)
-        release.set()
+            child.close()
+        assert all(
+            parent.poll(timeout=10) and parent.recv_bytes() == b"ready" for parent, _ in channels
+        )
+        # Both sinks must be constructed before either child is released.
+        assert not path.exists() or not path.read_text(encoding="utf-8")
+        for parent, _ in channels:
+            parent.send_bytes(b"append")
         for process in processes:
             process.join(timeout=10)
     finally:
@@ -181,6 +191,9 @@ def test_jsonl_audit_sink_serializes_hash_chain_across_processes(tmp_path) -> No
             if process.is_alive():
                 process.terminate()
                 process.join(timeout=5)
+        for parent, child in channels:
+            parent.close()
+            child.close()
 
     assert [process.exitcode for process in processes] == [0, 0]
     records = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
@@ -193,6 +206,18 @@ def test_jsonl_audit_sink_serializes_hash_chain_across_processes(tmp_path) -> No
     }
     assert ok is True
     assert errors == []
+
+
+def test_cross_process_audit_append_does_not_require_event_semaphores(
+    tmp_path, monkeypatch
+) -> None:
+    context = multiprocessing.get_context("spawn")
+
+    def unavailable_event():
+        raise PermissionError(5, "synthetic unavailable Event semaphore")
+
+    monkeypatch.setattr(context, "Event", unavailable_event)
+    test_jsonl_audit_sink_serializes_hash_chain_across_processes(tmp_path)
 
 
 def test_jsonl_audit_sink_serializes_hash_chain_under_concurrent_writes(

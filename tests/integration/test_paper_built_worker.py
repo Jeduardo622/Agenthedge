@@ -150,7 +150,7 @@ def _authority(args, config, policy, now):
 
 
 @pytest.fixture
-def paper_built_worker(tmp_path, monkeypatch):
+def paper_built_worker(tmp_path, monkeypatch, *, strict_mandate_simulation=False):
     dsn = os.environ.get("WORKER_BUILDER_TEST_POSTGRES_DSN")
     if not dsn:
         pytest.skip("dedicated WORKER_BUILDER_TEST_POSTGRES_DSN required")
@@ -204,6 +204,8 @@ def paper_built_worker(tmp_path, monkeypatch):
         "EXECUTION_MAX_ORDER_SHARES": "1",
         "EXECUTION_MAX_SYMBOL_POSITION_SHARES": "1",
     }
+    if strict_mandate_simulation:
+        env.update(EXECUTION_MARKET_HOURS_GUARD="true", EXECUTION_REQUIRE_PAPER_ACCOUNT="true")
     from agents.config import AgentRuntimeConfig
 
     config = AgentRuntimeConfig.from_env_for_recovery(env)
@@ -215,6 +217,7 @@ def paper_built_worker(tmp_path, monkeypatch):
             dates.append(bounds)
         day -= timedelta(days=1)
     prior = dates[0][1]
+    metadata_at = now[0] - timedelta(minutes=1) if strict_mandate_simulation else prior
     rows = [price_record(str(close.date()), close.date(), close) for _, close in reversed(dates)]
     rows += [
         record(
@@ -228,23 +231,23 @@ def paper_built_worker(tmp_path, monkeypatch):
         record(
             "class",
             "risk_classification",
-            event_at=prior.isoformat(),
-            available=prior,
+            event_at=metadata_at.isoformat(),
+            available=metadata_at,
             asset_type="etf",
         ),
         record(
             "adv",
             "risk_liquidity",
-            event_at=prior.isoformat(),
-            available=prior,
+            event_at=metadata_at.isoformat(),
+            available=metadata_at,
             average_daily_volume="1000000",
         ),
         record(
             "sectors",
             "etf_sector_map",
-            event_at=prior.isoformat(),
-            available=prior,
-            as_of=prior.date().isoformat(),
+            event_at=metadata_at.isoformat(),
+            available=metadata_at,
+            as_of=metadata_at.date().isoformat(),
             weights={"technology": "0.40", "other": "0.60"},
         ),
     ]
@@ -253,10 +256,20 @@ def paper_built_worker(tmp_path, monkeypatch):
             row["source"] = "alpaca:iex"
     contract = risk_contract()
     contract["policy"] = {}
+    if strict_mandate_simulation:
+        contract.update(
+            freshness_seconds={"mark": 5, "classification": 86400, "liquidity": 86400},
+            artifact_ttl_seconds=5,
+        )
+    research_manifest = manifest(rows, risk_contract=contract)
+    if strict_mandate_simulation:
+        research_manifest.update(
+            created_at=now[0].isoformat(),
+            coverage_start=dates[-1][1].date().isoformat(),
+            coverage_end=prior.date().isoformat(),
+        )
     bundle = tmp_path / "research.json"
-    bundle.write_text(
-        json.dumps({"manifest": manifest(rows, risk_contract=contract), "records": rows})
-    )
+    bundle.write_text(json.dumps({"manifest": research_manifest, "records": rows}))
     provider_config = DataProviderConfig.from_env(env)
     data = tmp_path / "data.json"
     data.write_text(
