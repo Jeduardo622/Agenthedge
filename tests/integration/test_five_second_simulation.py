@@ -218,15 +218,15 @@ def test_quote_expired_during_final_integrity_io_cannot_submit(trial_worker, mon
     assert state.journal.reservations(state.mandate.account_id, "paper_broker")
 
 
-def test_real_five_second_stall_halts_and_cannot_send_later(
-    trial_worker, monkeypatch, record_property
-):
+def test_real_five_second_stall_halts_and_cannot_send_later(trial_worker, monkeypatch, request):
     state = trial_worker
     _idle_start(state)
     runtime = state.worker.runtime
     entered, release, done = Event(), Event(), Event()
     claimed, waits, stalled_at, barrier_elapsed = [], [], [], []
-    original_claim = state.journal.claim_intent_submission
+    journal = runtime.portfolio_store.journal
+    assert journal.dsn == state.journal.dsn
+    original_claim = journal.claim_intent_submission
     original_get, original_done = requests.get, runtime.bus._mark_done
     original_wait = runtime.bus.wait_until_caught_up
     execution = next(agent for agent in runtime._agents if agent.name == "execution")
@@ -256,7 +256,7 @@ def test_real_five_second_stall_halts_and_cannot_send_later(
         waits.append((timeout, time.monotonic() - before, result))
         return result
 
-    monkeypatch.setattr(state.journal, "claim_intent_submission", claim)
+    monkeypatch.setattr(journal, "claim_intent_submission", claim)
     monkeypatch.setattr(requests, "get", get)
     monkeypatch.setattr(runtime.bus, "_mark_done", mark_done)
     monkeypatch.setattr(runtime.bus, "wait_until_caught_up", wait)
@@ -288,8 +288,9 @@ def test_real_five_second_stall_halts_and_cannot_send_later(
         assert done.wait(15), "stalled callback did not complete after release"
     assert claimed and state.transport.posts == []
     assert barrier_elapsed[0] >= 4.95
-    record_property("barrier_elapsed_seconds", barrier_elapsed[0])
-    record_property("configured_timeout_seconds", 5)
+    request.node.user_properties.extend(
+        [("barrier_elapsed_seconds", barrier_elapsed[0]), ("configured_timeout_seconds", 5)]
+    )
     assert any(not result for _, _, result in waits)
     assert all(0 <= timeout <= 5 for timeout, _, _ in waits)
     events = [row for row in _audit(state) if row.get("action") == "runtime_bus_catchup_timeout"]
