@@ -27,14 +27,19 @@ from tests.integration.test_paper_built_worker import (
 
 
 @pytest.fixture
-def strict_worker(tmp_path, monkeypatch):
+def strict_worker(tmp_path, monkeypatch, *, five_second_trial=False):
     def unexpected_http(*args, **kwargs):
         pytest.fail("unqualified external HTTP transport attempted")
 
     monkeypatch.setattr(requests.sessions.Session, "request", unexpected_http)
     monkeypatch.setattr(httpx.Client, "send", unexpected_http)
     monkeypatch.setattr(httpx.AsyncClient, "send", unexpected_http)
-    fixture = paper_built_worker.__wrapped__(tmp_path, monkeypatch, strict_mandate_simulation=True)
+    fixture = paper_built_worker.__wrapped__(
+        tmp_path,
+        monkeypatch,
+        strict_mandate_simulation=True,
+        five_second_trial=five_second_trial,
+    )
     try:
         state = next(fixture)
         state.synthetic_activities = []

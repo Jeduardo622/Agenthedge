@@ -112,6 +112,32 @@ acceptance. Measure the installed mandate scenarios with the actual elapsed cloc
 and retain every deadline failure. Instrumentation adds overhead; record whether
 it was enabled. Do not extend the deadline or retry until a passing run appears.
 
+## Opt-in five-second simulation trial
+
+`tests/integration/test_five_second_simulation.py` sets the existing delivery-budget
+setting to five seconds only in synthetic fixture environments, before parsing
+configuration and issuing signed test authority. Production defaults remain two
+seconds. The trial uses one historical UTC anchor plus real monotonic elapsed time
+for decision and broker clocks; runtime and bus elapsed clocks remain real.
+Freshness, risk-artifact TTL, financial limits and halt/fence controls are unchanged.
+
+The campaign retains an initial-positive-start case separately from maintained
+scenarios that first start idle and then evaluate a fresh signal. Manually driven
+installed-agent boundaries check quote/risk/approval expiry, a genuine five-second
+delivery stall, and halt ordering. Explicit six-second logical offsets exercise
+expiry predicates; they are separate from wall-time acceptance. In-flight halt
+coverage permits an already-entered synthetic POST and requires owned cancellation
+and late-fill accounting. Pre-send veto cases require zero POSTs.
+
+Run the file once against the maintained disposable-database map and retain failures:
+
+```text
+poetry run pytest tests/integration/test_five_second_simulation.py
+```
+
+These are synthetic trial results, not an operational timeout change or release
+approval. A longer delivery wait never extends an input's validity.
+
 Passing these scenarios is software/synthetic evidence only. Historical strategy
 performance, current market entitlement, observed paper sessions and the actual
 reviewed release dossier remain separate requirements.

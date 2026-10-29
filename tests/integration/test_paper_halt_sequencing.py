@@ -87,9 +87,11 @@ class CancelCapableTransport(installed.PaperTransport):
 
 
 @pytest.fixture
-def halt_boundary_worker(tmp_path, monkeypatch):
+def halt_boundary_worker(tmp_path, monkeypatch, *, five_second_trial=False):
     monkeypatch.setattr(installed, "PaperTransport", CancelCapableTransport)
-    fixture = installed.paper_built_worker.__wrapped__(tmp_path, monkeypatch)
+    fixture = installed.paper_built_worker.__wrapped__(
+        tmp_path, monkeypatch, five_second_trial=five_second_trial
+    )
     state = next(fixture)
     try:
         state.transport.last, state.transport.bid, state.transport.ask = 100, 99.99, 100.01

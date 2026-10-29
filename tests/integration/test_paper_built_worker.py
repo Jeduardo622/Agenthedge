@@ -9,6 +9,7 @@ import inspect
 import json
 import os
 import subprocess
+import time
 from dataclasses import asdict, replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -150,13 +151,20 @@ def _authority(args, config, policy, now):
 
 
 @pytest.fixture
-def paper_built_worker(tmp_path, monkeypatch, *, strict_mandate_simulation=False):
+def paper_built_worker(
+    tmp_path, monkeypatch, *, strict_mandate_simulation=False, five_second_trial=False
+):
     dsn = os.environ.get("WORKER_BUILDER_TEST_POSTGRES_DSN")
     if not dsn:
         pytest.skip("dedicated WORKER_BUILDER_TEST_POSTGRES_DSN required")
     now = [datetime(2026, 9, 14, 13, 30, tzinfo=timezone.utc)]
+    clock_anchor = time.monotonic()
+    if five_second_trial:
+        strict_mandate_simulation = True
 
     def clock():
+        if five_second_trial:
+            return now[0] + timedelta(seconds=time.monotonic() - clock_anchor)
         return now[0]
 
     account = str(uuid4())
@@ -168,7 +176,8 @@ def paper_built_worker(tmp_path, monkeypatch, *, strict_mandate_simulation=False
     class BrokerClock(datetime):
         @classmethod
         def now(cls, tz=None):
-            return now[0] if tz else now[0].replace(tzinfo=None)
+            observed = clock()
+            return observed if tz else observed.replace(tzinfo=None)
 
     monkeypatch.setattr("portfolio.broker.datetime", BrokerClock)
     monkeypatch.setenv("STRATEGY_COUNCIL_MIN_SUPPORT", "1")
@@ -204,6 +213,8 @@ def paper_built_worker(tmp_path, monkeypatch, *, strict_mandate_simulation=False
         "EXECUTION_MAX_ORDER_SHARES": "1",
         "EXECUTION_MAX_SYMBOL_POSITION_SHARES": "1",
     }
+    if five_second_trial:
+        env["RUNTIME_BUS_DRAIN_TIMEOUT_SECONDS"] = "5"
     if strict_mandate_simulation:
         env.update(EXECUTION_MARKET_HOURS_GUARD="true", EXECUTION_REQUIRE_PAPER_ACCOUNT="true")
     from agents.config import AgentRuntimeConfig
