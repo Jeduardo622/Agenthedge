@@ -448,22 +448,25 @@ class PostgresJournal:
     def require_submission_ready(self, account_id: str, mode: str) -> None:
         """Read-only admission: explicit v2 schema and existing namespace required."""
         with postgres_connection(self.dsn) as conn, conn.cursor() as cur:
-            cur.execute("SELECT version FROM ah_execution_schema")
-            row = cur.fetchone()
-            if (
-                not row
-                or row[0] not in {2, 3, 4, 5, 6}
-                or (row[0] in {5, 6} and not _supported_reconciliation_schema(cur, row))
-            ):
-                raise RecoveryRequired("PostgreSQL journal migration v2 required")
-        self.snapshot_with_timestamp(account_id, mode)
+            self._require_submission_ready(cur, account_id, mode)
+
+    def _require_submission_ready(self, cur: CursorLike, account_id: str, mode: str) -> None:
+        cur.execute("SELECT version FROM ah_execution_schema")
+        row = cur.fetchone()
+        if (
+            not row
+            or row[0] not in {2, 3, 4, 5, 6}
+            or (row[0] in {5, 6} and not _supported_reconciliation_schema(cur, row))
+        ):
+            raise RecoveryRequired("PostgreSQL journal migration v2 required")
+        self._snapshot_with_timestamp(cur, account_id, mode)
 
     def require_dispatch_ready(self, bus: "PostgresMessageBus", account_id: str, mode: str) -> None:
         if bus.namespace != (account_id, mode):
             raise RecoveryRequired("bus must bind the exact journal namespace")
         bus.assert_same_datastore(self.dsn)
-        self.require_submission_ready(account_id, mode)
         with postgres_connection(self.dsn) as conn, conn.cursor() as cur:
+            self._require_submission_ready(cur, account_id, mode)
             cur.execute("SELECT version FROM ah_execution_schema")
             row = cur.fetchone()
             if (
@@ -1088,6 +1091,7 @@ class PostgresJournal:
         *,
         decision_time: datetime,
         reduction_policy: "ReductionPolicy | None" = None,
+        paper_mandate: "PaperMandate | None" = None,
     ) -> datetime:
         """Recheck a committed claim without treating uncertainty as new permission."""
         from .reconciliation import aware
@@ -1108,6 +1112,56 @@ class PostgresJournal:
                 decision + timedelta(seconds=time.monotonic() - entered),
                 expected_status="unknown",
             )
+            if paper_mandate is not None:
+                experiment = self._paper_experiment_state(cur, account_id, mode, paper_mandate)
+                cur.execute(
+                    "SELECT intents.payload,orders.state FROM ah_execution_intents intents "
+                    "JOIN ah_execution_orders orders USING(account_id,mode,client_order_id) "
+                    "WHERE intents.account_id=%s AND intents.mode=%s "
+                    "AND intents.client_order_id=%s AND intents.status='unknown'",
+                    (account_id, mode, client_order_id),
+                )
+                claimed = cur.fetchone()
+                if not claimed:
+                    raise RecoveryRequired("unknown paper mandate intent identity")
+                payload, order = _mapping(claimed[0]), _mapping(claimed[1])
+                reservation = _reservation(order["initial_reservation"])
+                quantity = (
+                    reservation.remaining_quantity
+                    if reservation.side == "buy"
+                    else -reservation.remaining_quantity
+                )
+                client_field = (
+                    "reduction_client_order_id"
+                    if reduction_policy is not None
+                    else "director_approval_id"
+                )
+                if (
+                    reservation.order_id != client_order_id
+                    or payload.get(client_field) != client_order_id
+                    or payload.get("paper_mandate_hash") != paper_mandate.content_hash
+                    or payload.get("symbol") != reservation.symbol
+                    or payload.get("side", reservation.side) != reservation.side
+                    or as_decimal(payload.get("quantity")) != quantity
+                    or as_decimal(payload.get("price")) != reservation.worst_price
+                ):
+                    raise ValueError("paper mandate request differs from its durable reservation")
+                # The complete proof was checked above under this same account lock.
+                # Only this exact pristine own UNKNOWN claim may differ from that base.
+                view = self._reconciliation_view(
+                    cur,
+                    account_id,
+                    mode,
+                    exclude_prepared=client_order_id,
+                    expected_status="unknown",
+                )
+                paper_mandate.require_order(
+                    reservation.symbol,
+                    quantity,
+                    reservation.worst_price,
+                    experiment,
+                    self._reservations_from_states(view["orders"], terminal_proven=True),
+                )
             if reduction_policy is not None:
                 cur.execute(
                     "SELECT payload FROM ah_execution_intents WHERE account_id=%s AND mode=%s "
@@ -1471,18 +1525,24 @@ class PostgresJournal:
         """Consistent projection and operational DB write time; never event time."""
         _namespace(account_id, mode)
         with postgres_connection(self.dsn) as conn, conn.cursor() as cur:
-            cur.execute("SELECT version FROM ah_execution_schema")
-            version = cur.fetchone()
-            stamp = "projection_updated_at" if version and int(str(version[0])) >= 2 else "NULL"
-            cur.execute(
-                "SELECT projection," + stamp + " FROM ah_execution_accounts "
-                "WHERE account_id=%s AND mode=%s",
-                (account_id, mode),
-            )
-            row = cur.fetchone()
-            if not row:
-                raise RecoveryRequired("namespace has no explicit genesis")
-            return _state(_mapping(row[0])), cast(datetime | None, row[1])
+            return self._snapshot_with_timestamp(cur, account_id, mode)
+
+    def _snapshot_with_timestamp(
+        self, cur: CursorLike, account_id: str, mode: str
+    ) -> tuple[AccountingState, datetime | None]:
+        _namespace(account_id, mode)
+        cur.execute("SELECT version FROM ah_execution_schema")
+        version = cur.fetchone()
+        stamp = "projection_updated_at" if version and int(str(version[0])) >= 2 else "NULL"
+        cur.execute(
+            "SELECT projection," + stamp + " FROM ah_execution_accounts "
+            "WHERE account_id=%s AND mode=%s",
+            (account_id, mode),
+        )
+        row = cur.fetchone()
+        if not row:
+            raise RecoveryRequired("namespace has no explicit genesis")
+        return _state(_mapping(row[0])), cast(datetime | None, row[1])
 
     def snapshot(self, account_id: str, mode: str) -> AccountingState:
         return _state(self._account(account_id, mode)[0])

@@ -626,7 +626,11 @@ class AgentRuntime:
             self._state_sink.heartbeat(status="release_blocked")
             return
         target_event_id = self.bus.high_watermark()
-        for agent in self._agents:
+        tick_agents = self._agents
+        if self.config.execution_mode in {"paper_broker", "live"}:
+            # Finish Execution's reconciliation before Director publishes new work.
+            tick_agents = sorted(self._agents, key=lambda agent: agent.name != "execution")
+        for agent in tick_agents:
             if self._kill_switch_reason:
                 self.logger.warning("kill switch engaged during tick; aborting remaining agents")
                 break

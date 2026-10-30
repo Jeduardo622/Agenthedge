@@ -136,14 +136,33 @@ class InstalledArtifacts:
         if Path(inspect.getfile(type(runtime))).resolve() != root / "src/agents/runtime.py":
             raise ValueError("runtime does not execute the configured installed checkout")
 
-        def git(*args: str) -> str:
-            return subprocess.check_output(
-                ["git", "-C", str(root), *args], text=True, stderr=subprocess.DEVNULL
-            ).strip()
-
-        if git("rev-parse", "HEAD") != trust.expected.sha or git(
-            "status", "--porcelain", "--untracked-files=all", "--", "src"
-        ):
+        status = subprocess.check_output(
+            [
+                "git",
+                "-C",
+                str(root),
+                "status",
+                "--porcelain=v2",
+                "--branch",
+                "--untracked-files=all",
+                "--",
+                "src",
+            ],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        )
+        found_oid = False
+        for line in status.splitlines():
+            if not line.startswith("# "):
+                raise ValueError("installed source must match the exact clean release")
+            header = line[2:].split(maxsplit=1)
+            if not header:
+                raise ValueError("installed source must match the exact clean release")
+            if header[0] == "branch.oid":
+                if found_oid or line != f"# branch.oid {trust.expected.sha}":
+                    raise ValueError("installed source must match the exact clean release")
+                found_oid = True
+        if not found_oid:
             raise ValueError("installed source must match the exact clean release")
 
     def bind(self, runtime: AgentRuntime, trust: ReleaseTrust) -> None:

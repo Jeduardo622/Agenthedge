@@ -427,19 +427,8 @@ class ExecutionAgent(BaseAgent):
         execution_snapshot = None
         if self._paper_mandate is not None:
             try:
-                state = journal.paper_experiment_state(account, mode, self._paper_mandate)
-                reservations = tuple(
-                    item
-                    for item in journal.reservations(account, mode)
-                    if item.order_id != order.client_order_id
-                )
-                self._paper_mandate.require_order(
-                    order.symbol,
-                    order.quantity if order.side == "buy" else -order.quantity,
-                    order.limit_price,
-                    state,
-                    reservations,
-                )
+                if mode != "paper_broker":
+                    raise ValueError("paper mandate requires paper broker mode")
                 execution_snapshot = cast(Any, self.context.ingestion).revalidate_order(
                     order.symbol, order.side, as_decimal(order.limit_price)
                 )
@@ -458,6 +447,7 @@ class ExecutionAgent(BaseAgent):
                     reduction_policy=(
                         self._reduction_policy if self._authorized_reduction(payload) else None
                     ),
+                    paper_mandate=self._paper_mandate,
                 )
             except (RecoveryRequired, ValueError, ArithmeticError):
                 self._reject("execution_reconciliation_required", payload)

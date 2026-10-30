@@ -482,16 +482,28 @@ class PostgresMessageBus(MessageBus):
             raise ValueError("target_event_id must be non-negative")
         if timeout_seconds < 0:
             raise ValueError("timeout_seconds must be non-negative")
+        if target_event_id == 0:
+            return True
         deadline = time.monotonic() + timeout_seconds
-        while True:
-            if self._subscriptions_caught_up(
-                target_event_id=target_event_id,
-                subscription_scope=subscription_scope,
-            ):
-                return True
-            if time.monotonic() >= deadline:
-                return False
-            time.sleep(self._poll_interval_seconds)
+        # Only this wait owns the read-only polling session. End every check's
+        # transaction before sleeping so later acknowledgements remain visible.
+        with postgres_connection(self._dsn) as conn:
+            try:
+                while True:
+                    caught_up = self._subscriptions_caught_up(
+                        target_event_id=target_event_id,
+                        subscription_scope=subscription_scope,
+                        connection=conn,
+                    )
+                    conn.commit()
+                    if caught_up:
+                        return True
+                    if time.monotonic() >= deadline:
+                        return False
+                    time.sleep(self._poll_interval_seconds)
+            except BaseException:
+                conn.rollback()
+                raise
 
     def delivery_retry_rate(self, window_seconds: float = 300.0) -> float:
         if window_seconds <= 0:
@@ -841,11 +853,14 @@ class PostgresMessageBus(MessageBus):
         *,
         target_event_id: int,
         subscription_scope: Sequence[str] | None,
+        connection: ConnectionLike | None = None,
     ) -> bool:
         if target_event_id == 0:
             return True
         scope_ids = [sid for sid in (subscription_scope or []) if sid]
-        with postgres_connection(self._dsn) as conn:
+        with (
+            postgres_connection(self._dsn) if connection is None else nullcontext(connection)
+        ) as conn:
             with conn.cursor() as cur:
                 if scope_ids:
                     cur.execute(

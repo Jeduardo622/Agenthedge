@@ -9,6 +9,7 @@ import inspect
 import json
 import os
 import subprocess
+import time
 from dataclasses import asdict, replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -30,8 +31,10 @@ from ops.commands import migrate_control_commands
 from ops.release_gate import ReleaseIdentity
 from ops.runtime_data import RuntimeMarketData, public_provider_config
 from ops.worker_builder import WorkerPaths, build_worker
+from ops.worker_config import parse_session_controls
 from portfolio.accounting import AccountingState
 from portfolio.journal import PostgresJournal
+from risk.session_store import PostgresSessionRisk
 from tests.backtest.test_datasets import manifest, price_record, record, risk_contract
 from tests.ops.release_fixtures import paper_release
 from tests.ops.test_release_gate import KEY, digest, sign
@@ -150,13 +153,27 @@ def _authority(args, config, policy, now):
 
 
 @pytest.fixture
-def paper_built_worker(tmp_path, monkeypatch):
+def paper_built_worker(
+    tmp_path,
+    monkeypatch,
+    *,
+    strict_mandate_simulation=False,
+    five_second_trial=False,
+    already_observed_opening=False,
+):
     dsn = os.environ.get("WORKER_BUILDER_TEST_POSTGRES_DSN")
     if not dsn:
         pytest.skip("dedicated WORKER_BUILDER_TEST_POSTGRES_DSN required")
     now = [datetime(2026, 9, 14, 13, 30, tzinfo=timezone.utc)]
+    # An explicitly prepared intraday scenario observes OPEN before elapsed time
+    # starts. The original cold-start trial still advances throughout setup.
+    clock_anchor = None if already_observed_opening else time.monotonic()
+    if five_second_trial:
+        strict_mandate_simulation = True
 
     def clock():
+        if (five_second_trial or already_observed_opening) and clock_anchor is not None:
+            return now[0] + timedelta(seconds=time.monotonic() - clock_anchor)
         return now[0]
 
     account = str(uuid4())
@@ -168,7 +185,8 @@ def paper_built_worker(tmp_path, monkeypatch):
     class BrokerClock(datetime):
         @classmethod
         def now(cls, tz=None):
-            return now[0] if tz else now[0].replace(tzinfo=None)
+            observed = clock()
+            return observed if tz else observed.replace(tzinfo=None)
 
     monkeypatch.setattr("portfolio.broker.datetime", BrokerClock)
     monkeypatch.setenv("STRATEGY_COUNCIL_MIN_SUPPORT", "1")
@@ -204,6 +222,10 @@ def paper_built_worker(tmp_path, monkeypatch):
         "EXECUTION_MAX_ORDER_SHARES": "1",
         "EXECUTION_MAX_SYMBOL_POSITION_SHARES": "1",
     }
+    if five_second_trial:
+        env["RUNTIME_BUS_DRAIN_TIMEOUT_SECONDS"] = "5"
+    if strict_mandate_simulation:
+        env.update(EXECUTION_MARKET_HOURS_GUARD="true", EXECUTION_REQUIRE_PAPER_ACCOUNT="true")
     from agents.config import AgentRuntimeConfig
 
     config = AgentRuntimeConfig.from_env_for_recovery(env)
@@ -215,6 +237,7 @@ def paper_built_worker(tmp_path, monkeypatch):
             dates.append(bounds)
         day -= timedelta(days=1)
     prior = dates[0][1]
+    metadata_at = now[0] - timedelta(minutes=1) if strict_mandate_simulation else prior
     rows = [price_record(str(close.date()), close.date(), close) for _, close in reversed(dates)]
     rows += [
         record(
@@ -228,23 +251,23 @@ def paper_built_worker(tmp_path, monkeypatch):
         record(
             "class",
             "risk_classification",
-            event_at=prior.isoformat(),
-            available=prior,
+            event_at=metadata_at.isoformat(),
+            available=metadata_at,
             asset_type="etf",
         ),
         record(
             "adv",
             "risk_liquidity",
-            event_at=prior.isoformat(),
-            available=prior,
+            event_at=metadata_at.isoformat(),
+            available=metadata_at,
             average_daily_volume="1000000",
         ),
         record(
             "sectors",
             "etf_sector_map",
-            event_at=prior.isoformat(),
-            available=prior,
-            as_of=prior.date().isoformat(),
+            event_at=metadata_at.isoformat(),
+            available=metadata_at,
+            as_of=metadata_at.date().isoformat(),
             weights={"technology": "0.40", "other": "0.60"},
         ),
     ]
@@ -253,10 +276,20 @@ def paper_built_worker(tmp_path, monkeypatch):
             row["source"] = "alpaca:iex"
     contract = risk_contract()
     contract["policy"] = {}
+    if strict_mandate_simulation:
+        contract.update(
+            freshness_seconds={"mark": 5, "classification": 86400, "liquidity": 86400},
+            artifact_ttl_seconds=5,
+        )
+    research_manifest = manifest(rows, risk_contract=contract)
+    if strict_mandate_simulation:
+        research_manifest.update(
+            created_at=now[0].isoformat(),
+            coverage_start=dates[-1][1].date().isoformat(),
+            coverage_end=prior.date().isoformat(),
+        )
     bundle = tmp_path / "research.json"
-    bundle.write_text(
-        json.dumps({"manifest": manifest(rows, risk_contract=contract), "records": rows})
-    )
+    bundle.write_text(json.dumps({"manifest": research_manifest, "records": rows}))
     provider_config = DataProviderConfig.from_env(env)
     data = tmp_path / "data.json"
     data.write_text(
@@ -300,6 +333,31 @@ def paper_built_worker(tmp_path, monkeypatch):
         ),
         clock=clock,
     )
+    if already_observed_opening:
+        controls = parse_session_controls(document["session_control"])
+        observer = PostgresSessionRisk(
+            journal,
+            account_id=account,
+            mode="paper_broker",
+            policy=ingestion.policy,
+            max_mark_age=controls.max_mark_age,
+            boundary_grace=controls.boundary_grace,
+            window_sessions=controls.window_sessions,
+            max_drawdown=controls.max_drawdown,
+            control_timeout=controls.control_timeout,
+            paper_mandate=approved,
+        )
+        opened_at = now[0]
+        opening_market = ingestion.opening_market_inputs(opened_at)
+        assert clock() == opened_at and opening_market.as_of == opened_at
+        observation = observer.observe(opening_market, now=opened_at)
+        assert observer.status() == observation
+        assert observation.observed_at == opened_at and observation.checkpoint == 0
+        assert observation.experiment is not None
+        assert not journal.recovery_required(account, "paper_broker")
+        # Start once, before either worker build and either signed authority.
+        # Never rebase a decision clock or backdate an already elapsed opening.
+        clock_anchor = time.monotonic()
     _authority(args, config, ingestion.policy, now[0])
     prototype = build_worker(**args)
     try:
